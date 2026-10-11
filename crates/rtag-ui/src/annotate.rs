@@ -4,6 +4,11 @@
 //! it, Delete or X removes it. Rectangle (R) draws a box from two clicks or one drag; Shift makes a
 //! square and Alt draws from the centre. Esc first cancels the shape being drawn, then clears the
 //! selection, then returns to Select. Ctrl+Z and Ctrl+Y undo and redo.
+//!
+//! Holding Q or the right mouse button opens a pie at the cursor: with Select active the tool pie
+//! (then the label pie), with a drawing tool its options pie, with a shape selected the label pie
+//! to relabel it. Release or flick picks; a quick tap repeats the last tool and label. Shift+Q
+//! opens only the label pie.
 
 use std::collections::HashMap;
 
@@ -17,7 +22,11 @@ use rtag_core::{
 };
 use web_sys::CanvasRenderingContext2d;
 
-use crate::viewer::{context_2d, typing_in_a_field};
+use crate::{
+    pie::{LabelSearch, Pie, PieAction, PieItem, PieMenu, SearchEntry, now},
+    viewer::{context_2d, typing_in_a_field},
+};
+use rtag_core::pie::{Compass, FLICK_DISTANCE, is_tap};
 
 /// How far from a handle or a shape (in screen pixels) a click still hits it.
 const HANDLE_REACH: f64 = 8.0;
@@ -34,6 +43,16 @@ pub enum Tool {
     Rectangle,
 }
 
+impl Tool {
+    /// The shape this tool draws; `None` for Select.
+    pub fn shape_type(self) -> Option<ShapeType> {
+        match self {
+            Tool::Select => None,
+            Tool::Rectangle => Some(ShapeType::Rectangle),
+        }
+    }
+}
+
 /// The annotations of the open image and everything that changes them. All changes go through
 /// the undo history.
 #[derive(Clone, Copy)]
@@ -48,6 +67,12 @@ pub struct Editor {
     pub revision: RwSignal<u64>,
     /// A short hint for the user, e.g. why a shape could not be drawn.
     pub notice: RwSignal<Option<String>>,
+    /// Rectangle options from the options pie: always square, always from the centre. Shift and
+    /// Alt invert them while drawing.
+    pub square: RwSignal<bool>,
+    pub from_centre: RwSignal<bool>,
+    /// The last drawing tool and label, repeated by a tap of the pie key.
+    pub last: RwSignal<Option<(Tool, i64)>>,
 }
 
 impl Editor {
@@ -60,6 +85,9 @@ impl Editor {
             label: RwSignal::new(label),
             revision: RwSignal::new(0),
             notice: RwSignal::new(None),
+            square: RwSignal::new(false),
+            from_centre: RwSignal::new(false),
+            last: RwSignal::new(None),
         }
     }
 
@@ -211,10 +239,267 @@ pub fn AnnotationLayer(
                 index,
                 annotation: Annotation::manual(label, Shape::Rectangle(rect)),
             });
-            editor.selected.set(Some(index));
         };
 
+    // Pie menus. `pending_tool` waits for its label after the tool pie; `relabel` is the shape
+    // whose label the label pie changes.
+    let pie = RwSignal::new(None::<Pie>);
+    let pointer = RwSignal::new(Point::new(0.0, 0.0));
+    let cursor_at = StoredValue::new(Point::new(0.0, 0.0));
+    let search = RwSignal::new(None::<Point>);
+    let pending_tool = StoredValue::new(None::<Tool>);
+    let relabel = StoredValue::new(None::<usize>);
+    let all_labels = StoredValue::new({
+        let mut sorted = labels.clone();
+        sorted.sort_by_key(|label| label.id);
+        sorted
+    });
+    let shape_type_of = move |index: usize| {
+        editor
+            .annotations
+            .with_untracked(|list| list.get(index).map(|annotation| annotation.shape.shape_type()))
+    };
+    // The shape the next label is for: the one being relabelled, the tool just picked, or the
+    // active tool's. `None` allows every label.
+    let target_shape = move || match (relabel.get_value(), pending_tool.get_value()) {
+        (Some(index), _) => shape_type_of(index),
+        (None, Some(tool)) => tool.shape_type(),
+        (None, None) => editor.tool.get_untracked().shape_type(),
+    };
+    let allows = |label: &Label, shape: Option<ShapeType>| shape.is_none_or(|shape| label.shape_types.contains(&shape));
+
+    let tool_pie = move |centre: Point, held: bool| {
+        let current = editor.tool.get_untracked();
+        let item = |slot, name: &str, key: &str, tool: Option<Tool>| PieItem {
+            slot,
+            name: name.to_owned(),
+            key: Some(key.to_owned()),
+            swatch: None,
+            enabled: tool.is_some(),
+            current: tool == Some(current),
+            action: tool.map_or(PieAction::Keep, PieAction::Tool),
+        };
+        // The approved layout; tools of later tickets keep their places, disabled.
+        let items = vec![
+            item(Compass::N, "Select", "V", Some(Tool::Select)),
+            item(Compass::NE, "Rectangle", "R", Some(Tool::Rectangle)),
+            item(Compass::E, "Polygon", "P", None),
+            item(Compass::SE, "Points", ".", None),
+            item(Compass::S, "Polyline", "L", None),
+            item(Compass::SW, "Brush", "B", None),
+            item(Compass::W, "Eraser", "E", None),
+            item(Compass::NW, "Tag", "T", None),
+        ];
+        Pie { label: "Tools", items, centre, wide: false, held, opened_at: now() }
+    };
+    let label_pie = move |centre: Point, held: bool| {
+        let shape = target_shape();
+        let current = editor.label.get_untracked();
+        let slots = [Compass::N, Compass::NE, Compass::E, Compass::SE, Compass::S, Compass::SW, Compass::W, Compass::NW];
+        let mut items: Vec<PieItem> = all_labels.with_value(|labels| {
+            let shown = if labels.len() > slots.len() { slots.len() - 1 } else { slots.len() };
+            labels
+                .iter()
+                .take(shown)
+                .zip(slots)
+                .map(|(label, slot)| PieItem {
+                    slot,
+                    name: label.name.clone(),
+                    key: label.hotkey.clone(),
+                    swatch: Some(label.color.clone()),
+                    enabled: allows(label, shape),
+                    current: current == Some(label.id),
+                    action: PieAction::Label(label.id),
+                })
+                .collect()
+        });
+        if all_labels.with_value(|labels| labels.len() > slots.len()) {
+            items.push(PieItem {
+                slot: Compass::NW,
+                name: "More…".to_owned(),
+                key: Some("/".to_owned()),
+                swatch: None,
+                enabled: true,
+                current: false,
+                action: PieAction::MoreLabels,
+            });
+        }
+        Pie { label: "Labels", items, centre, wide: false, held, opened_at: now() }
+    };
+    let options_pie = move |centre: Point, held: bool| {
+        let option = |slot, name: &str, key: Option<&str>, enabled, current, action| PieItem {
+            slot,
+            name: name.to_owned(),
+            key: key.map(str::to_owned),
+            swatch: None,
+            enabled,
+            current,
+            action,
+        };
+        let items = vec![
+            option(Compass::N, "2-point", None, true, true, PieAction::Keep),
+            option(Compass::E, "3-point oriented", None, false, false, PieAction::Keep),
+            option(Compass::S, "From center", Some("Alt"), true, editor.from_centre.get_untracked(), PieAction::ToggleFromCentre),
+            option(Compass::W, "Square", Some("Shift"), true, editor.square.get_untracked(), PieAction::ToggleSquare),
+        ];
+        Pie { label: "Rectangle options", items, centre, wide: true, held, opened_at: now() }
+    };
+
+    let close_pie = move || {
+        pie.set(None);
+        search.set(None);
+        pending_tool.set_value(None);
+        relabel.set_value(None);
+    };
+    let open_pie = move |held: bool, labels_only: bool| {
+        close_pie();
+        let centre = cursor_at.get_value();
+        let selected = editor.selected.get_untracked().filter(|_| editor.tool.get_untracked() == Tool::Select);
+        let opened = if labels_only || selected.is_some() {
+            relabel.set_value(selected);
+            label_pie(centre, held)
+        } else if editor.tool.get_untracked() == Tool::Select {
+            tool_pie(centre, held)
+        } else {
+            options_pie(centre, held)
+        };
+        pointer.set(centre);
+        pie.set(Some(opened));
+    };
+    let relabel_shape = move |index: usize, id: i64| {
+        let Some(old) = editor.annotations.with_untracked(|list| list.get(index).cloned()) else { return };
+        if old.label != id {
+            let new = Annotation { label: id, ..old.clone() };
+            editor.apply(Edit::Replace { index, before: old, after: new });
+        }
+    };
+    let finish_label = move |id: i64| {
+        let (relabelling, tool) = (relabel.get_value(), pending_tool.get_value());
+        let shape = target_shape();
+        let usable = all_labels.with_value(|labels| labels.iter().any(|label| label.id == id && allows(label, shape)));
+        close_pie();
+        if !usable {
+            return;
+        }
+        match (relabelling, tool) {
+            (Some(index), _) => relabel_shape(index, id),
+            (None, Some(tool)) => {
+                editor.tool.set(tool);
+                editor.label.set(Some(id));
+            }
+            (None, None) => editor.label.set(Some(id)),
+        }
+    };
+    let choose = move |action: PieAction| {
+        let centre = pie.get_untracked().map_or(cursor_at.get_value(), |open| open.centre);
+        pie.set(None);
+        match action {
+            PieAction::Tool(Tool::Select) => {
+                close_pie();
+                editor.tool.set(Tool::Select);
+            }
+            // Picking a tool opens the label pie in the same spot.
+            PieAction::Tool(tool) => {
+                pending_tool.set_value(Some(tool));
+                pie.set(Some(label_pie(centre, false)));
+            }
+            PieAction::Label(id) => finish_label(id),
+            PieAction::MoreLabels => search.set(Some(centre)),
+            PieAction::ToggleSquare => {
+                close_pie();
+                editor.square.update(|on| *on = !*on);
+            }
+            PieAction::ToggleFromCentre => {
+                close_pie();
+                editor.from_centre.update(|on| *on = !*on);
+            }
+            PieAction::Keep => close_pie(),
+        }
+    };
+    // Releasing the pie key or button: a tap repeats the last tool and label (or leaves the pie
+    // open for clicking), otherwise the highlighted item is picked.
+    let release = move || {
+        let Some(open) = pie.get_untracked().filter(|open| open.held) else { return };
+        let at = pointer.get_untracked();
+        if is_tap(now() - open.opened_at, at.x - open.centre.x, at.y - open.centre.y) {
+            match editor.last.get_untracked() {
+                Some((tool, label)) if open.label == "Tools" => {
+                    close_pie();
+                    editor.tool.set(tool);
+                    editor.label.set(Some(label));
+                }
+                _ => pie.update(|open| {
+                    if let Some(open) = open {
+                        open.held = false;
+                    }
+                }),
+            }
+            return;
+        }
+        match open.highlighted(at).map(|item| item.action.clone()) {
+            Some(action) => choose(action),
+            None => close_pie(),
+        }
+    };
+    let search_entries = move || {
+        let shape = target_shape();
+        all_labels.with_value(|labels| {
+            labels
+                .iter()
+                .map(|label| SearchEntry {
+                    id: label.id,
+                    name: label.name.clone(),
+                    color: label.color.clone(),
+                    key: label.hotkey.clone(),
+                    enabled: allows(label, shape),
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+    // Remember the last drawing tool and label for a tap of the pie key.
+    Effect::new(move |_| {
+        let tool = editor.tool.get();
+        if let (true, Some(label)) = (tool != Tool::Select, editor.label.get()) {
+            editor.last.set(Some((tool, label)));
+        }
+    });
+    let pointer_moves = window_event_listener(ev::pointermove, move |ev| {
+        let at = Point::new(f64::from(ev.client_x()), f64::from(ev.client_y()));
+        cursor_at.set_value(at);
+        let Some(open) = pie.get_untracked() else { return };
+        pointer.set(at);
+        // Flick: moving far enough while still holding picks at once.
+        if open.held
+            && (at.x - open.centre.x).hypot(at.y - open.centre.y) >= FLICK_DISTANCE
+            && let Some(action) = open.highlighted(at).map(|item| item.action.clone())
+        {
+            choose(action);
+        }
+    });
+    let pointer_ups = window_event_listener(ev::pointerup, move |ev| {
+        if ev.button() == 2 {
+            release();
+        }
+    });
+    let key_ups = window_event_listener(ev::keyup, move |ev| {
+        if ev.key().eq_ignore_ascii_case("q") {
+            release();
+        }
+    });
+    on_cleanup(move || {
+        pointer_moves.remove();
+        pointer_ups.remove();
+        key_ups.remove();
+    });
+
     let on_pointer_down = move |ev: ev::PointerEvent| {
+        // The right button opens the pie, like holding Q.
+        if ev.button() == 2 {
+            ev.prevent_default();
+            cursor_at.set_value(Point::new(f64::from(ev.client_x()), f64::from(ev.client_y())));
+            open_pie(true, false);
+            return;
+        }
         // Middle button and Space+drag belong to the viewer (pan); let them bubble up.
         if ev.button() != 0 || space_held.get_untracked() {
             return;
@@ -244,8 +529,8 @@ pub fn AnnotationLayer(
                         start,
                         current: start,
                         dragged: false,
-                        square: ev.shift_key(),
-                        from_centre: ev.alt_key(),
+                        square: ev.shift_key() != editor.square.get_untracked(),
+                        from_centre: ev.alt_key() != editor.from_centre.get_untracked(),
                     });
                 }
             },
@@ -294,8 +579,8 @@ pub fn AnnotationLayer(
                     start,
                     current: inside(point),
                     dragged: dragged || (moved && ev.buttons() & 1 == 1),
-                    square: ev.shift_key(),
-                    from_centre: ev.alt_key(),
+                    square: ev.shift_key() != editor.square.get_untracked(),
+                    from_centre: ev.alt_key() != editor.from_centre.get_untracked(),
                 });
             }
             Gesture::Moving {
@@ -392,6 +677,27 @@ pub fn AnnotationLayer(
         }
         let key = ev.key();
         let command = ev.ctrl_key() || ev.meta_key();
+        // While a pie is open its keys pick its items; Esc closes it.
+        if let Some(open) = pie.get_untracked() {
+            match key.as_str() {
+                "Escape" => close_pie(),
+                "q" | "Q" => {}
+                _ => match open.item_for_key(&key).map(|item| item.action.clone()) {
+                    Some(action) => choose(action),
+                    None => return,
+                },
+            }
+            ev.prevent_default();
+            return;
+        }
+        if key.eq_ignore_ascii_case("q") && !command && !ev.alt_key() {
+            if !ev.repeat() {
+                // Shift+Q opens only the label pie, and it stays open for a click.
+                open_pie(!ev.shift_key(), ev.shift_key());
+            }
+            ev.prevent_default();
+            return;
+        }
         match key.as_str() {
             "z" | "Z" if command && ev.shift_key() => editor.redo(),
             "z" | "Z" if command => editor.undo(),
@@ -530,6 +836,10 @@ pub fn AnnotationLayer(
         Tool::Select => cursor.get(),
     };
     view! {
+        <PieMenu pie=pie pointer=pointer on_pick=choose on_close=close_pie />
+        {move || search.get().map(|at| view! {
+            <LabelSearch at=at entries=search_entries() on_pick=finish_label on_close=close_pie />
+        })}
         <canvas
             class="annotations"
             node_ref=canvas_ref

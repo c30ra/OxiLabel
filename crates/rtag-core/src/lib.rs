@@ -3,6 +3,7 @@
 pub mod annotation;
 pub mod geometry;
 pub mod history;
+pub mod pie;
 pub mod pyramid;
 pub mod view;
 

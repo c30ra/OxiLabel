@@ -1,6 +1,7 @@
 mod annotate;
 mod api;
 mod pages;
+mod pie;
 mod viewer;
 
 use leptos::prelude::*;
