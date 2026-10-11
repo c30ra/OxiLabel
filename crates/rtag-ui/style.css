@@ -18,7 +18,7 @@ code, .mono, kbd { font-family: var(--mono); }
 
 button {
   font: inherit; color: var(--text); background: none; border: 1px solid var(--border);
-  border-radius: 6px; height: 36px; padding: 0 14px; cursor: pointer;
+  border-radius: 6px; height: 36px; padding: 0 14px; cursor: pointer; white-space: nowrap;
 }
 button:hover:not(:disabled) { border-color: var(--border-strong); background: var(--raised); }
 button:disabled { opacity: .45; cursor: default; }
