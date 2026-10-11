@@ -1,0 +1,10 @@
+# YOLO detect dataset exported by rtag from project "Cells".
+# Class numbers are label ids minus one; unused numbers are placeholders.
+# Paths are relative to this file's folder.
+train: images/train
+val: images/train  # no images in the val subset
+names:
+  0: crack
+  1: finger
+  2: unused_3
+  3: "unsure: maybe"
