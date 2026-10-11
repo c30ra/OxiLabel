@@ -2036,6 +2036,8 @@ dependencies = [
  "leptos_router",
  "rtag-core",
  "serde",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]

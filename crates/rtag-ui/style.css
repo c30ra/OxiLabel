@@ -121,3 +121,15 @@ button.danger:hover:not(:disabled) { background: #F08A801F; border-color: var(--
 .report { padding: 16px 24px; border-block: 1px solid var(--border); }
 .report p { margin: 0 0 8px; }
 .failures { margin: 0; padding-left: 18px; color: var(--muted); }
+
+.grid a.open { display: block; color: inherit; text-decoration: none; }
+.grid.selecting a.open { cursor: pointer; }
+
+.workspace { position: fixed; inset: 0; display: flex; flex-direction: column; }
+.workspace .topbar { min-height: 44px; gap: 20px; }
+.workspace .actions { display: flex; gap: 12px; align-items: center; margin-left: auto; font-size: 13px; }
+.workspace .crumbs .current { max-width: 40ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+button.zoom { min-width: 5.5rem; height: 30px; }
+canvas.viewer { flex: 1; min-height: 0; width: 100%; display: block; background: #0E0E0F; touch-action: none; }
+canvas.viewer.pan-ready { cursor: grab; }
+canvas.viewer.panning { cursor: grabbing; }

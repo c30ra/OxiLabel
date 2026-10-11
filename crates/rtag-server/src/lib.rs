@@ -3,6 +3,7 @@ mod images;
 mod labels;
 mod projects;
 mod thumbnails;
+mod tiles;
 
 use std::{path::PathBuf, str::FromStr, time::Duration};
 
@@ -25,6 +26,7 @@ struct AppState {
     pool: SqlitePool,
     images_root: PathBuf,
     cache_dir: PathBuf,
+    pyramid_locks: tiles::GenerationLocks,
 }
 
 impl FromRef<AppState> for SqlitePool {
@@ -47,11 +49,17 @@ pub async fn app(config: Config) -> Result<Router, sqlx::Error> {
     let pool = options.connect_with(connect).await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
     tokio::spawn(images::backfill_file_info(pool.clone(), config.images_root.clone()));
-    let state = AppState { pool, images_root: config.images_root, cache_dir: config.cache_dir };
+    let state = AppState {
+        pool,
+        images_root: config.images_root,
+        cache_dir: config.cache_dir,
+        pyramid_locks: tiles::GenerationLocks::default(),
+    };
     Ok(Router::new()
         .merge(projects::routes())
         .merge(labels::routes())
         .merge(images::routes())
         .merge(thumbnails::routes())
+        .merge(tiles::routes())
         .with_state(state))
 }

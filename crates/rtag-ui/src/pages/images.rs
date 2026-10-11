@@ -208,7 +208,7 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>) -> impl IntoView {
                 Some(Ok(page)) => view! {
                     <ul class="grid" class:selecting=move || !selected.read().is_empty()>
                         {page.images.into_iter().enumerate().map(|(index, image)| {
-                            view! { <Tile image=image selected=selected on_click=move |shift| click(index, shift) /> }
+                            view! { <Tile project=project image=image selected=selected on_click=move |shift| click(index, shift) /> }
                         }).collect_view()}
                     </ul>
                 }
@@ -220,6 +220,7 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>) -> impl IntoView {
 
 #[component]
 fn Tile(
+    project: i64,
     image: Image,
     selected: RwSignal<BTreeSet<i64>>,
     on_click: impl Fn(bool) + Copy + Send + Sync + 'static,
@@ -231,20 +232,25 @@ fn Tile(
     details.extend(image.modified.clone());
     let is_selected = move || selected.read().contains(&id);
     view! {
-        // Once something is selected, a click anywhere on a tile adds to the selection.
+        // A click opens the image, unless something is selected: then it adds to the selection.
         <li title=details.join("\n") class:selected=is_selected
-            on:click=move |ev: MouseEvent| if !selected.read_untracked().is_empty() { on_click(ev.shift_key()) }>
+            on:click=move |ev: MouseEvent| if !selected.read_untracked().is_empty() {
+                ev.prevent_default();
+                on_click(ev.shift_key());
+            }>
             <input type="checkbox" class="pick" aria-label=format!("Select {name}") prop:checked=is_selected
                 on:click=move |ev: MouseEvent| {
                     ev.stop_propagation();
                     on_click(ev.shift_key());
                 } />
-            <img loading="lazy" alt="" src=format!("/api/images/{id}/thumbnail") />
-            <span class="caption">
-                <span class=if image.annotated { "status-dot done" } else { "status-dot" }
-                    title=if image.annotated { "Annotated" } else { "Not annotated" }></span>
-                <span class="name">{name.clone()}</span>
-            </span>
+            <a class="open" href=format!("/projects/{project}/images/{id}")>
+                <img loading="lazy" alt="" src=format!("/api/images/{id}/thumbnail") />
+                <span class="caption">
+                    <span class=if image.annotated { "status-dot done" } else { "status-dot" }
+                        title=if image.annotated { "Annotated" } else { "Not annotated" }></span>
+                    <span class="name">{name.clone()}</span>
+                </span>
+            </a>
         </li>
     }
 }

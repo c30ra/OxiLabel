@@ -1,5 +1,6 @@
 mod api;
 mod pages;
+mod viewer;
 
 use leptos::prelude::*;
 use leptos_router::{
@@ -7,7 +8,7 @@ use leptos_router::{
     path,
 };
 
-use pages::{ProjectPage, ProjectsPage, Tab};
+use pages::{ProjectPage, ProjectsPage, Tab, WorkspacePage};
 
 #[component]
 fn App() -> impl IntoView {
@@ -17,6 +18,7 @@ fn App() -> impl IntoView {
                 <Route path=path!("/") view=ProjectsPage />
                 <Route path=path!("/projects/:id") view=|| view! { <ProjectPage tab=Tab::Images /> } />
                 <Route path=path!("/projects/:id/labels") view=|| view! { <ProjectPage tab=Tab::Labels /> } />
+                <Route path=path!("/projects/:id/images/:image") view=WorkspacePage />
             </Routes>
         </Router>
     }

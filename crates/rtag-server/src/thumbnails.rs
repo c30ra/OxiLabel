@@ -43,13 +43,18 @@ fn cached_thumbnail(source: &Path, cached: &Path) -> Result<Vec<u8>, ApiError> {
     if let Ok(bytes) = fs::read(cached) {
         return Ok(bytes);
     }
-    let image = image::open(source).map_err(|err| match err {
-        image::ImageError::IoError(io) if io.kind() == std::io::ErrorKind::NotFound => ApiError::NotFound,
-        err => ApiError::Internal(format!("cannot decode {}: {err}", source.display())),
-    })?;
+    let image = open_image(source)?;
     let bytes = encode_thumbnail(&image).map_err(|err| ApiError::Internal(format!("cannot encode thumbnail: {err}")))?;
     write_atomically(cached, &bytes).map_err(|err| ApiError::Internal(format!("cannot cache thumbnail: {err}")))?;
     Ok(bytes)
+}
+
+/// Decodes a source image; a file that has gone missing is reported as not found.
+pub(crate) fn open_image(source: &Path) -> Result<DynamicImage, ApiError> {
+    image::open(source).map_err(|err| match err {
+        image::ImageError::IoError(io) if io.kind() == std::io::ErrorKind::NotFound => ApiError::NotFound,
+        err => ApiError::Internal(format!("cannot decode {}: {err}", source.display())),
+    })
 }
 
 fn encode_thumbnail(image: &DynamicImage) -> image::ImageResult<Vec<u8>> {
@@ -62,7 +67,7 @@ fn encode_thumbnail(image: &DynamicImage) -> image::ImageResult<Vec<u8>> {
 }
 
 /// Writes through a temporary file so a concurrent reader never sees a partial thumbnail.
-fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let dir = path.parent().expect("cache file has a parent folder");
     fs::create_dir_all(dir)?;
     let mut temporary = tempfile::NamedTempFile::new_in(dir)?;

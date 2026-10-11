@@ -27,6 +27,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/browse", get(browse))
         .route("/api/projects/{project}/imports", post(import_selection))
         .route("/api/projects/{project}/images", get(list_images))
+        .route("/api/projects/{project}/images/{image}", get(get_image))
         .route("/api/projects/{project}/image-ids", get(list_image_ids))
         .route("/api/projects/{project}/image-removals", post(remove_images))
 }
@@ -377,10 +378,7 @@ async fn list_images(
     push_filter(&mut count, project, &filter)?;
     let total: i64 = count.build().fetch_one(&mut *conn).await?.get("n");
 
-    let mut select = QueryBuilder::new(
-        "SELECT id, path, width, height, annotated, size, \
-         strftime('%Y-%m-%d %H:%M', modified_at, 'unixepoch', 'localtime') AS modified FROM images",
-    );
+    let mut select = QueryBuilder::new(IMAGE_COLUMNS);
     push_filter(&mut select, project, &filter)?;
     select
         .push(" ORDER BY path LIMIT ")
@@ -388,19 +386,36 @@ async fn list_images(
         .push(" OFFSET ")
         .push_bind(page.offset.max(0));
     let rows = select.build().fetch_all(&mut *conn).await?;
-    let images = rows
-        .iter()
-        .map(|row| Image {
-            id: row.get("id"),
-            path: row.get("path"),
-            width: row.get("width"),
-            height: row.get("height"),
-            annotated: row.get("annotated"),
-            size: row.get::<Option<i64>, _>("size").map(|size| size as u64),
-            modified: row.get("modified"),
-        })
-        .collect();
-    Ok(Json(ImagePage { total, images }))
+    Ok(Json(ImagePage { total, images: rows.iter().map(image_from_row).collect() }))
+}
+
+/// Selects the columns `image_from_row` reads; callers append the conditions.
+const IMAGE_COLUMNS: &str = "SELECT id, path, width, height, annotated, size, \
+     strftime('%Y-%m-%d %H:%M', modified_at, 'unixepoch', 'localtime') AS modified FROM images";
+
+fn image_from_row(row: &sqlx::sqlite::SqliteRow) -> Image {
+    Image {
+        id: row.get("id"),
+        path: row.get("path"),
+        width: row.get("width"),
+        height: row.get("height"),
+        annotated: row.get("annotated"),
+        size: row.get::<Option<i64>, _>("size").map(|size| size as u64),
+        modified: row.get("modified"),
+    }
+}
+
+async fn get_image(
+    State(pool): State<SqlitePool>,
+    UrlPath((project, image)): UrlPath<(i64, i64)>,
+) -> Result<Json<Image>, ApiError> {
+    let row = sqlx::query(&format!("{IMAGE_COLUMNS} WHERE id = ? AND project_id = ?"))
+        .bind(image)
+        .bind(project)
+        .fetch_optional(&pool)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(image_from_row(&row)))
 }
 
 /// Ids of every image matching the filter, in path order; used to select all of them at once.
