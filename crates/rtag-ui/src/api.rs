@@ -9,24 +9,31 @@ struct ErrorBody {
 }
 
 pub async fn get<T: DeserializeOwned>(url: &str) -> Result<T, String> {
-    read_json(check(Request::get(url).send().await).await?).await
+    read_json(check(Request::get(&absolute(url)).send().await).await?).await
 }
 
 /// GET with query parameters, which are URL-encoded.
 pub async fn get_with_query<T: DeserializeOwned>(url: &str, query: &[(&str, &str)]) -> Result<T, String> {
-    read_json(check(Request::get(url).query(query.iter().copied()).send().await).await?).await
+    read_json(check(Request::get(&absolute(url)).query(query.iter().copied()).send().await).await?).await
 }
 
 pub async fn post<B: Serialize, T: DeserializeOwned>(url: &str, body: &B) -> Result<T, String> {
-    send_json(Request::post(url), body).await
+    send_json(Request::post(&absolute(url)), body).await
 }
 
 pub async fn put<B: Serialize, T: DeserializeOwned>(url: &str, body: &B) -> Result<T, String> {
-    send_json(Request::put(url), body).await
+    send_json(Request::put(&absolute(url)), body).await
 }
 
 pub async fn delete(url: &str) -> Result<(), String> {
-    check(Request::delete(url).send().await).await.map(|_| ())
+    check(Request::delete(&absolute(url)).send().await).await.map(|_| ())
+}
+
+/// Prefixes a server path with the page's origin. Browsers resolve relative request URLs
+/// themselves, but some headless engines (Obscura, used for UI tests) do not.
+fn absolute(path: &str) -> String {
+    let origin = leptos::prelude::window().location().origin().unwrap_or_default();
+    format!("{origin}{path}")
 }
 
 async fn send_json<B: Serialize, T: DeserializeOwned>(builder: RequestBuilder, body: &B) -> Result<T, String> {
