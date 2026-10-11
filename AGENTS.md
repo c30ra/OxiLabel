@@ -11,3 +11,9 @@ Default five-label vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, 
 ### Domain docs
 
 Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+## Testing
+
+- `cargo test --workspace --exclude rtag-ui`: unit tests (core) and HTTP API tests (server, in-memory SQLite).
+- `scripts/ui-test.sh [name filter]`: builds the server and UI, then runs the browser flows in `scripts/ui-tests/tests.mjs` against a throwaway server and a headless Firefox driven over WebDriver BiDi (Node 22, no npm packages). Set `RTAG_UI_TEST_BROWSER` for another Firefox-family browser, e.g. `"flatpak run app.zen_browser.zen"`. Failures keep their screenshots under `target/ui-tests/`.
+- In Leptos `view!` attributes, wrap any value containing `>` (closures with `=>`, `>=`, turbofish) in `{}`, or the macro ends the tag early.

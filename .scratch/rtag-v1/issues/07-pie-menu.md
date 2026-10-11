@@ -4,7 +4,7 @@
 
 **Blocked by:** 05
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] Hold-and-flick selects a tool, then a label, and enters editing mode with that tool
 - [x] A quick tap of the pie key repeats the last tool and label
@@ -12,7 +12,7 @@
 - [x] The label ring shows about 8 slices with pinned and recent labels first, plus a "more" slice or type-to-search for the rest
 - [x] Number hotkeys select labels directly, and a label-ring key opens only the label ring
 - [x] A selected shape's label can be changed from the pie menu
-- [ ] Menu geometry and slice selection logic are unit-tested in the core crate, and canvas interaction tests cover the main flow
+- [x] Menu geometry and slice selection logic are unit-tested in the core crate, and canvas interaction tests cover the main flow
 
-**Implementation note (built together with ticket 05 after review):** `rtag_core::pie` holds the geometry (compass slots, nearest-slot pick with an 18 px dead zone, flick at 150 px, tap under 220 ms), unit-tested. The UI (`pie.rs`, wired in `annotate.rs`) follows the approved design: rounded buttons at compass positions, a ring whose arc follows the pointer. Hold Q or the right mouse button: with Select active and nothing selected the tool pie opens (later tools are shown disabled in their final places); picking a tool opens the label pie in the same spot; release or flick picks; a tap repeats the last tool and label (or leaves the pie open for clicking). With a drawing tool active, Q opens its options pie (rectangle: 2-point, 3-point oriented placeholder, From center and Square toggles that Alt and Shift invert). With a shape selected, Q opens the label pie and relabels it. Shift+Q is the label-ring key. While a pie is open, item keys (tool letters, label hotkeys, "/" for More…) pick and Esc closes. The label pie shows 7 labels in label-id order (stable positions for muscle memory, rather than recent-first) plus "More…" with type-to-search when there are more than 8; labels that don't allow the shape stay in place, disabled. Browser flows were checked in headless Zen; the interaction scripts are not yet part of the repository.
+**Implementation note (built together with ticket 05 after review):** `rtag_core::pie` holds the geometry (compass slots, nearest-slot pick with an 18 px dead zone, flick at 150 px, tap under 220 ms), unit-tested. The UI (`pie.rs`, wired in `annotate.rs`) follows the approved design: rounded buttons at compass positions, a ring whose arc follows the pointer. Hold Q or the right mouse button: with Select active and nothing selected the tool pie opens (later tools are shown disabled in their final places); picking a tool opens the label pie in the same spot; release or flick picks; a tap repeats the last tool and label (or leaves the pie open for clicking). With a drawing tool active, Q opens its options pie (rectangle: 2-point, 3-point oriented placeholder, From center and Square toggles that Alt and Shift invert). With a shape selected, Q opens the label pie and relabels it. Shift+Q is the label-ring key. While a pie is open, item keys (tool letters, label hotkeys, "/" for More…) pick and Esc closes. The label pie shows 7 labels in label-id order (stable positions for muscle memory, rather than recent-first) plus "More…" with type-to-search when there are more than 8; labels that don't allow the shape stay in place, disabled. Browser flows live in `scripts/ui-tests` (run with `scripts/ui-test.sh`).
 
