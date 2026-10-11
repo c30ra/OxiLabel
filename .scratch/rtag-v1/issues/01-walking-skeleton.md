@@ -4,11 +4,11 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] Building the container image and running it with Podman serves the web UI on a port, with data stored on a mounted volume
-- [ ] I can create a Project with a name, see it in a Projects list, and delete it after confirmation
+- [x] I can create a Project with a name, see it in a Projects list, and delete it after confirmation
 - [x] The Cargo workspace has the four crates, and the core crate compiles for both native and WASM
 - [x] API tests run against an in-memory SQLite database and cover project create, list and delete
 
-**Implementation note:** the UI is a client-side Leptos app built with `scripts/build-ui.sh` (wasm-bindgen-cli), not trunk, because trunk fails to compile with GCC 16 on the dev machine. The create/list/delete UI compiles and is served, but has not yet been exercised in a browser.
+**Implementation note:** the UI is a client-side Leptos app built with `scripts/build-ui.sh` (wasm-bindgen-cli), not trunk, because trunk fails to compile with GCC 16 on the dev machine. The create/list/delete UI was verified manually in a browser.
