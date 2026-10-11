@@ -8,7 +8,7 @@
 
 use std::{collections::BTreeMap, fmt::Write as _, io};
 
-use crate::{ExportInput, ExportSink, Exporter, Subset};
+use crate::{ExportInput, ExportSink, Exporter, ImageMode, Subset};
 
 pub struct YoloDetect;
 
@@ -19,6 +19,12 @@ impl Exporter for YoloDetect {
 
     fn name(&self) -> &'static str {
         "YOLO detect"
+    }
+
+    /// Ultralytics finds each label file by replacing `/images/` with `/labels/` in the image path,
+    /// so the images must be in the export next to the labels.
+    fn image_modes(&self) -> &'static [ImageMode] {
+        &[ImageMode::Symlink, ImageMode::Copy]
     }
 
     fn export(&self, input: &ExportInput, sink: &mut dyn ExportSink) -> io::Result<()> {

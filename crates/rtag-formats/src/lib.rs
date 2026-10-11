@@ -27,6 +27,11 @@ pub trait Exporter: Send + Sync {
     fn id(&self) -> &'static str;
     /// Name shown to people.
     fn name(&self) -> &'static str;
+    /// Which image options the format supports, the default first. Formats whose files only make
+    /// sense next to the images (like YOLO) leave out `ImageMode::None`.
+    fn image_modes(&self) -> &'static [ImageMode] {
+        &[ImageMode::None, ImageMode::Symlink, ImageMode::Copy]
+    }
     /// Writes the export. The manifest is written by [`run_export`], not by the exporter.
     fn export(&self, input: &ExportInput, sink: &mut dyn ExportSink) -> io::Result<()>;
 }

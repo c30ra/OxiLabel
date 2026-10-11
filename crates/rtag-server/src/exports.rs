@@ -39,7 +39,11 @@ async fn list_exporters() -> Json<Vec<ExportFormat>> {
     Json(
         rtag_formats::exporters()
             .iter()
-            .map(|exporter| ExportFormat { id: exporter.id().to_owned(), name: exporter.name().to_owned() })
+            .map(|exporter| ExportFormat {
+                id: exporter.id().to_owned(),
+                name: exporter.name().to_owned(),
+                image_modes: exporter.image_modes().to_vec(),
+            })
             .collect(),
     )
 }
@@ -59,6 +63,16 @@ async fn create_export(
     let exporter = rtag_formats::exporter(&request.format)
         .ok_or_else(|| ApiError::BadRequest(format!("unknown export format \"{}\"", request.format)))?;
     request.split.validate().map_err(ApiError::BadRequest)?;
+    let mode = match request.include_images {
+        None => exporter.image_modes()[0],
+        Some(mode) if exporter.image_modes().contains(&mode) => mode,
+        Some(_) => {
+            return Err(ApiError::BadRequest(format!(
+                "{} needs the image files next to the labels: include them as links or copies",
+                exporter.name()
+            )));
+        }
+    };
     let labels = labels::project_labels(&mut conn, project).await?;
 
     let mut annotations: HashMap<i64, Vec<Annotation>> = HashMap::new();
@@ -109,7 +123,6 @@ async fn create_export(
     let input = ExportInput { project: project_name.clone(), labels, images, split: request.split };
     let export_dir = state.export_dir.clone();
     let format = request.format.clone();
-    let mode = request.include_images;
     let (name, dir, manifest) = tokio::task::spawn_blocking(move || -> Result<_, ApiError> {
         let (name, dir) = new_folder(&export_dir, &format!("{}-{format}-{stamp}", slug(&project_name)))
             .map_err(|err| ApiError::Internal(format!("cannot create export folder: {err}")))?;

@@ -24,7 +24,19 @@ pub fn ExportDialog(
     let formats = LocalResource::new(|| api::get::<Vec<ExportFormat>>("/api/exporters"));
     let format = RwSignal::new(String::from("yolo-detect"));
     let which = RwSignal::new(if selected.read_untracked().is_empty() { Which::All } else { Which::Selected });
-    let mode = RwSignal::new(ImageMode::None);
+    let mode = RwSignal::new(ImageMode::Symlink);
+    // The image options the chosen format supports (its default first).
+    let supported = move || {
+        let id = format.get();
+        formats.get().and_then(Result::ok).and_then(|list| list.into_iter().find(|f| f.id == id)).map(|f| f.image_modes).unwrap_or_default()
+    };
+    // Keep the choice valid when the format (or the list of formats) changes.
+    Effect::new(move |_| {
+        let modes = supported();
+        if !modes.is_empty() && !modes.contains(&mode.get_untracked()) {
+            mode.set(modes[0]);
+        }
+    });
     let split = RwSignal::new(Split::default());
     let busy = RwSignal::new(false);
     let outcome = RwSignal::new(None::<Result<ExportResult, String>>);
@@ -36,7 +48,12 @@ pub fn ExportDialog(
             Which::WithAnnotations => ImageSelection::WithAnnotations,
             Which::Selected => ImageSelection::Ids { ids: selected.get_untracked().into_iter().collect() },
         };
-        let request = ExportRequest { format: format.get_untracked(), images, include_images: mode.get_untracked(), split: split.get_untracked() };
+        let request = ExportRequest {
+            format: format.get_untracked(),
+            images,
+            include_images: Some(mode.get_untracked()),
+            split: split.get_untracked(),
+        };
         busy.set(true);
         spawn_local(async move {
             outcome.set(Some(api::post::<_, ExportResult>(&format!("/api/projects/{project}/exports"), &request).await));
@@ -68,7 +85,7 @@ pub fn ExportDialog(
     };
     let image_choice = move |label: &'static str, hint: &'static str, value: ImageMode| {
         view! {
-            <label class="choice">
+            <label class="choice" class:hidden=move || !supported().contains(&value)>
                 <input type="radio" name="include" prop:checked=move || mode.get() == value on:change=move |_| mode.set(value) />
                 <span>{label}<small class="muted">{hint}</small></span>
             </label>

@@ -234,14 +234,17 @@ tests.push({
     };
     await clickText('.actions button', 'Export');
     await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.export-dialog')`), 'the export dialog');
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.export-dialog option')`), 'the formats');
+    const offered = await t.b.json(`[...document.querySelectorAll('.export-dialog fieldset:last-of-type .choice')].filter((c) => getComputedStyle(c).display !== 'none').map((c) => [c.querySelector('span').firstChild.textContent, c.querySelector('input').checked])`);
+    equal(offered, [['Links to the originals', true], ['Copies', false]], 'image options for YOLO');
     await clickText('.export-dialog .choice', 'Images with annotations');
-    await clickText('.export-dialog .choice', 'Links to the originals');
     await clickText('.export-dialog .dialog-foot button', 'Export');
     const report = await t.b.waitFor(() => t.b.eval(`document.querySelector('.export-dialog .report')?.textContent`), 'the export result');
     if (!report.includes('Exported 1 images') || !report.includes('1 annotations')) throw new Error(`report: ${report}`);
     const href = await t.b.eval(`document.querySelector('.export-dialog a[download]').getAttribute('href')`);
     const zip = Buffer.from(await (await fetch(t.base + href)).arrayBuffer());
     equal(zip.subarray(0, 2).toString(), 'PK', 'zip signature');
+    if (!zip.includes('images/train/') && !zip.includes('images/val/')) throw new Error('the zip has no images');
   },
 });
 

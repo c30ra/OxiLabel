@@ -56,14 +56,14 @@ async fn the_available_formats_are_listed() {
     let app = test_app().await;
     let (status, formats) = call(&app, Method::GET, "/api/exporters", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(formats, json!([{"id": "yolo-detect", "name": "YOLO detect"}]));
+    assert_eq!(formats, json!([{"id": "yolo-detect", "name": "YOLO detect", "image_modes": ["symlink", "copy"]}]));
 }
 
 #[tokio::test]
 async fn exporting_all_images_writes_labels_data_yaml_and_a_manifest() {
     let app = test_app().await;
     let (project, _) = setup(&app).await;
-    let (status, result) = export(&app, project, all_train(json!({"kind": "all"}), "none")).await;
+    let (status, result) = export(&app, project, all_train(json!({"kind": "all"}), "symlink")).await;
     assert_eq!(status, StatusCode::OK, "{result}");
     assert_eq!((result["image_count"].clone(), result["annotation_count"].clone()), (json!(3), json!(3)));
     assert_eq!(result["subsets"], json!({"train": 3, "val": 0, "test": 0}));
@@ -79,18 +79,37 @@ async fn exporting_all_images_writes_labels_data_yaml_and_a_manifest() {
     assert_eq!(manifest["project"], "Cells");
     assert_eq!(manifest["image_count"], 3);
     assert!(manifest["created"].as_str().unwrap().ends_with('Z'));
-    assert!(!dir.join("images").exists());
+    // Every label file has its image at the matching path, as Ultralytics expects.
+    assert!(dir.join("images/train/set__a.png").exists());
+}
+
+#[tokio::test]
+async fn yolo_needs_the_images_and_links_them_by_default() {
+    let app = test_app().await;
+    let (project, _) = setup(&app).await;
+    let (status, body) = export(&app, project, all_train(json!({"kind": "all"}), "none")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "YOLO detect needs the image files next to the labels: include them as links or copies");
+
+    let request = json!({"format": "yolo-detect", "images": {"kind": "all"}, "split": {"train": 100, "val": 0, "test": 0}});
+    let (status, result) = export(&app, project, request).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    let link = folder(&app, &result).join("images/train/set__a.png");
+    assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+    let manifest: Value = serde_json::from_str(&fs::read_to_string(folder(&app, &result).join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["images"], "symlink");
 }
 
 #[tokio::test]
 async fn the_export_can_be_limited_to_annotated_or_chosen_images() {
     let app = test_app().await;
     let (project, ids) = setup(&app).await;
-    let (_, annotated) = export(&app, project, all_train(json!({"kind": "with_annotations"}), "none")).await;
+    let (_, annotated) = export(&app, project, all_train(json!({"kind": "with_annotations"}), "symlink")).await;
     assert_eq!(annotated["image_count"], 2);
     assert!(!folder(&app, &annotated).join("labels/train/set__c.txt").exists());
+    assert!(!folder(&app, &annotated).join("images/train/set__c.png").exists());
 
-    let (_, chosen) = export(&app, project, all_train(json!({"kind": "ids", "ids": [ids[2]]}), "none")).await;
+    let (_, chosen) = export(&app, project, all_train(json!({"kind": "ids", "ids": [ids[2]]}), "symlink")).await;
     assert_eq!((chosen["image_count"].clone(), chosen["annotation_count"].clone()), (json!(1), json!(0)));
     // Each export gets its own folder.
     assert_ne!(annotated["path"], chosen["path"]);

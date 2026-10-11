@@ -80,8 +80,9 @@ pub struct ExportRequest {
     /// An exporter id, e.g. `yolo-detect`.
     pub format: String,
     pub images: ImageSelection,
+    /// Whether to include the image files; `None` uses the format's default.
     #[serde(default)]
-    pub include_images: ImageMode,
+    pub include_images: Option<ImageMode>,
     #[serde(default)]
     pub split: Split,
 }
@@ -104,4 +105,6 @@ pub struct ExportResult {
 pub struct ExportFormat {
     pub id: String,
     pub name: String,
+    /// The image options this format supports; the first is its default.
+    pub image_modes: Vec<ImageMode>,
 }

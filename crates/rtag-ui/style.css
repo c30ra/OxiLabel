@@ -196,3 +196,4 @@ button.small { height: 26px; padding: 0 10px; font-size: 12px; }
 .export-path { display: block; padding: 8px 10px; background: var(--ground); border: 1px solid var(--border); border-radius: 6px; word-break: break-all; user-select: all; }
 a.button { display: inline-flex; align-items: center; height: 36px; padding: 0 14px; border-radius: 6px; text-decoration: none; border: 1px solid var(--border); color: var(--text); }
 a.button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+.hidden { display: none !important; }
