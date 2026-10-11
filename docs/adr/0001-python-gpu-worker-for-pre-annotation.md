@@ -1,0 +1,3 @@
+# Model inference runs in a Python worker, not in the Rust server
+
+Pre-annotation runs in a separate Python worker process (Ultralytics/PyTorch on the local ROCm GPU) that the Rust server calls over local HTTP/JSON and that ships in the same Podman image. This lets rtag reuse existing Ultralytics models (detect, OBB, segment) and the user's GPU unchanged, which is the main thing CVAT's separate-container model blocked. We rejected ONNX Runtime inside Rust because ROCm/MIGraphX support is the least reliable part of that stack; the narrow worker interface (images in, pre-annotations out) keeps that option open later.

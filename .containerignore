@@ -1,0 +1,4 @@
+target/
+crates/rtag-ui/dist/
+data/
+.venv/
