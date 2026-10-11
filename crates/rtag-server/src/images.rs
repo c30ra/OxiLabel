@@ -10,7 +10,10 @@ use axum::{
     extract::{Path as UrlPath, Query, State},
     routing::{get, post},
 };
-use rtag_core::{BrowseEntry, BrowseListing, EntryKind, Image, ImagePage, ImportFailure, ImportReport, ImportRequest};
+use rtag_core::{
+    BrowseEntry, BrowseListing, EntryKind, Image, ImagePage, ImportFailure, ImportReport, ImportRequest, RemovalReport,
+    RemovalRequest,
+};
 use serde::Deserialize;
 use sqlx::{Row, SqliteConnection, SqlitePool};
 
@@ -24,6 +27,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/browse", get(browse))
         .route("/api/projects/{project}/imports", post(import_selection))
         .route("/api/projects/{project}/images", get(list_images))
+        .route("/api/projects/{project}/image-removals", post(remove_images))
 }
 
 /// Images in the project, as a set of paths and a set of content hashes.
@@ -122,6 +126,29 @@ async fn import_selection(
     }
     tx.commit().await?;
     Ok(Json(report))
+}
+
+async fn remove_images(
+    State(pool): State<SqlitePool>,
+    UrlPath(project): UrlPath<i64>,
+    Json(request): Json<RemovalRequest>,
+) -> Result<Json<RemovalReport>, ApiError> {
+    let mut tx = pool.begin().await?;
+    projects::ensure_exists(&mut tx, project).await?;
+    if request.ids.is_empty() {
+        return Err(ApiError::BadRequest("select at least one image".into()));
+    }
+    let mut removed = 0;
+    for id in request.ids {
+        removed += sqlx::query("DELETE FROM images WHERE id = ? AND project_id = ?")
+            .bind(id)
+            .bind(project)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+    }
+    tx.commit().await?;
+    Ok(Json(RemovalReport { removed }))
 }
 
 fn image_root(state: &AppState) -> Result<PathBuf, ApiError> {

@@ -138,6 +138,18 @@ pub struct ImportRequest {
     pub paths: Vec<String>,
 }
 
+/// Images to take out of a project. The files on disk are not touched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemovalRequest {
+    pub ids: Vec<i64>,
+}
+
+/// How many images a removal took out; ids not in the project are ignored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemovalReport {
+    pub removed: u64,
+}
+
 /// The folders and images directly inside one folder of the image root.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowseListing {

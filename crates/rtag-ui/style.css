@@ -67,7 +67,17 @@ label.check { display: inline-flex; gap: 6px; align-items: center; }
 
 .pager { display: flex; gap: 12px; align-items: center; justify-content: flex-end; margin-bottom: 12px; color: var(--muted); }
 .grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr)); gap: 12px; }
-.grid li { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.grid li { position: relative; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.grid li.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.grid.selecting li { cursor: pointer; }
+.grid .pick { position: absolute; top: 8px; left: 8px; margin: 0; opacity: 0; }
+.grid li:hover .pick, .grid .pick:focus-visible, .grid.selecting .pick { opacity: 1; }
+.grid-head { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 12px; }
+.grid-head .pager { margin: 0 0 0 auto; }
+.selection-bar { flex: 1 1 480px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 6px 6px 6px 14px; background: var(--accent-soft); border: 1px solid var(--accent); border-radius: 8px; }
+.selection-bar .grow { flex: 1 1 200px; }
+button.danger { border-color: var(--error); color: var(--error); }
+button.danger:hover:not(:disabled) { background: #F08A801F; border-color: var(--error); }
 .grid img { display: block; width: 100%; aspect-ratio: 3 / 2; object-fit: contain; background: #0E0E0F; }
 .caption { display: flex; gap: 6px; align-items: center; padding: 6px 8px; font-size: 12px; }
 .caption .name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }

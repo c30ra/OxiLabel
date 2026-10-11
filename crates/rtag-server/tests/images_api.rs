@@ -290,3 +290,72 @@ async fn browsing_for_a_project_marks_images_already_imported() {
         ])
     );
 }
+
+async fn remove(app: &TestApp, project: i64, ids: &[i64]) -> (StatusCode, Value) {
+    call(app, Method::POST, &format!("/api/projects/{project}/image-removals"), Some(json!({"ids": ids}))).await
+}
+
+fn ids(page: &Value) -> Vec<i64> {
+    page["images"].as_array().unwrap().iter().map(|image| image["id"].as_i64().unwrap()).collect()
+}
+
+#[tokio::test]
+async fn removing_images_takes_them_out_of_the_project_but_keeps_the_files() {
+    let app = test_app().await;
+    let project = new_project(&app).await;
+    for (index, name) in ["a", "b", "c"].iter().enumerate() {
+        write_png(app.images.path(), &format!("set/{name}.png"), 2, 2, index as u8);
+    }
+    import(&app, project, "set").await;
+    let all = ids(&list(&app, project, "").await);
+
+    let (status, report) = remove(&app, project, &[all[0], all[2]]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(report, json!({"removed": 2}));
+
+    let page = list(&app, project, "").await;
+    assert_eq!(page["total"], 1);
+    assert_eq!(paths(&page), vec!["set/b.png"]);
+    assert!(app.images.path().join("set/a.png").exists());
+}
+
+#[tokio::test]
+async fn removed_images_can_be_imported_again() {
+    let app = test_app().await;
+    let project = new_project(&app).await;
+    write_png(app.images.path(), "set/a.png", 2, 2, 1);
+    import(&app, project, "set").await;
+    remove(&app, project, &ids(&list(&app, project, "").await)).await;
+
+    let (_, listing) = call(&app, Method::GET, &format!("/api/browse?path=set&project={project}"), None).await;
+    assert_eq!(listing["entries"][0]["imported"], false);
+    let (_, report) = import(&app, project, "set").await;
+    assert_eq!(report["added"], 1);
+}
+
+#[tokio::test]
+async fn images_of_another_project_are_not_removed() {
+    let app = test_app().await;
+    let first = new_project(&app).await;
+    let second = new_project(&app).await;
+    write_png(app.images.path(), "set/a.png", 2, 2, 1);
+    import(&app, first, "set").await;
+    let theirs = ids(&list(&app, first, "").await);
+
+    let (status, report) = remove(&app, second, &theirs).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(report, json!({"removed": 0}));
+    assert_eq!(list(&app, first, "").await["total"], 1);
+}
+
+#[tokio::test]
+async fn removing_nothing_is_rejected_and_unknown_projects_are_not_found() {
+    let app = test_app().await;
+    let project = new_project(&app).await;
+    let (status, body) = remove(&app, project, &[]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "select at least one image");
+
+    let (status, _) = remove(&app, 999, &[1]).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
