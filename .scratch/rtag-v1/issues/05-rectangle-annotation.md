@@ -11,4 +11,5 @@
 - [ ] Ctrl+Z and Ctrl+Y undo and redo within the image using a client-side command history
 - [ ] Annotations autosave when I change or leave the image, with a visible saved, unsaved or failed indicator
 - [ ] A save based on a stale version is rejected with a clear message and nothing is overwritten
+- [ ] Deleting a label that is used by annotations tells me how many annotations would be removed and requires confirmation (moved from ticket 02)
 - [ ] Unit tests cover shape geometry and the command history, and API tests cover save and version conflicts

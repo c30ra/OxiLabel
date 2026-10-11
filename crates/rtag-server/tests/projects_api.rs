@@ -1,32 +1,8 @@
-use axum::{
-    Router,
-    body::Body,
-    http::{Method, Request, StatusCode},
-};
-use http_body_util::BodyExt;
-use serde_json::{Value, json};
-use tower::ServiceExt;
+mod common;
 
-async fn test_app() -> Router {
-    rtag_server::app("sqlite::memory:").await.unwrap()
-}
-
-async fn call(app: &Router, method: Method, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
-    let mut req = Request::builder().method(method).uri(uri);
-    let body = match body {
-        Some(v) => {
-            req = req.header("content-type", "application/json");
-            Body::from(v.to_string())
-        }
-        None => Body::empty(),
-    };
-    let res = app.clone().oneshot(req.body(body).unwrap()).await.unwrap();
-    let status = res.status();
-    let bytes = res.into_body().collect().await.unwrap().to_bytes();
-    let json = serde_json::from_slice(&bytes)
-        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()));
-    (status, json)
-}
+use axum::http::{Method, StatusCode};
+use common::{call, test_app};
+use serde_json::json;
 
 #[tokio::test]
 async fn created_project_appears_in_the_list() {
@@ -84,4 +60,17 @@ async fn malformed_project_body_is_rejected() {
     let app = test_app().await;
     let (status, _) = call(&app, Method::POST, "/api/projects", Some(json!({"title": "x"}))).await;
     assert!(status.is_client_error(), "got {status}");
+}
+
+#[tokio::test]
+async fn a_single_project_can_be_fetched() {
+    let app = test_app().await;
+    let (_, created) = call(&app, Method::POST, "/api/projects", Some(json!({"name": "Cracks"}))).await;
+
+    let (status, project) = call(&app, Method::GET, &format!("/api/projects/{}", created["id"]), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(project, created);
+
+    let (status, _) = call(&app, Method::GET, "/api/projects/999", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }

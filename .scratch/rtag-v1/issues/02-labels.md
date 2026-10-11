@@ -7,7 +7,9 @@
 **Status:** ready-for-agent
 
 - [ ] I can add, edit and remove labels in a project's label screen
-- [ ] Each label gets a numeric id that is never reused or renumbered, even after deleting other labels
-- [ ] A label can be restricted to certain shape types and flagged as an ignore label
-- [ ] Deleting a label that is in use tells me what would be removed and requires confirmation
-- [ ] API tests cover id stability across deletes and renames
+- [x] Each label gets a numeric id that is never reused or renumbered, even after deleting other labels
+- [x] A label can be restricted to certain shape types and flagged as an ignore label
+- [ ] ~~Deleting a label that is in use tells me what would be removed and requires confirmation~~ moved to ticket 05: no annotations exist before it. Deleting any label already asks for confirmation in the UI.
+- [x] API tests cover id stability across deletes and renames
+
+**Implementation note:** label ids are a per-project counter starting at 1, never reused (0 stays free for the mask background). Validation lives in `LabelDefinition::validated` in the core crate: non-blank unique name, `#rrggbb` color, single-key unique hotkey, at least one shape type. Omitted shape types mean all shapes are allowed.

@@ -1,0 +1,32 @@
+use axum::{
+    Json,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
+use serde_json::json;
+
+pub enum ApiError {
+    BadRequest(String),
+    NotFound,
+    Database(sqlx::Error),
+}
+
+impl From<sqlx::Error> for ApiError {
+    fn from(err: sqlx::Error) -> Self {
+        ApiError::Database(err)
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let (status, message) = match self {
+            ApiError::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
+            ApiError::NotFound => (StatusCode::NOT_FOUND, "not found".to_owned()),
+            ApiError::Database(err) => {
+                eprintln!("database error: {err}");
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_owned())
+            }
+        };
+        (status, Json(json!({ "error": message }))).into_response()
+    }
+}
