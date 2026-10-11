@@ -130,7 +130,7 @@ export const tests = [
       await t.b.click(...w.at(800, 500), { button: 2 });
       const state = await w.state();
       equal(state.pie, 'Tools', 'pie after a right-button tap without a last tool');
-      equal(state.pieItems.filter((item) => item.enabled).map((item) => item.name), ['Select', 'Rectangle', 'Polygon', 'Points', 'Polyline'], 'enabled tools');
+      equal(state.pieItems.filter((item) => item.enabled).map((item) => item.name), ['Select', 'Rectangle', 'Polygon', 'Points', 'Polyline', 'Circle'], 'enabled tools');
       equal(state.pieItems.length, 8, 'tool slots');
     },
   },
@@ -265,8 +265,9 @@ tests.push(
       ] }]);
       const [annotation] = await saved(t, (list) => list.length === 1, 'the polyline to be saved');
       equal(annotation.shape.type, 'polyline', 'type');
-      const [, second, third] = annotation.shape.points;
-      if (Math.abs(second.y - 300) > 0.5) throw new Error(`second point not snapped: ${JSON.stringify(second)}`);
+      const [first, second, third] = annotation.shape.points;
+      // Snapped flat: level with the first point, whatever screen rounding put that at.
+      if (Math.abs(second.y - first.y) > 1e-6) throw new Error(`second point not snapped: ${JSON.stringify([first, second])}`);
       equal(annotation.shape.points.length, 3, 'points (the double-click adds one)');
       near([third.x, third.y].map(Math.round), [600, 500], 2 / t.scale(w), 'last point');
     },
@@ -345,6 +346,94 @@ tests.push(
       const state = await w.state();
       equal(state.label, 'crack 1', 'label stays');
       if (!state.notice?.includes('cannot be used for polygon')) throw new Error(`notice: ${state.notice}`);
+    },
+  },
+);
+
+// Freehand polylines, single points, circles and the tool settings bar.
+const clickOption = async (t, text) => {
+  const rect = await t.b.json(`[...document.querySelectorAll('.tool-options button')].find((b) => b.textContent.startsWith(${JSON.stringify(text)})).getBoundingClientRect()`);
+  await t.b.click(rect.x + rect.width / 2, rect.y + rect.height / 2);
+};
+const toolOptions = (t) => t.b.eval(`[...document.querySelectorAll('.tool-options button')].map((b) => b.textContent.trim().replace(/\\s+/g, ' ') + (b.classList.contains('active') ? '*' : '')).join(' | ')`);
+
+tests.push(
+  {
+    name: 'the tool settings bar shows each tool\'s options',
+    async run(t) {
+      await openWorkspace(t.b, t.base, t.project);
+      const seen = {};
+      for (const key of ['r', 'p', 'l', '.', 'c']) {
+        await t.b.key(key);
+        seen[key] = await toolOptions(t);
+      }
+      equal(seen, {
+        r: '2-point* | 3-point oriented | From centerAlt | SquareShift',
+        p: 'Snap 15°Shift',
+        l: 'Click* | Freehand | Snap 15°Shift',
+        '.': 'Multiple* | Single point',
+        c: 'Centre and radius* | Diameter',
+      }, 'options per tool');
+    },
+  },
+  {
+    name: 'a freehand polyline places vertices at the chosen spacing while dragging',
+    async run(t) {
+      const w = await openWorkspace(t.b, t.base, t.project);
+      await t.b.key('l');
+      await clickOption(t, 'Freehand');
+      // ] then [ cancel out; set the spacing in the field instead.
+      await t.b.key(']');
+      await t.b.key('[');
+      const field = await t.b.json(`document.querySelector('.option-number input').getBoundingClientRect()`);
+      await t.b.click(field.x + field.width / 2, field.y + field.height / 2);
+      await t.b.key('a', [KEY.ctrl]);
+      for (const ch of '50') await t.b.key(ch);
+      await t.b.key(KEY.enter);
+      const path = [];
+      for (let x = 100; x <= 400; x += 25) path.push(w.at(x, 300));
+      await t.b.actions([{ type: 'pointer', id: 'mouse', actions: [
+        { type: 'pointerMove', x: Math.round(path[0][0]), y: Math.round(path[0][1]) }, { type: 'pointerDown', button: 0 },
+        ...path.slice(1).map(([x, y]) => ({ type: 'pointerMove', x: Math.round(x), y: Math.round(y), duration: 30 })),
+        { type: 'pointerUp', button: 0 },
+      ] }]);
+      const [annotation] = await saved(t, (list) => list.length === 1, 'the freehand polyline');
+      equal(annotation.shape.type, 'polyline', 'type');
+      const xs = annotation.shape.points.map((p) => p.x);
+      const gaps = xs.slice(1).map((x, i) => Math.round(x - xs[i]));
+      if (gaps.length < 5 || gaps.some((gap) => Math.abs(gap - 50) > 1)) throw new Error(`gaps ${JSON.stringify(gaps)}`);
+    },
+  },
+  {
+    name: 'single-point mode makes each click its own point annotation',
+    async run(t) {
+      const w = await openWorkspace(t.b, t.base, t.project);
+      await t.b.key('.');
+      await clickOption(t, 'Single point');
+      await t.b.click(...w.at(100, 100));
+      await t.b.click(...w.at(300, 200));
+      const list = await saved(t, (list) => list.length === 2, 'two point annotations');
+      equal(list.map((a) => [a.shape.type, a.shape.points.length]), [['points', 1], ['points', 1]], 'annotations');
+    },
+  },
+  {
+    name: 'circles are drawn from the centre or by their diameter, and resized by their handle',
+    async run(t) {
+      const w = await openWorkspace(t.b, t.base, t.project);
+      await t.b.key('c');
+      await t.b.drag(w.at(500, 500), w.at(600, 500));
+      let list = await saved(t, (list) => list.length === 1, 'the circle');
+      near([list[0].shape.centre.x, list[0].shape.centre.y, list[0].shape.radius].map(Math.round), [500, 500, 100], 2 / t.scale(w), 'centre and radius');
+      await clickOption(t, 'Diameter');
+      await t.b.click(...w.at(200, 200));
+      await t.b.click(...w.at(400, 200));
+      list = await saved(t, (list) => list.length === 2, 'the diameter circle');
+      near([list[1].shape.centre.x, list[1].shape.centre.y, list[1].shape.radius].map(Math.round), [300, 200, 100], 2 / t.scale(w), 'diameter circle');
+      await t.b.key('v');
+      await t.b.click(...w.at(500, 500));
+      await t.b.drag(w.at(600, 500), w.at(650, 500));
+      list = await saved(t, (list) => Math.round(list[0].shape.radius) >= 148, 'the radius change');
+      near([Math.round(list[0].shape.radius)], [150], 2 / t.scale(w), 'radius');
     },
   },
 );

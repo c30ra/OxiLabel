@@ -201,3 +201,18 @@ a.button.primary { background: var(--accent); border-color: var(--accent); color
 .label-menu li.disabled:hover { background: none; }
 /* Points icon: round dots. */
 .tool-rail .tool svg path { stroke-linecap: round; }
+
+/* Tool settings bar (Blender's tool header). */
+.tool-options { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; min-height: 40px; padding: 4px 16px 4px 72px; background: var(--panel); border-bottom: 1px solid var(--border); font-size: 13px; }
+.tool-options .tool-name { font-weight: 600; min-width: 5.5rem; }
+.tool-options .hint { font-size: 12px; }
+.tool-options button { height: 28px; padding: 0 10px; font-size: 12px; display: inline-flex; align-items: center; gap: 6px; }
+.tool-options button.active { background: var(--accent-soft); border-color: var(--accent); color: var(--text); }
+.tool-options kbd { min-width: 0; height: 16px; font-size: 10px; }
+.segmented { display: inline-flex; }
+.segmented button { border-radius: 0; margin-left: -1px; }
+.segmented button:first-child { border-radius: 6px 0 0 6px; margin-left: 0; }
+.segmented button:last-child { border-radius: 0 6px 6px 0; }
+.segmented button.active { position: relative; z-index: 1; }
+.option-number { display: inline-flex; align-items: center; gap: 6px; }
+.option-number input { width: 4.5rem; height: 28px; text-align: right; }

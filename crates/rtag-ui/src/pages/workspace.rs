@@ -12,6 +12,7 @@ use rtag_core::{
 use crate::{
     annotate::{AnnotationLayer, Editor, Tool},
     api,
+    tool_options::ToolOptions,
     viewer::TileViewer,
 };
 
@@ -242,6 +243,7 @@ fn Workspace(
                         on:click=toggle_zoom>{zoom_label}</button>
                 </div>
             </header>
+            <ToolOptions editor=editor />
             <div class="workspace-body">
                 <ToolRail editor=editor />
                 <TileViewer image=image view=view size=size space_held=space_held>
@@ -361,6 +363,7 @@ fn ToolRail(editor: Editor) -> impl IntoView {
             {tool_button(Tool::Rectangle, "Rectangle", "R", "M4 6h16v12H4z")}
             {tool_button(Tool::Polygon, "Polygon", "P", "M12 3l8 6-3 11H7L4 9z")}
             {tool_button(Tool::Polyline, "Polyline", "L", "M3 18l5-9 5 6 8-11")}
+            {tool_button(Tool::Circle, "Circle", "C", "M12 4a8 8 0 1 0 .01 0")}
             {tool_button(Tool::Points, "Points", ".", "M4.4 7a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0 M15.4 6a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0 M9.9 12.5a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0 M5.4 18a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0 M16.4 17a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0")}
         </nav>
     }

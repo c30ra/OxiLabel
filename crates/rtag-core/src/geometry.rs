@@ -45,6 +45,18 @@ pub fn snap_angle(from: Point, to: Point, step_degrees: f64) -> Point {
     Point::new(from.x + length * angle.cos(), from.y + length * angle.sin())
 }
 
+/// Points every `spacing` along the way from `last` towards `to`, not including `last` and
+/// stopping before `to` once less than `spacing` remains (freehand drawing with even vertices).
+pub fn steps_towards(last: Point, to: Point, spacing: f64) -> Vec<Point> {
+    let distance = last.distance(to);
+    if spacing.is_nan() || spacing <= 0.0 || distance < spacing {
+        return Vec::new();
+    }
+    let count = (distance / spacing).floor() as usize;
+    let (ux, uy) = ((to.x - last.x) / distance, (to.y - last.y) / distance);
+    (1..=count).map(|i| Point::new(last.x + ux * spacing * i as f64, last.y + uy * spacing * i as f64)).collect()
+}
+
 /// Shortest distance from `point` to the segment from `a` to `b`.
 pub fn distance_to_segment(point: Point, a: Point, b: Point) -> f64 {
     let (dx, dy) = (b.x - a.x, b.y - a.y);
@@ -287,6 +299,15 @@ mod tests {
         assert!(close(snapped, Point::new(15f64.to_radians().cos() * 50.0, 15f64.to_radians().sin() * 50.0)));
         assert!(close(snap_angle(from, Point::new(30.0, 2.0), 15.0), Point::new(30.0f64.hypot(2.0), 0.0)));
         assert!(close(snap_angle(from, Point::new(0.0, -20.0), 15.0), Point::new(0.0, -20.0)));
+    }
+
+    #[test]
+    fn freehand_steps_are_evenly_spaced() {
+        let steps = steps_towards(Point::new(0.0, 0.0), Point::new(25.0, 0.0), 10.0);
+        assert_eq!(steps, vec![Point::new(10.0, 0.0), Point::new(20.0, 0.0)]);
+        assert!(steps_towards(Point::new(0.0, 0.0), Point::new(9.0, 0.0), 10.0).is_empty());
+        let diagonal = steps_towards(Point::new(0.0, 0.0), Point::new(30.0, 40.0), 25.0);
+        assert!(close(diagonal[0], Point::new(15.0, 20.0)) && diagonal.len() == 2);
     }
 
     #[test]

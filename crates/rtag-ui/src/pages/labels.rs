@@ -12,6 +12,7 @@ fn shape_name(shape: ShapeType) -> &'static str {
         ShapeType::Polygon => "Polygon",
         ShapeType::Polyline => "Polyline",
         ShapeType::Points => "Points",
+        ShapeType::Circle => "Circle",
         ShapeType::Mask => "Mask",
         ShapeType::Tag => "Tag",
     }

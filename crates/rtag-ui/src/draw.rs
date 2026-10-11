@@ -30,6 +30,16 @@ pub fn shape(context: &CanvasRenderingContext2d, view: View, shape: &Shape, look
                 dot(context, view.to_screen(*point), look.color, if look.selected { POINT_RADIUS + 1.0 } else { POINT_RADIUS });
             }
         }
+        Shape::Circle { centre, radius } => {
+            let at = view.to_screen(*centre);
+            context.begin_path();
+            context.arc(at.x, at.y, radius * view.scale, 0.0, std::f64::consts::TAU).ok();
+            context.set_fill_style_str(look.color);
+            context.set_global_alpha(if look.selected { 0.22 } else { 0.12 });
+            context.fill();
+            context.set_global_alpha(1.0);
+            stroke(context, look, if look.selected { 2.5 } else { 1.5 });
+        }
         Shape::Polyline { points } => {
             trace(context, view, points, false);
             stroke(context, look, if look.selected { 3.0 } else { 2.0 });
@@ -106,6 +116,18 @@ pub fn rotation_handle(context: &CanvasRenderingContext2d, view: View, rect: Ori
     context.arc(handle.x, handle.y, 5.0, 0.0, std::f64::consts::TAU).ok();
     context.set_fill_style_str("#ffffff");
     context.fill();
+    context.stroke();
+}
+
+/// The round handle on a circle's right edge that changes its radius.
+pub fn radius_handle(context: &CanvasRenderingContext2d, view: View, centre: Point, radius: f64, color: &str) {
+    let at = view.to_screen(Point::new(centre.x + radius, centre.y));
+    context.begin_path();
+    context.arc(at.x, at.y, 5.0, 0.0, std::f64::consts::TAU).ok();
+    context.set_fill_style_str("#ffffff");
+    context.fill();
+    context.set_line_width(1.5);
+    context.set_stroke_style_str(color);
     context.stroke();
 }
 

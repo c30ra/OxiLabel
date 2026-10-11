@@ -31,17 +31,19 @@ pub enum ShapeType {
     Polygon,
     Polyline,
     Points,
+    Circle,
     Mask,
     Tag,
 }
 
 impl ShapeType {
-    pub const ALL: [ShapeType; 7] = [
+    pub const ALL: [ShapeType; 8] = [
         ShapeType::Rectangle,
         ShapeType::OrientedRectangle,
         ShapeType::Polygon,
         ShapeType::Polyline,
         ShapeType::Points,
+        ShapeType::Circle,
         ShapeType::Mask,
         ShapeType::Tag,
     ];

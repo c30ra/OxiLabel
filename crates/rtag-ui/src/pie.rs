@@ -29,6 +29,12 @@ pub enum PieAction {
     SetOriented(bool),
     /// Lines: always snap to 15°.
     ToggleSnap,
+    /// Polyline: drag to draw.
+    ToggleFreehand,
+    /// Points: one point per click.
+    ToggleSinglePoint,
+    /// Circle: two points are a diameter (true) or centre and radius (false).
+    SetDiameter(bool),
     /// Finish the polygon, polyline or points being drawn.
     FinishShape,
     /// Remove the last placed vertex.

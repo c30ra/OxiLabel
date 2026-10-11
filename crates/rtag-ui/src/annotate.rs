@@ -7,7 +7,9 @@
 //! drag, Shift square, Alt from the centre, or three points when "3-point oriented" is on),
 //! Polygon (P), Polyline (L) and Points (.), which take a click per vertex and finish with Enter
 //! or a double-click (a polygon also by clicking its first vertex); Backspace drops the last
-//! vertex and Shift snaps lines to 15°. Esc first cancels the shape being drawn, then clears the
+//! vertex and Shift snaps lines to 15°. Freehand polylines are dragged, with a vertex every
+//! "spacing" pixels (`[` and `]` change it); single-point mode makes each click one point.
+//! Circle (C) draws centre and radius (or a diameter) by a drag or two clicks. Esc first cancels the shape being drawn, then clears the
 //! selection, then returns to Select. Ctrl+Z and Ctrl+Y undo and redo.
 //!
 //! Holding Q or the right mouse button opens a pie at the cursor: with Select active the tool pie
@@ -21,7 +23,7 @@ use leptos::{ev, html, prelude::*};
 use rtag_core::{
     Label, ShapeType,
     annotation::{Annotation, Shape, overlapping, topmost_at},
-    geometry::{Handle, Point, Rect, snap_angle},
+    geometry::{Handle, Point, Rect, snap_angle, steps_towards},
     history::{Edit, History},
     oriented::OrientedRect,
     pie::{Compass, FLICK_DISTANCE, is_tap},
@@ -43,6 +45,12 @@ const DRAG_THRESHOLD: f64 = 4.0;
 const MIN_SHAPE_SIZE: f64 = 3.0;
 /// Shift (or the snap option) turns lines and rotations in steps of this many degrees.
 const SNAP_DEGREES: f64 = 15.0;
+/// Distance between freehand polyline vertices, in image pixels, and its limits; `[` and `]`
+/// change it by this factor.
+pub const DEFAULT_SPACING: f64 = 20.0;
+pub const MIN_SPACING: f64 = 1.0;
+pub const MAX_SPACING: f64 = 500.0;
+const SPACING_STEP: f64 = 1.25;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
@@ -51,6 +59,7 @@ pub enum Tool {
     Polygon,
     Polyline,
     Points,
+    Circle,
 }
 
 impl Tool {
@@ -62,6 +71,7 @@ impl Tool {
             Tool::Polygon => Some(ShapeType::Polygon),
             Tool::Polyline => Some(ShapeType::Polyline),
             Tool::Points => Some(ShapeType::Points),
+            Tool::Circle => Some(ShapeType::Circle),
         }
     }
 
@@ -72,6 +82,7 @@ impl Tool {
             Tool::Polygon => "Polygon",
             Tool::Polyline => "Polyline",
             Tool::Points => "Points",
+            Tool::Circle => "Circle",
         }
     }
 
@@ -83,6 +94,7 @@ impl Tool {
             "p" | "P" => Some(Tool::Polygon),
             "l" | "L" => Some(Tool::Polyline),
             "." => Some(Tool::Points),
+            "c" | "C" => Some(Tool::Circle),
             _ => None,
         }
     }
@@ -110,6 +122,13 @@ pub struct Editor {
     pub oriented: RwSignal<bool>,
     /// Line options: always snap to 15° (Shift inverts).
     pub snap: RwSignal<bool>,
+    /// Polyline: draw by dragging, placing a vertex every `spacing` image pixels.
+    pub freehand: RwSignal<bool>,
+    pub spacing: RwSignal<f64>,
+    /// Points: every click is a finished one-point annotation.
+    pub single_point: RwSignal<bool>,
+    /// Circle: the two points are the ends of a diameter instead of centre and radius.
+    pub diameter: RwSignal<bool>,
     /// The last drawing tool and label, repeated by a tap of the pie key.
     pub last: RwSignal<Option<(Tool, i64)>>,
 }
@@ -128,6 +147,10 @@ impl Editor {
             from_centre: RwSignal::new(false),
             oriented: RwSignal::new(false),
             snap: RwSignal::new(false),
+            freehand: RwSignal::new(false),
+            spacing: RwSignal::new(DEFAULT_SPACING),
+            single_point: RwSignal::new(false),
+            diameter: RwSignal::new(false),
             last: RwSignal::new(None),
         }
     }
@@ -235,6 +258,13 @@ enum Gesture {
     Oriented { points: Vec<Point>, current: Point },
     /// A polygon, polyline or points shape being placed vertex by vertex.
     Path { points: Vec<Point>, current: Point },
+    /// A freehand polyline: vertices are added every `spacing` while the button is down.
+    Stroke { points: Vec<Point>, current: Point },
+    /// A circle from `start` (centre, or one end of the diameter); like a rectangle, it is
+    /// finished by releasing a drag or by a second click.
+    Circle { start: Point, current: Point, dragged: bool },
+    /// Dragging a circle's radius handle.
+    Radius { index: usize, centre: Point, radius: f64 },
     /// The selection moved together by (`dx`, `dy`), limited so every shape stays in the image.
     Moving { grab: Point, dx: f64, dy: f64 },
     Resizing { index: usize, handle: Handle, before: Rect, current: Rect },
@@ -248,6 +278,7 @@ enum Gesture {
 /// What is under the pointer on the single selected shape.
 enum Grip {
     Resize(Handle, Rect),
+    Radius(Point),
     Vertex(usize),
     Midpoint(usize),
     Rotate(OrientedRect),
@@ -310,6 +341,13 @@ pub fn AnnotationLayer(
                     nearest(&shape.vertices(), point, reach).map(Grip::Vertex)
                 }
             }
+            Shape::Circle { centre, radius } => {
+                if Point::new(centre.x + radius, centre.y).distance(point) <= reach {
+                    Some(Grip::Radius(*centre))
+                } else {
+                    nearest(&shape.vertices(), point, reach).map(Grip::Vertex)
+                }
+            }
             Shape::Polygon { .. } | Shape::Polyline { .. } | Shape::Points { .. } => {
                 nearest(&shape.vertices(), point, reach).map(Grip::Vertex).or_else(|| {
                     let midpoints: Vec<Point> = match shape {
@@ -346,9 +384,26 @@ pub fn AnnotationLayer(
         }
         add_shape(Shape::Rectangle(rect));
     };
+    // A circle from two points, shrunk if needed so it stays inside the image.
+    let circle_from = move |start: Point, end: Point| {
+        let (centre, radius) = if editor.diameter.get_untracked() {
+            (start.midpoint(end), start.distance(end) / 2.0)
+        } else {
+            (start, start.distance(end))
+        };
+        let room = centre.x.min(centre.y).min(width - centre.x).min(height - centre.y);
+        Shape::Circle { centre, radius: radius.min(room) }
+    };
+    let finish_circle = move |start: Point, end: Point, scale: f64| {
+        let circle = circle_from(start, end);
+        match circle {
+            Shape::Circle { radius, .. } if radius * scale >= MIN_SHAPE_SIZE / 2.0 => add_shape(circle),
+            _ => gesture.set(Gesture::Idle),
+        }
+    };
     // Finishes the polygon, polyline or points being placed.
     let finish_path = move || {
-        let Gesture::Path { mut points, .. } = gesture.get_untracked() else { return };
+        let (Gesture::Path { mut points, .. } | Gesture::Stroke { mut points, .. }) = gesture.get_untracked() else { return };
         // A double-click places the same point twice.
         points.dedup_by(|a, b| a.distance(*b) < 0.5);
         let shape = match editor.tool.get_untracked() {
@@ -412,7 +467,7 @@ pub fn AnnotationLayer(
             tool(Compass::SE, Tool::Points, "."),
             tool(Compass::S, Tool::Polyline, "L"),
             later(Compass::SW, "Brush", "B"),
-            later(Compass::W, "Eraser", "E"),
+            tool(Compass::W, Tool::Circle, "C"),
             later(Compass::NW, "Tag", "T"),
         ];
         Pie { label: "Tools", items, centre, wide: false, held, opened_at: now() }
@@ -456,20 +511,40 @@ pub fn AnnotationLayer(
                 ];
                 ("Rectangle options", items)
             }
-            Tool::Polygon | Tool::Polyline => {
+            Tool::Polygon => {
                 let items = vec![
                     item(Compass::N, "Snap 15°", Some("Shift"), true, editor.snap.get_untracked(), PieAction::ToggleSnap),
                     item(Compass::E, "Finish shape", Some("Enter"), drawing, false, PieAction::FinishShape),
                     item(Compass::W, "Remove last point", Some("Backspace"), drawing, false, PieAction::UndoPoint),
                 ];
-                (if editor.tool.get_untracked() == Tool::Polygon { "Polygon options" } else { "Polyline options" }, items)
+                ("Polygon options", items)
+            }
+            Tool::Polyline => {
+                let freehand = editor.freehand.get_untracked();
+                let items = vec![
+                    item(Compass::N, "Snap 15°", Some("Shift"), !freehand, editor.snap.get_untracked(), PieAction::ToggleSnap),
+                    item(Compass::E, "Finish shape", Some("Enter"), drawing, false, PieAction::FinishShape),
+                    item(Compass::S, "Freehand", None, true, freehand, PieAction::ToggleFreehand),
+                    item(Compass::W, "Remove last point", Some("Backspace"), drawing, false, PieAction::UndoPoint),
+                ];
+                ("Polyline options", items)
             }
             Tool::Points => {
+                let single = editor.single_point.get_untracked();
                 let items = vec![
+                    item(Compass::N, "Single point", None, true, single, PieAction::ToggleSinglePoint),
                     item(Compass::E, "Finish shape", Some("Enter"), drawing, false, PieAction::FinishShape),
                     item(Compass::W, "Remove last point", Some("Backspace"), drawing, false, PieAction::UndoPoint),
                 ];
                 ("Points options", items)
+            }
+            Tool::Circle => {
+                let diameter = editor.diameter.get_untracked();
+                let items = vec![
+                    item(Compass::N, "Centre and radius", None, true, !diameter, PieAction::SetDiameter(false)),
+                    item(Compass::S, "Diameter", None, true, diameter, PieAction::SetDiameter(true)),
+                ];
+                ("Circle options", items)
             }
             Tool::Select => ("Options", Vec::new()),
         };
@@ -557,6 +632,20 @@ pub fn AnnotationLayer(
             PieAction::ToggleSnap => {
                 close_pie();
                 editor.snap.update(|on| *on = !*on);
+            }
+            PieAction::ToggleFreehand => {
+                close_pie();
+                gesture.set(Gesture::Idle);
+                editor.freehand.update(|on| *on = !*on);
+            }
+            PieAction::ToggleSinglePoint => {
+                close_pie();
+                gesture.set(Gesture::Idle);
+                editor.single_point.update(|on| *on = !*on);
+            }
+            PieAction::SetDiameter(on) => {
+                close_pie();
+                editor.diameter.set(on);
             }
             PieAction::FinishShape => {
                 close_pie();
@@ -690,6 +779,13 @@ pub fn AnnotationLayer(
                     }
                 }
                 Grip::Rotate(rect) => gesture.set(Gesture::Rotating { index, before: rect, current: rect }),
+                Grip::Radius(centre) => {
+                    let radius = match shape {
+                        Shape::Circle { radius, .. } => radius,
+                        _ => return,
+                    };
+                    gesture.set(Gesture::Radius { index, centre, radius });
+                }
             }
             return;
         }
@@ -755,6 +851,12 @@ pub fn AnnotationLayer(
                 square: ev.shift_key() != editor.square.get_untracked(),
                 from_centre: ev.alt_key() != editor.from_centre.get_untracked(),
             }),
+            (Tool::Circle, Gesture::Circle { start, .. }) => finish_circle(start, point, current.scale),
+            (Tool::Circle, _) => gesture.set(Gesture::Circle { start: point, current: point, dragged: false }),
+            (Tool::Polyline, _) if editor.freehand.get_untracked() => {
+                gesture.set(Gesture::Stroke { points: vec![point], current: point });
+            }
+            (Tool::Points, _) if editor.single_point.get_untracked() => add_shape(Shape::Points { points: vec![point] }),
             (_, Gesture::Path { mut points, .. }) => {
                 // Clicking a polygon's first vertex closes it.
                 let closes = tool == Tool::Polygon
@@ -807,6 +909,20 @@ pub fn AnnotationLayer(
                     from_centre: ev.alt_key() != editor.from_centre.get_untracked(),
                 });
             }
+            Gesture::Circle { start, dragged, .. } => {
+                let moved = current.to_screen(start).distance(screen) > DRAG_THRESHOLD;
+                gesture.set(Gesture::Circle { start, current: inside(point), dragged: dragged || (moved && ev.buttons() & 1 == 1) });
+            }
+            Gesture::Stroke { mut points, .. } => {
+                let to = inside(point);
+                let last = *points.last().expect("a stroke starts with a point");
+                points.extend(steps_towards(last, to, editor.spacing.get_untracked()));
+                gesture.set(Gesture::Stroke { points, current: to });
+            }
+            Gesture::Radius { index, centre, .. } => {
+                let room = centre.x.min(centre.y).min(width - centre.x).min(height - centre.y);
+                gesture.set(Gesture::Radius { index, centre, radius: centre.distance(point).min(room) });
+            }
             Gesture::Oriented { points, .. } => {
                 let current = snapped(points.last().copied(), inside(point), ev.shift_key() && points.len() == 1);
                 gesture.set(Gesture::Oriented { points, current });
@@ -842,6 +958,7 @@ pub fn AnnotationLayer(
             Gesture::Idle => cursor.set(match (editor.tool.get_untracked(), grip_at(point, current.scale)) {
                 (Tool::Select, Some((_, Grip::Resize(handle, _)))) => handle.cursor(),
                 (Tool::Select, Some((_, Grip::Rotate(_)))) => "grab",
+                (Tool::Select, Some((_, Grip::Radius(_)))) => "ew-resize",
                 (Tool::Select, Some(_)) => "move",
                 _ => "default",
             }),
@@ -854,6 +971,26 @@ pub fn AnnotationLayer(
             // A click without dragging leaves the rectangle open for a second click.
             Gesture::Drawing { start, current: end, dragged: true, square, from_centre } => {
                 finish_rectangle(start, end, square, from_centre, current.scale)
+            }
+            // A click without dragging leaves the circle open for a second click.
+            Gesture::Circle { start, current: end, dragged: true } => finish_circle(start, end, current.scale),
+            // Releasing ends a freehand stroke; a stroke too short for two vertices keeps its end.
+            Gesture::Stroke { mut points, current: end } => {
+                if points.len() < 2 && points[0].distance(end) * current.scale >= MIN_SHAPE_SIZE {
+                    points.push(end);
+                }
+                if points.len() < 2 {
+                    gesture.set(Gesture::Idle);
+                } else {
+                    gesture.set(Gesture::Stroke { points, current: end });
+                    finish_path();
+                }
+            }
+            Gesture::Radius { index, centre, radius } => {
+                gesture.set(Gesture::Idle);
+                if radius * current.scale >= MIN_SHAPE_SIZE / 2.0 {
+                    editor.reshape(index, Shape::Circle { centre, radius });
+                }
             }
             Gesture::Moving { dx, dy, .. } => {
                 gesture.set(Gesture::Idle);
@@ -943,6 +1080,11 @@ pub fn AnnotationLayer(
             }
             _ if command || ev.alt_key() => return,
             "Enter" if drawing_path => finish_path(),
+            "[" | "]" if editor.tool.get_untracked() == Tool::Polyline => {
+                let factor = if key == "]" { SPACING_STEP } else { 1.0 / SPACING_STEP };
+                editor.spacing.update(|spacing| *spacing = (*spacing * factor).clamp(MIN_SPACING, MAX_SPACING));
+                editor.notice.set(Some(format!("Freehand spacing {:.0} px", editor.spacing.get_untracked())));
+            }
             "Backspace" if drawing_path => undo_point(),
             "Escape" => {
                 if gesture.get_untracked() != Gesture::Idle {
@@ -1001,6 +1143,7 @@ pub fn AnnotationLayer(
                     Gesture::Resizing { index: i, current, .. } if *i == index => Shape::Rectangle(*current),
                     Gesture::Vertex { index: i, current, .. } if *i == index => current.clone(),
                     Gesture::Rotating { index: i, current, .. } if *i == index => Shape::OrientedRectangle(*current),
+                    Gesture::Radius { index: i, centre, radius } if *i == index => Shape::Circle { centre: *centre, radius: *radius },
                     Gesture::Moving { dx, dy, .. } if selected => annotation.shape.translated(*dx, *dy),
                     _ => annotation.shape.clone(),
                 };
@@ -1019,6 +1162,10 @@ pub fn AnnotationLayer(
                             draw::rotation_handle(&context, current, *rect, &color);
                         }
                         Shape::Points { .. } => draw::vertex_handles(&context, current, &shape, &color, false),
+                        Shape::Circle { centre, radius } => {
+                            draw::vertex_handles(&context, current, &shape, &color, false);
+                            draw::radius_handle(&context, current, *centre, *radius, &color);
+                        }
                         Shape::Polygon { .. } | Shape::Polyline { .. } => {
                             draw::vertex_handles(&context, current, &shape, &color, true)
                         }
@@ -1043,6 +1190,14 @@ pub fn AnnotationLayer(
                 let tool = editor.tool.get_untracked();
                 draw::path_preview(&context, current, &points, next, tool == Tool::Polygon, tool == Tool::Points, &pen);
             }
+            Gesture::Stroke { points, current: next } => draw::path_preview(&context, current, &points, next, false, false, &pen),
+            Gesture::Circle { start, current: end, .. } => {
+                let circle = circle_from(start, end);
+                draw::shape(&context, current, &circle, Look { color: &pen, selected: false, dashed: true });
+                if let Shape::Circle { radius, .. } = circle {
+                    draw::tag(&context, current.to_screen(circle.bounds().min), &format!("r {radius:.0}"), &pen);
+                }
+            }
             _ => {}
         }
     };
@@ -1055,10 +1210,12 @@ pub fn AnnotationLayer(
         editor.label.track();
         draw();
     });
-    // Drop a half-drawn shape when the tool or the rectangle mode changes.
+    // Drop a half-drawn shape when the tool or a drawing mode changes.
     Effect::new(move |_| {
         editor.tool.track();
         editor.oriented.track();
+        editor.freehand.track();
+        editor.single_point.track();
         gesture.set(Gesture::Idle);
     });
 
@@ -1078,7 +1235,10 @@ pub fn AnnotationLayer(
             data-count=move || editor.annotations.with(Vec::len)
             data-selected={move || editor.selection.get().iter().map(usize::to_string).collect::<Vec<_>>().join(",")}
             data-revision=move || editor.revision.get()
-            data-drawing={move || match gesture.get() { Gesture::Path { points, .. } | Gesture::Oriented { points, .. } => points.len(), _ => 0 }}
+            data-drawing={move || match gesture.get() {
+                Gesture::Path { points, .. } | Gesture::Oriented { points, .. } | Gesture::Stroke { points, .. } => points.len(),
+                _ => 0,
+            }}
             style:cursor=canvas_cursor
             on:pointerdown=on_pointer_down
             on:pointermove=on_pointer_move

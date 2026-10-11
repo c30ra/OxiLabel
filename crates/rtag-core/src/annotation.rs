@@ -21,6 +21,8 @@ pub enum Shape {
     Polyline { points: Vec<Point> },
     /// Separate points, e.g. keypoints or small defects.
     Points { points: Vec<Point> },
+    /// A circle (the outline of a sphere or a round defect).
+    Circle { centre: Point, radius: f64 },
 }
 
 /// Coordinates may stick out of the image by this much (float rounding) and still count as inside.
@@ -34,6 +36,7 @@ impl Shape {
             Shape::Polygon { .. } => ShapeType::Polygon,
             Shape::Polyline { .. } => ShapeType::Polyline,
             Shape::Points { .. } => ShapeType::Points,
+            Shape::Circle { .. } => ShapeType::Circle,
         }
     }
 
@@ -45,6 +48,7 @@ impl Shape {
             }
             Shape::OrientedRectangle(rect) => rect.corners().to_vec(),
             Shape::Polygon { points } | Shape::Polyline { points } | Shape::Points { points } => points.clone(),
+            Shape::Circle { centre, .. } => vec![*centre],
         }
     }
 
@@ -54,7 +58,7 @@ impl Shape {
             Shape::Rectangle(_) | Shape::OrientedRectangle(_) => 4,
             Shape::Polygon { .. } => 3,
             Shape::Polyline { .. } => 2,
-            Shape::Points { .. } => 1,
+            Shape::Points { .. } | Shape::Circle { .. } => 1,
         }
     }
 
@@ -69,7 +73,7 @@ impl Shape {
                 let corners = self.vertices();
                 (0..4).map(|i| (corners[i], corners[(i + 1) % 4])).collect()
             }
-            Shape::Points { .. } => Vec::new(),
+            Shape::Points { .. } | Shape::Circle { .. } => Vec::new(),
         }
     }
 
@@ -79,6 +83,9 @@ impl Shape {
             Shape::Rectangle(rect) => *rect,
             Shape::OrientedRectangle(rect) => rect.bounds(),
             Shape::Polygon { points } | Shape::Polyline { points } | Shape::Points { points } => bounds_of(points),
+            Shape::Circle { centre, radius } => {
+                Rect::new(centre.x - radius, centre.y - radius, centre.x + radius, centre.y + radius)
+            }
         }
     }
 
@@ -93,6 +100,7 @@ impl Shape {
             Shape::Polygon { points } => Shape::Polygon { points: shift(points) },
             Shape::Polyline { points } => Shape::Polyline { points: shift(points) },
             Shape::Points { points } => Shape::Points { points: shift(points) },
+            Shape::Circle { centre, radius } => Shape::Circle { centre: centre.offset(dx, dy), radius: *radius },
         }
     }
 
@@ -106,6 +114,7 @@ impl Shape {
             Shape::Polygon { points } => inside_polygon(point, points) || near_edge(),
             Shape::Polyline { .. } => near_edge(),
             Shape::Points { points } => points.iter().any(|p| p.distance(point) <= margin),
+            Shape::Circle { centre, radius } => centre.distance(point) <= radius + margin,
         }
     }
 
@@ -121,6 +130,7 @@ impl Shape {
                     *point = to;
                 }
             }
+            Shape::Circle { centre, .. } => *centre = to,
         }
         moved
     }
@@ -153,7 +163,15 @@ impl Shape {
 
     /// Checks that the shape is well formed and lies inside a `width` × `height` image.
     pub fn validate(&self, width: u32, height: u32) -> Result<(), String> {
-        let vertices = self.vertices();
+        let mut vertices = self.vertices();
+        if let Shape::Circle { radius, .. } = self {
+            if !(radius.is_finite() && *radius > 0.0) {
+                return Err("a circle needs a radius".into());
+            }
+            // The whole circle must be in the image, so check its bounding box.
+            let bounds = self.bounds();
+            vertices = vec![bounds.min, bounds.max];
+        }
         if vertices.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
             return Err("coordinates must be numbers".into());
         }
@@ -326,6 +344,19 @@ mod tests {
         assert_eq!(Shape::Polygon { points: pts.clone() }.edges().len(), 3);
         assert_eq!(Shape::Polyline { points: pts.clone() }.edges().len(), 2);
         assert!(Shape::Points { points: pts }.edges().is_empty());
+    }
+
+    #[test]
+    fn circles_hit_test_validate_and_move() {
+        let circle = Shape::Circle { centre: Point::new(50.0, 25.0), radius: 10.0 };
+        assert!(circle.contains(Point::new(58.0, 25.0), 0.0));
+        assert!(!circle.contains(Point::new(58.0, 33.0), 0.0));
+        assert_eq!(circle.bounds(), Rect::new(40.0, 15.0, 60.0, 35.0));
+        assert_eq!(circle.validate(100, 50), Ok(()));
+        assert!(Shape::Circle { centre: Point::new(5.0, 25.0), radius: 10.0 }.validate(100, 50).is_err(), "sticks out");
+        assert!(Shape::Circle { centre: Point::new(50.0, 25.0), radius: 0.0 }.validate(100, 50).is_err());
+        assert_eq!(circle.with_vertex(0, Point::new(60.0, 30.0)), Shape::Circle { centre: Point::new(60.0, 30.0), radius: 10.0 });
+        assert_eq!(serde_json::to_value(&circle).unwrap()["type"], "circle");
     }
 
     #[test]
