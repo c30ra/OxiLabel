@@ -1,5 +1,6 @@
 //! Domain types shared by the server and the browser UI. Compiles to native and WASM.
 
+pub mod annotation;
 pub mod geometry;
 pub mod pyramid;
 pub mod view;
@@ -127,6 +128,8 @@ pub struct Image {
     pub width: u32,
     pub height: u32,
     pub annotated: bool,
+    /// Number of annotations on the image.
+    pub annotations: u32,
     /// File size in bytes; unknown if the file was missing when it was recorded.
     pub size: Option<u64>,
     /// File modification time as `YYYY-MM-DD HH:MM`, in the server's local time.

@@ -1,3 +1,4 @@
+mod annotations;
 mod error;
 mod images;
 mod labels;
@@ -59,6 +60,7 @@ pub async fn app(config: Config) -> Result<Router, sqlx::Error> {
         .merge(projects::routes())
         .merge(labels::routes())
         .merge(images::routes())
+        .merge(annotations::routes())
         .merge(thumbnails::routes())
         .merge(tiles::routes())
         .with_state(state))

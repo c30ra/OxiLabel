@@ -1,10 +1,11 @@
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::{get, put},
 };
-use rtag_core::{Label, LabelDefinition};
+use rtag_core::{Label, LabelDefinition, annotation::LabelUsage};
+use serde::Deserialize;
 use sqlx::{Row, SqliteConnection, SqlitePool, sqlite::SqliteRow};
 
 use crate::{AppState, error::ApiError, projects};
@@ -13,6 +14,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/projects/{project}/labels", get(list_labels).post(create_label))
         .route("/api/projects/{project}/labels/{id}", put(update_label).delete(delete_label))
+        .route("/api/projects/{project}/labels/{id}/usage", get(label_usage))
 }
 
 async fn create_label(
@@ -55,7 +57,7 @@ async fn list_labels(State(pool): State<SqlitePool>, Path(project): Path<i64>) -
 }
 
 /// All labels of a project, or `NotFound` if the project does not exist.
-async fn project_labels(conn: &mut SqliteConnection, project: i64) -> Result<Vec<Label>, ApiError> {
+pub(crate) async fn project_labels(conn: &mut SqliteConnection, project: i64) -> Result<Vec<Label>, ApiError> {
     projects::ensure_exists(conn, project).await?;
     let rows = sqlx::query("SELECT * FROM labels WHERE project_id = ? ORDER BY id")
         .bind(project)
@@ -91,19 +93,69 @@ async fn update_label(
     Ok(Json(label))
 }
 
+#[derive(Deserialize)]
+struct DeleteQuery {
+    #[serde(default)]
+    confirm: bool,
+}
+
+/// Deletes a label. If annotations use it they are deleted too, but only with `?confirm=true`.
 async fn delete_label(
     State(pool): State<SqlitePool>,
     Path((project, id)): Path<(i64, i64)>,
+    Query(query): Query<DeleteQuery>,
 ) -> Result<StatusCode, ApiError> {
-    let result = sqlx::query("DELETE FROM labels WHERE project_id = ? AND id = ?")
+    let mut tx = pool.begin().await?;
+    let name: String = sqlx::query("SELECT name FROM labels WHERE project_id = ? AND id = ?")
         .bind(project)
         .bind(id)
-        .execute(&pool)
-        .await?;
-    if result.rows_affected() == 0 {
-        return Err(ApiError::NotFound);
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(ApiError::NotFound)?
+        .get("name");
+    let used = count_annotations(&mut tx, project, id).await?;
+    if used > 0 && !query.confirm {
+        let noun = if used == 1 { "annotation" } else { "annotations" };
+        return Err(ApiError::Conflict(format!(
+            "label \"{name}\" is used by {used} {noun}; confirm to delete them too"
+        )));
     }
+    // The affected images change, so editors holding their old version must not save over them.
+    sqlx::query(
+        "UPDATE images SET version = version + 1 \
+         WHERE id IN (SELECT image_id FROM annotations WHERE project_id = ? AND label_id = ?)",
+    )
+    .bind(project)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    // Its annotations go with it (foreign key cascade).
+    sqlx::query("DELETE FROM labels WHERE project_id = ? AND id = ?").bind(project).bind(id).execute(&mut *tx).await?;
+    tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn label_usage(
+    State(pool): State<SqlitePool>,
+    Path((project, id)): Path<(i64, i64)>,
+) -> Result<Json<LabelUsage>, ApiError> {
+    let mut conn = pool.acquire().await?;
+    let exists = sqlx::query("SELECT 1 FROM labels WHERE project_id = ? AND id = ?")
+        .bind(project)
+        .bind(id)
+        .fetch_optional(&mut *conn)
+        .await?;
+    exists.ok_or(ApiError::NotFound)?;
+    Ok(Json(LabelUsage { annotations: count_annotations(&mut conn, project, id).await? }))
+}
+
+async fn count_annotations(conn: &mut SqliteConnection, project: i64, label: i64) -> Result<i64, ApiError> {
+    Ok(sqlx::query("SELECT COUNT(*) AS n FROM annotations WHERE project_id = ? AND label_id = ?")
+        .bind(project)
+        .bind(label)
+        .fetch_one(conn)
+        .await?
+        .get("n"))
 }
 
 fn label_from_row(row: &SqliteRow) -> Label {

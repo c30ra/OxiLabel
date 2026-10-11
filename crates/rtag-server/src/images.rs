@@ -391,7 +391,8 @@ async fn list_images(
 
 /// Selects the columns `image_from_row` reads; callers append the conditions.
 const IMAGE_COLUMNS: &str = "SELECT id, path, width, height, annotated, size, \
-     strftime('%Y-%m-%d %H:%M', modified_at, 'unixepoch', 'localtime') AS modified FROM images";
+     strftime('%Y-%m-%d %H:%M', modified_at, 'unixepoch', 'localtime') AS modified, \
+     (SELECT COUNT(*) FROM annotations WHERE annotations.image_id = images.id) AS annotation_count FROM images";
 
 fn image_from_row(row: &sqlx::sqlite::SqliteRow) -> Image {
     Image {
@@ -400,6 +401,7 @@ fn image_from_row(row: &sqlx::sqlite::SqliteRow) -> Image {
         width: row.get("width"),
         height: row.get("height"),
         annotated: row.get("annotated"),
+        annotations: row.get("annotation_count"),
         size: row.get::<Option<i64>, _>("size").map(|size| size as u64),
         modified: row.get("modified"),
     }
