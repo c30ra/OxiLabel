@@ -197,3 +197,7 @@ button.small { height: 26px; padding: 0 10px; font-size: 12px; }
 a.button { display: inline-flex; align-items: center; height: 36px; padding: 0 14px; border-radius: 6px; text-decoration: none; border: 1px solid var(--border); color: var(--text); }
 a.button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
 .hidden { display: none !important; }
+.label-menu li.disabled { color: #6B6E75; cursor: default; }
+.label-menu li.disabled:hover { background: none; }
+/* Points icon: round dots. */
+.tool-rail .tool svg path { stroke-linecap: round; }

@@ -88,7 +88,7 @@ for (const [index, test] of selected.entries()) {
   const started = Date.now();
   try {
     const project = await client.project(`UI test ${index + 1}`, LABELS);
-    await test.run({ b, base, api: client, project });
+    await test.run({ b, base, api: client, project, scale: (w) => w.scale });
     console.log(`  ✓ ${test.name} (${Date.now() - started} ms)`);
   } catch (err) {
     failed++;

@@ -130,7 +130,7 @@ export const tests = [
       await t.b.click(...w.at(800, 500), { button: 2 });
       const state = await w.state();
       equal(state.pie, 'Tools', 'pie after a right-button tap without a last tool');
-      equal(state.pieItems.filter((item) => item.enabled).map((item) => item.name), ['Select', 'Rectangle'], 'enabled tools');
+      equal(state.pieItems.filter((item) => item.enabled).map((item) => item.name), ['Select', 'Rectangle', 'Polygon', 'Points', 'Polyline'], 'enabled tools');
       equal(state.pieItems.length, 8, 'tool slots');
     },
   },
@@ -220,6 +220,134 @@ export const tests = [
     },
   },
 ];
+
+// Vector shapes and vertex editing (ticket 08).
+const points = (annotation) => (annotation.shape.points ?? []).map((p) => [Math.round(p.x), Math.round(p.y)]);
+const polygon = (label, list) => ({ label, shape: { type: 'polygon', points: list.map(([x, y]) => ({ x, y })) } });
+
+tests.push(
+  {
+    name: 'a polygon is drawn by clicking vertices and finished with Enter',
+    async run(t) {
+      const w = await openWorkspace(t.b, t.base, t.project);
+      await t.b.key('p');
+      for (const [x, y] of [[100, 100], [400, 120], [300, 400]]) await t.b.click(...w.at(x, y));
+      equal((await w.state()).drawing, 3, 'vertices placed');
+      await t.b.key(KEY.enter);
+      const [annotation] = await saved(t, (list) => list.length === 1, 'the polygon to be saved');
+      equal(annotation.shape.type, 'polygon', 'type');
+      near(points(annotation).flat(), [100, 100, 400, 120, 300, 400], 2 / t.scale(w), 'vertices');
+    },
+  },
+  {
+    name: 'a polygon also closes by clicking its first vertex',
+    async run(t) {
+      const w = await openWorkspace(t.b, t.base, t.project);
+      await t.b.key('p');
+      for (const [x, y] of [[100, 100], [400, 120], [300, 400], [101, 101]]) await t.b.click(...w.at(x, y));
+      const [annotation] = await saved(t, (list) => list.length === 1, 'the closed polygon');
+      equal(points(annotation).length, 3, 'vertices (the closing click adds none)');
+    },
+  },
+  {
+    name: 'a polyline is finished by a double-click, and Shift snaps it to 15°',
+    async run(t) {
+      const w = await openWorkspace(t.b, t.base, t.project);
+      await t.b.key('l');
+      equal((await w.state()).label, 'line 3', 'the polyline tool picks a label that allows polylines');
+      await t.b.click(...w.at(100, 300));
+      // 10 px off horizontal over 300 px: Shift snaps it flat.
+      await t.b.click(...w.at(400, 310), { modifiers: [KEY.shift] });
+      const [x, y] = w.at(600, 500);
+      await t.b.actions([{ type: 'pointer', id: 'mouse', actions: [
+        { type: 'pointerMove', x: Math.round(x), y: Math.round(y) },
+        { type: 'pointerDown', button: 0 }, { type: 'pointerUp', button: 0 }, { type: 'pointerDown', button: 0 }, { type: 'pointerUp', button: 0 },
+      ] }]);
+      const [annotation] = await saved(t, (list) => list.length === 1, 'the polyline to be saved');
+      equal(annotation.shape.type, 'polyline', 'type');
+      const [, second, third] = annotation.shape.points;
+      if (Math.abs(second.y - 300) > 0.5) throw new Error(`second point not snapped: ${JSON.stringify(second)}`);
+      equal(annotation.shape.points.length, 3, 'points (the double-click adds one)');
+      near([third.x, third.y].map(Math.round), [600, 500], 2 / t.scale(w), 'last point');
+    },
+  },
+  {
+    name: 'points are placed by clicks and Backspace removes the last one',
+    async run(t) {
+      const w = await openWorkspace(t.b, t.base, t.project);
+      await t.b.key('.');
+      for (const [x, y] of [[100, 100], [200, 150], [300, 200]]) await t.b.click(...w.at(x, y));
+      await t.b.key('\uE003');
+      equal((await w.state()).drawing, 2, 'points after Backspace');
+      await t.b.key(KEY.enter);
+      const [annotation] = await saved(t, (list) => list.length === 1, 'the points to be saved');
+      equal(annotation.shape.type, 'points', 'type');
+      near(points(annotation).flat(), [100, 100, 200, 150], 2 / t.scale(w), 'points');
+    },
+  },
+  {
+    name: 'the rectangle options pie switches to 3-point oriented rectangles',
+    async run(t) {
+      const w = await openWorkspace(t.b, t.base, t.project);
+      await t.b.key('r');
+      const [x, y] = w.at(800, 500);
+      await t.b.move(x, y);
+      await t.b.holdKeyAndMove('q', [[x + 70, y]]);
+      await t.b.click(...w.at(200, 200));
+      await t.b.click(...w.at(500, 200));
+      await t.b.click(...w.at(400, 300));
+      const [annotation] = await saved(t, (list) => list.length === 1, 'the oriented rectangle to be saved');
+      const { type, centre, width, height, angle } = annotation.shape;
+      equal(type, 'oriented_rectangle', 'type');
+      near([centre.x, centre.y, width, height].map(Math.round), [350, 250, 300, 100], 3 / t.scale(w), 'centre and size');
+      if (Math.abs(angle) > 0.02) throw new Error(`angle ${angle}`);
+    },
+  },
+  {
+    name: 'polygon vertices can be dragged, inserted and removed',
+    async run(t) {
+      await t.api.setAnnotations(t.project, [polygon(1, [[100, 100], [500, 100], [500, 400], [100, 400]])]);
+      const w = await openWorkspace(t.b, t.base, t.project);
+      await t.b.click(...w.at(300, 250));
+      await t.b.drag(w.at(500, 400), w.at(600, 500));
+      let [annotation] = await saved(t, (list) => points(list[0])[2][0] > 550, 'the dragged vertex');
+      near(points(annotation)[2], [600, 500], 2 / t.scale(w), 'dragged vertex');
+      // The "+" in the middle of the first edge inserts a vertex.
+      await t.b.drag(w.at(300, 100), w.at(300, 50));
+      [annotation] = await saved(t, (list) => points(list[0]).length === 5, 'the inserted vertex');
+      near(points(annotation)[1], [300, 50], 2 / t.scale(w), 'inserted vertex');
+      await t.b.click(...w.at(300, 50), { modifiers: [KEY.ctrl] });
+      [annotation] = await saved(t, (list) => points(list[0]).length === 4, 'the removed vertex');
+      equal(points(annotation)[1], [500, 100], 'vertex after the removed one');
+    },
+  },
+  {
+    name: 'an oriented rectangle turns with its rotation handle',
+    async run(t) {
+      const shape = { type: 'oriented_rectangle', centre: { x: 800, y: 500 }, width: 300, height: 100, angle: 0 };
+      await t.api.setAnnotations(t.project, [{ label: 1, shape }]);
+      const w = await openWorkspace(t.b, t.base, t.project);
+      await t.b.click(...w.at(800, 500));
+      // Unrotated, the handle is above the top edge, 24 screen px out.
+      const [cx, cy] = w.at(800, 500);
+      const top = w.at(800, 450)[1] - 24;
+      await t.b.drag([cx, top], [cx + 200, cy]);
+      const [annotation] = await saved(t, (list) => Math.abs(list[0].shape.angle) > 1, 'the rotation');
+      if (Math.abs(annotation.shape.angle - Math.PI / 2) > 0.05) throw new Error(`angle ${annotation.shape.angle}`);
+    },
+  },
+  {
+    name: 'labels restricted to other shapes cannot be used',
+    async run(t) {
+      const w = await openWorkspace(t.b, t.base, t.project);
+      await t.b.key('p');
+      await t.b.key('3');
+      const state = await w.state();
+      equal(state.label, 'crack 1', 'label stays');
+      if (!state.notice?.includes('cannot be used for polygon')) throw new Error(`notice: ${state.notice}`);
+    },
+  },
+);
 
 // Export (ticket 06).
 tests.push({

@@ -1,5 +1,6 @@
 mod annotate;
 mod api;
+mod draw;
 mod pages;
 mod pie;
 mod viewer;

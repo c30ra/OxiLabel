@@ -73,12 +73,12 @@ export function api(base) {
 
 export const box = (label, x0, y0, x1, y1) => ({ label, shape: { type: 'rectangle', min: { x: x0, y: y0 }, max: { x: x1, y: y1 } } });
 
-/** Nine labels: "line" (3) only allows polylines, the rest rectangles. */
+/** Nine labels: "line" (3) only allows polylines; the others allow every shape but polylines. */
 export const NINE_LABELS = ['crack', 'finger', 'line', 'surface', 'shunt', 'chip', 'dark', 'edge', 'bubble'].map((name, i) => ({
   name,
   color: ['#e74c3c', '#3498db', '#4fb286', '#f1c40f', '#9b59b6', '#e67e22', '#7c8a99', '#1abc9c', '#ff77aa'][i],
   hotkey: String(i + 1),
-  shapes: name === 'line' ? ['polyline'] : ['rectangle'],
+  shapes: name === 'line' ? ['polyline'] : ['rectangle', 'oriented_rectangle', 'polygon', 'points'],
 }));
 
 /**
@@ -107,6 +107,8 @@ export async function openWorkspace(b, base, project, imageSize = [1600, 1000]) 
       pieItems: pie ? [...pie.querySelectorAll('.pie-button')].map((x) => ({ name: x.querySelector('.grow').textContent.trim(), key: x.querySelector('.pie-key')?.textContent ?? null, enabled: !x.disabled, current: x.classList.contains('current') })) : [],
       search: !!document.querySelector('.label-search'),
       cursor: document.querySelector('canvas.annotations').style.cursor,
+      drawing: Number(data.drawing),
+      notice: document.querySelector('.notice')?.textContent ?? null,
     };
   })()`);
   return { at, scale, state, canvas };

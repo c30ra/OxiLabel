@@ -4,6 +4,7 @@ pub mod annotation;
 pub mod export;
 pub mod geometry;
 pub mod history;
+pub mod oriented;
 pub mod pie;
 pub mod pyramid;
 pub mod view;

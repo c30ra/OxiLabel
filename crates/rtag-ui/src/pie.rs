@@ -25,6 +25,14 @@ pub enum PieAction {
     MoreLabels,
     ToggleSquare,
     ToggleFromCentre,
+    /// Rectangle: three points for an oriented rectangle (true) or two for a box (false).
+    SetOriented(bool),
+    /// Lines: always snap to 15°.
+    ToggleSnap,
+    /// Finish the polygon, polyline or points being drawn.
+    FinishShape,
+    /// Remove the last placed vertex.
+    UndoPoint,
     /// Picks nothing new (the option already in use).
     Keep,
 }

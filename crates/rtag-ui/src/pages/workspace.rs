@@ -3,7 +3,7 @@ use std::time::Duration;
 use leptos::{ev, prelude::*, task::spawn_local};
 use leptos_router::{components::A, hooks::use_params_map};
 use rtag_core::{
-    Image, Label, Project, ShapeType,
+    Image, Label, Project,
     annotation::{ImageAnnotations, SaveAnnotations},
     geometry::Point,
     view::View,
@@ -88,15 +88,9 @@ fn Workspace(
     let view = RwSignal::new(None::<View>);
     let size = RwSignal::new((0.0, 0.0));
     let space_held = RwSignal::new(false);
-    let rectangle_labels: Vec<Label> = labels
-        .iter()
-        .filter(|label| label.shape_types.contains(&ShapeType::Rectangle))
-        .cloned()
-        .collect();
-    let editor = Editor::new(
-        annotations.annotations,
-        rectangle_labels.first().map(|label| label.id),
-    );
+    // Start with the first label; switching to a tool picks one that allows its shape.
+    let editor = Editor::new(annotations.annotations, labels.iter().map(|label| label.id).min());
+    let picker_labels = labels.clone();
     let url = StoredValue::new(format!(
         "/api/projects/{}/images/{}/annotations",
         project.id, image.id
@@ -243,7 +237,7 @@ fn Workspace(
                 </nav>
                 <div class="actions">
                     <SaveIndicator state=state on_retry=save on_reload=reload />
-                    <LabelPicker labels=rectangle_labels editor=editor />
+                    <LabelPicker labels=picker_labels editor=editor />
                     <button class="zoom mono" title="Zoom: click for 100% / fit (Home fits, + and − zoom)"
                         on:click=toggle_zoom>{zoom_label}</button>
                 </div>
@@ -316,7 +310,7 @@ fn LabelPicker(labels: Vec<Label>, editor: Editor) -> impl IntoView {
                         <span>{label.name.clone()}</span>
                         {label.hotkey.clone().map(|key| view! { <kbd>{key}</kbd> })}
                     }.into_any(),
-                    None => view! { <span class="muted">"No rectangle label"</span> }.into_any(),
+                    None => view! { <span class="muted">"No label"</span> }.into_any(),
                 }}
                 <span class="chevron" aria-hidden="true">"▾"</span>
             </button>
@@ -324,10 +318,17 @@ fn LabelPicker(labels: Vec<Label>, editor: Editor) -> impl IntoView {
                 <ul class="label-menu" role="listbox">
                     {labels.iter().map(|label| {
                         let id = label.id;
+                        let shapes = StoredValue::new(label.shape_types.clone());
+                        // Labels that don't allow the active tool's shape cannot be picked.
+                        let usable = move || {
+                            editor.tool.get().shape_type().is_none_or(|shape| shapes.with_value(|allowed| allowed.contains(&shape)))
+                        };
                         view! {
                             <li role="option" aria-selected=move || (editor.label.get() == Some(id)).to_string()
+                                aria-disabled=move || (!usable()).to_string()
                                 class:active=move || editor.label.get() == Some(id)
-                                on:click=move |_| { editor.label.set(Some(id)); open.set(false); }>
+                                class:disabled=move || !usable()
+                                on:click=move |_| if usable() { editor.label.set(Some(id)); open.set(false); }>
                                 <span class="swatch" style:background=label.color.clone()></span>
                                 <span class="grow">{label.name.clone()}</span>
                                 {label.hotkey.clone().map(|key| view! { <kbd>{key}</kbd> })}
@@ -358,6 +359,9 @@ fn ToolRail(editor: Editor) -> impl IntoView {
         <nav class="tool-rail" aria-label="Tools">
             {tool_button(Tool::Select, "Select", "V", "M5 3l13 8-6 1.5L9.5 19z")}
             {tool_button(Tool::Rectangle, "Rectangle", "R", "M4 6h16v12H4z")}
+            {tool_button(Tool::Polygon, "Polygon", "P", "M12 3l8 6-3 11H7L4 9z")}
+            {tool_button(Tool::Polyline, "Polyline", "L", "M3 18l5-9 5 6 8-11")}
+            {tool_button(Tool::Points, "Points", ".", "M4.4 7a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0 M15.4 6a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0 M9.9 12.5a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0 M5.4 18a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0 M16.4 17a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0")}
         </nav>
     }
 }

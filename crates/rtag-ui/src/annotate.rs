@@ -1,8 +1,13 @@
 //! Drawing and editing annotations on top of the tile viewer.
 //!
-//! Select (V) is the default tool: click picks the topmost shape, drag moves it, the handles resize
-//! it, Delete or X removes it. Rectangle (R) draws a box from two clicks or one drag; Shift makes a
-//! square and Alt draws from the centre. Esc first cancels the shape being drawn, then clears the
+//! Select (V) is the default tool: click picks the topmost shape, drag moves the selection, the
+//! handles of a single selected shape edit it (rectangle handles resize; vertices drag; the round
+//! "+" on an edge inserts a vertex; Ctrl+click removes one; an oriented rectangle's round handle
+//! turns it). Delete or X removes the selection. Drawing tools: Rectangle (R; two clicks or a
+//! drag, Shift square, Alt from the centre, or three points when "3-point oriented" is on),
+//! Polygon (P), Polyline (L) and Points (.), which take a click per vertex and finish with Enter
+//! or a double-click (a polygon also by clicking its first vertex); Backspace drops the last
+//! vertex and Shift snaps lines to 15°. Esc first cancels the shape being drawn, then clears the
 //! selection, then returns to Select. Ctrl+Z and Ctrl+Y undo and redo.
 //!
 //! Holding Q or the right mouse button opens a pie at the cursor: with Select active the tool pie
@@ -16,39 +21,69 @@ use leptos::{ev, html, prelude::*};
 use rtag_core::{
     Label, ShapeType,
     annotation::{Annotation, Shape, overlapping, topmost_at},
-    geometry::{Handle, Point, Rect},
+    geometry::{Handle, Point, Rect, snap_angle},
     history::{Edit, History},
+    oriented::OrientedRect,
+    pie::{Compass, FLICK_DISTANCE, is_tap},
     view::View,
 };
-use web_sys::CanvasRenderingContext2d;
 
 use crate::{
+    draw::{self, Look, ROTATION_HANDLE_DISTANCE},
     pie::{LabelSearch, Pie, PieAction, PieItem, PieMenu, SearchEntry, now},
     viewer::{context_2d, typing_in_a_field},
 };
-use rtag_core::pie::{Compass, FLICK_DISTANCE, is_tap};
 
 /// How far from a handle or a shape (in screen pixels) a click still hits it.
 const HANDLE_REACH: f64 = 8.0;
-const PICK_MARGIN: f64 = 3.0;
+const PICK_MARGIN: f64 = 4.0;
 /// A press that moves less than this (in screen pixels) is a click, not a drag.
 const DRAG_THRESHOLD: f64 = 4.0;
 /// Shapes smaller than this on screen are treated as accidental and not created.
 const MIN_SHAPE_SIZE: f64 = 3.0;
-const HANDLE_SIZE: f64 = 8.0;
+/// Shift (or the snap option) turns lines and rotations in steps of this many degrees.
+const SNAP_DEGREES: f64 = 15.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
     Select,
     Rectangle,
+    Polygon,
+    Polyline,
+    Points,
 }
 
 impl Tool {
-    /// The shape this tool draws; `None` for Select.
+    /// The shape this tool draws; `None` for Select. (Oriented rectangles come from Rectangle.)
     pub fn shape_type(self) -> Option<ShapeType> {
         match self {
             Tool::Select => None,
             Tool::Rectangle => Some(ShapeType::Rectangle),
+            Tool::Polygon => Some(ShapeType::Polygon),
+            Tool::Polyline => Some(ShapeType::Polyline),
+            Tool::Points => Some(ShapeType::Points),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Tool::Select => "Select",
+            Tool::Rectangle => "Rectangle",
+            Tool::Polygon => "Polygon",
+            Tool::Polyline => "Polyline",
+            Tool::Points => "Points",
+        }
+    }
+
+    /// The tool a key switches to.
+    fn for_key(key: &str) -> Option<Tool> {
+        match key {
+            "v" | "V" => Some(Tool::Select),
+            "r" | "R" => Some(Tool::Rectangle),
+            "p" | "P" => Some(Tool::Polygon),
+            "l" | "L" => Some(Tool::Polyline),
+            "." => Some(Tool::Points),
+            _ => None,
         }
     }
 }
@@ -68,10 +103,13 @@ pub struct Editor {
     pub revision: RwSignal<u64>,
     /// A short hint for the user, e.g. why a shape could not be drawn.
     pub notice: RwSignal<Option<String>>,
-    /// Rectangle options from the options pie: always square, always from the centre. Shift and
-    /// Alt invert them while drawing.
+    /// Rectangle options from the options pie: always square, always from the centre (Shift and
+    /// Alt invert them while drawing), and three points for an oriented rectangle.
     pub square: RwSignal<bool>,
     pub from_centre: RwSignal<bool>,
+    pub oriented: RwSignal<bool>,
+    /// Line options: always snap to 15° (Shift inverts).
+    pub snap: RwSignal<bool>,
     /// The last drawing tool and label, repeated by a tap of the pie key.
     pub last: RwSignal<Option<(Tool, i64)>>,
 }
@@ -88,6 +126,8 @@ impl Editor {
             notice: RwSignal::new(None),
             square: RwSignal::new(false),
             from_centre: RwSignal::new(false),
+            oriented: RwSignal::new(false),
+            snap: RwSignal::new(false),
             last: RwSignal::new(None),
         }
     }
@@ -100,19 +140,13 @@ impl Editor {
     }
 
     pub fn apply(&self, edit: Edit) {
-        self.annotations.update(|list| {
-            self.history
-                .update_value(|history| history.apply(list, edit))
-        });
+        self.annotations.update(|list| self.history.update_value(|history| history.apply(list, edit)));
         self.revision.update(|r| *r += 1);
     }
 
     pub fn undo(&self) {
         let mut undone = false;
-        self.annotations.update(|list| {
-            self.history
-                .update_value(|history| undone = history.undo(list))
-        });
+        self.annotations.update(|list| self.history.update_value(|history| undone = history.undo(list)));
         if undone {
             self.selection.set(BTreeSet::new());
             self.revision.update(|r| *r += 1);
@@ -121,10 +155,7 @@ impl Editor {
 
     pub fn redo(&self) {
         let mut redone = false;
-        self.annotations.update(|list| {
-            self.history
-                .update_value(|history| redone = history.redo(list))
-        });
+        self.annotations.update(|list| self.history.update_value(|history| redone = history.redo(list)));
         if redone {
             self.selection.set(BTreeSet::new());
             self.revision.update(|r| *r += 1);
@@ -133,13 +164,20 @@ impl Editor {
 
     /// The only selected annotation, if exactly one is selected.
     pub fn single_selection(&self) -> Option<usize> {
-        self.selection.with_untracked(|set| {
-            if set.len() == 1 {
-                set.first().copied()
-            } else {
-                None
-            }
-        })
+        self.selection.with_untracked(|set| if set.len() == 1 { set.first().copied() } else { None })
+    }
+
+    fn annotation(&self, index: usize) -> Option<Annotation> {
+        self.annotations.with_untracked(|list| list.get(index).cloned())
+    }
+
+    /// Replaces annotation `index`'s shape (one undo step) unless it is unchanged.
+    fn reshape(&self, index: usize, shape: Shape) {
+        let Some(before) = self.annotation(index) else { return };
+        if before.shape != shape {
+            let after = Annotation { shape, ..before.clone() };
+            self.apply(Edit::Replace { index, before, after });
+        }
     }
 
     /// Removes every selected annotation in one undo step.
@@ -150,12 +188,7 @@ impl Editor {
             selection
                 .iter()
                 .rev()
-                .filter_map(|&index| {
-                    list.get(index).map(|annotation| Edit::Remove {
-                        index,
-                        annotation: annotation.clone(),
-                    })
-                })
+                .filter_map(|&index| list.get(index).map(|annotation| Edit::Remove { index, annotation: annotation.clone() }))
                 .collect()
         });
         self.selection.set(BTreeSet::new());
@@ -174,11 +207,7 @@ impl Editor {
                 .filter_map(|&index| {
                     let before = list.get(index)?.clone();
                     let after = change(&before);
-                    (after != before).then_some(Edit::Replace {
-                        index,
-                        before,
-                        after,
-                    })
+                    (after != before).then_some(Edit::Replace { index, before, after })
                 })
                 .collect()
         });
@@ -201,31 +230,27 @@ enum BoxMode {
 enum Gesture {
     Idle,
     /// A rectangle from `start`; `dragged` is false while waiting for the second click.
-    Drawing {
-        start: Point,
-        current: Point,
-        dragged: bool,
-        square: bool,
-        from_centre: bool,
-    },
+    Drawing { start: Point, current: Point, dragged: bool, square: bool, from_centre: bool },
+    /// An oriented rectangle: one or two points placed, the next follows the pointer.
+    Oriented { points: Vec<Point>, current: Point },
+    /// A polygon, polyline or points shape being placed vertex by vertex.
+    Path { points: Vec<Point>, current: Point },
     /// The selection moved together by (`dx`, `dy`), limited so every shape stays in the image.
-    Moving {
-        grab: Point,
-        dx: f64,
-        dy: f64,
-    },
-    Resizing {
-        index: usize,
-        handle: Handle,
-        before: Rect,
-        current: Rect,
-    },
+    Moving { grab: Point, dx: f64, dy: f64 },
+    Resizing { index: usize, handle: Handle, before: Rect, current: Rect },
+    /// Dragging one vertex (or rectangle corner) of annotation `index`.
+    Vertex { index: usize, vertex: usize, current: Shape },
+    Rotating { index: usize, before: OrientedRect, current: OrientedRect },
     /// Dragging a selection box over empty space.
-    Selecting {
-        start: Point,
-        current: Point,
-        mode: BoxMode,
-    },
+    Selecting { start: Point, current: Point, mode: BoxMode },
+}
+
+/// What is under the pointer on the single selected shape.
+enum Grip {
+    Resize(Handle, Rect),
+    Vertex(usize),
+    Midpoint(usize),
+    Rotate(OrientedRect),
 }
 
 #[component]
@@ -240,77 +265,108 @@ pub fn AnnotationLayer(
     let canvas_ref = NodeRef::<html::Canvas>::new();
     let gesture = RwSignal::new(Gesture::Idle);
     let cursor = RwSignal::new("default");
-    let colors: HashMap<i64, String> = labels
-        .iter()
-        .map(|label| (label.id, label.color.clone()))
-        .collect();
-    let names: HashMap<i64, String> = labels
-        .iter()
-        .map(|label| (label.id, label.name.clone()))
-        .collect();
-    let label_names = names.clone();
-    let hotkeys: Vec<(String, i64)> = labels
-        .iter()
-        .filter_map(|label| label.hotkey.clone().map(|key| (key, label.id)))
-        .collect();
-    let rectangle_labels: Vec<i64> = labels
-        .iter()
-        .filter(|label| label.shape_types.contains(&ShapeType::Rectangle))
-        .map(|label| label.id)
-        .collect();
+    let colors: HashMap<i64, String> = labels.iter().map(|label| (label.id, label.color.clone())).collect();
+    let names: HashMap<i64, String> = labels.iter().map(|label| (label.id, label.name.clone())).collect();
+    let hotkeys: Vec<(String, i64)> =
+        labels.iter().filter_map(|label| label.hotkey.clone().map(|key| (key, label.id))).collect();
+    let all_labels = StoredValue::new({
+        let mut sorted = labels.clone();
+        sorted.sort_by_key(|label| label.id);
+        sorted
+    });
     let (width, height) = (f64::from(image_size.0), f64::from(image_size.1));
-    let inside =
-        move |point: Point| Point::new(point.x.clamp(0.0, width), point.y.clamp(0.0, height));
+    let inside = move |point: Point| point.clamped(width, height);
+    let label_allows = move |id: i64, shape: ShapeType| {
+        all_labels.with_value(|labels| labels.iter().any(|label| label.id == id && label.shape_types.contains(&shape)))
+    };
+    let label_name = move |id: i64| all_labels.with_value(|labels| labels.iter().find(|l| l.id == id).map(|l| l.name.clone()).unwrap_or_default());
 
     // Pointer position in canvas pixels and in image coordinates.
     let locate = move |ev: &ev::MouseEvent| -> Option<(Point, Point, View)> {
         let canvas = canvas_ref.get_untracked()?;
         let current = view.get_untracked()?;
         let rect = canvas.get_bounding_client_rect();
-        let screen = Point::new(
-            f64::from(ev.client_x()) - rect.left(),
-            f64::from(ev.client_y()) - rect.top(),
-        );
+        let screen = Point::new(f64::from(ev.client_x()) - rect.left(), f64::from(ev.client_y()) - rect.top());
         Some((screen, current.to_image(screen), current))
     };
-    let rectangle_of = move |index: usize| {
-        editor.annotations.with_untracked(|list| {
-            list.get(index).map(|annotation| match annotation.shape {
-                Shape::Rectangle(rect) => rect,
-            })
-        })
-    };
-
     // The box around every selected shape; moving keeps it inside the image.
     let selection_bounds = move || {
         let selection = editor.selection.get_untracked();
         editor.annotations.with_untracked(|list| {
-            selection
-                .iter()
-                .filter_map(|&index| list.get(index).map(|a| a.shape.bounds()))
-                .reduce(|a, b| a.union(&b))
+            selection.iter().filter_map(|&index| list.get(index).map(|a| a.shape.bounds())).reduce(|a, b| a.union(&b))
         })
     };
-
-    let finish_drawing =
-        move |start: Point, end: Point, square: bool, from_centre: bool, scale: f64| {
-            gesture.set(Gesture::Idle);
-            let rect = Rect::from_drag(start, end, square, from_centre).clamped(width, height);
-            let Some(label) = editor.label.get_untracked() else {
-                return;
-            };
-            if rect.width() * scale < MIN_SHAPE_SIZE || rect.height() * scale < MIN_SHAPE_SIZE {
-                return;
+    // The handle of the single selected shape under `point`, if any.
+    let grip_at = move |point: Point, scale: f64| -> Option<(usize, Grip)> {
+        let index = editor.single_selection()?;
+        let shape = editor.annotation(index)?.shape;
+        let reach = HANDLE_REACH / scale;
+        let grip = match &shape {
+            Shape::Rectangle(rect) => rect.handle_at(point, reach).map(|handle| Grip::Resize(handle, *rect)),
+            Shape::OrientedRectangle(rect) => {
+                if rect.rotation_handle(ROTATION_HANDLE_DISTANCE / scale).distance(point) <= reach {
+                    Some(Grip::Rotate(*rect))
+                } else {
+                    nearest(&shape.vertices(), point, reach).map(Grip::Vertex)
+                }
             }
-            let index = editor.annotations.with_untracked(Vec::len);
-            editor.apply(Edit::Add {
-                index,
-                annotation: Annotation::manual(label, Shape::Rectangle(rect)),
-            });
+            Shape::Polygon { .. } | Shape::Polyline { .. } | Shape::Points { .. } => {
+                nearest(&shape.vertices(), point, reach).map(Grip::Vertex).or_else(|| {
+                    let midpoints: Vec<Point> = match shape {
+                        Shape::Points { .. } => Vec::new(),
+                        _ => shape.edges().iter().map(|(a, b)| a.midpoint(*b)).collect(),
+                    };
+                    nearest(&midpoints, point, reach).map(Grip::Midpoint)
+                })
+            }
         };
+        grip.map(|grip| (index, grip))
+    };
 
-    // Pie menus. `pending_tool` waits for its label after the tool pie; `relabel` means the label
-    // pie changes the label of the selected shapes.
+    // Adds a finished shape with the current label, if it is valid and the label allows it.
+    let add_shape = move |shape: Shape| {
+        gesture.set(Gesture::Idle);
+        let Some(label) = editor.label.get_untracked() else { return };
+        if !label_allows(label, shape.shape_type()) {
+            editor.notice.set(Some(format!("“{}” cannot be used for this shape.", label_name(label))));
+            return;
+        }
+        if let Err(reason) = shape.validate(image_size.0, image_size.1) {
+            editor.notice.set(Some(format!("Not added: {reason}.")));
+            return;
+        }
+        let index = editor.annotations.with_untracked(Vec::len);
+        editor.apply(Edit::Add { index, annotation: Annotation::manual(label, shape) });
+    };
+    let finish_rectangle = move |start: Point, end: Point, square: bool, from_centre: bool, scale: f64| {
+        let rect = Rect::from_drag(start, end, square, from_centre).clamped(width, height);
+        if rect.width() * scale < MIN_SHAPE_SIZE || rect.height() * scale < MIN_SHAPE_SIZE {
+            gesture.set(Gesture::Idle);
+            return;
+        }
+        add_shape(Shape::Rectangle(rect));
+    };
+    // Finishes the polygon, polyline or points being placed.
+    let finish_path = move || {
+        let Gesture::Path { mut points, .. } = gesture.get_untracked() else { return };
+        // A double-click places the same point twice.
+        points.dedup_by(|a, b| a.distance(*b) < 0.5);
+        let shape = match editor.tool.get_untracked() {
+            Tool::Polygon => Shape::Polygon { points },
+            Tool::Polyline => Shape::Polyline { points },
+            Tool::Points => Shape::Points { points },
+            _ => return gesture.set(Gesture::Idle),
+        };
+        add_shape(shape);
+    };
+    // Shift (or the snap option) snaps a line from the last placed vertex to 15° steps.
+    let snapped = move |from: Option<Point>, to: Point, shift: bool| match from {
+        Some(from) if shift != editor.snap.get_untracked() => inside(snap_angle(from, to, SNAP_DEGREES)),
+        _ => to,
+    };
+
+    // ---- Pie menus. `pending_tool` waits for its label after the tool pie; `relabel` means the
+    // label pie changes the label of the selected shapes.
     let pie = RwSignal::new(None::<Pie>);
     let pointer = RwSignal::new(Point::new(0.0, 0.0));
     let cursor_at = StoredValue::new(Point::new(0.0, 0.0));
@@ -319,86 +375,54 @@ pub fn AnnotationLayer(
     // Whether Q or the right button that opened the pie is still down.
     let trigger_down = StoredValue::new(false);
     let relabel = StoredValue::new(false);
-    let all_labels = StoredValue::new({
-        let mut sorted = labels.clone();
-        sorted.sort_by_key(|label| label.id);
-        sorted
-    });
     // The shape types the next label must allow: those of the shapes being relabelled, of the tool
     // just picked, or of the active tool. None at all allows every label.
     let target_shapes = move || -> Vec<ShapeType> {
         if relabel.get_value() {
             let selection = editor.selection.get_untracked();
             let mut types: Vec<ShapeType> = editor.annotations.with_untracked(|list| {
-                selection
-                    .iter()
-                    .filter_map(|&index| list.get(index).map(|a| a.shape.shape_type()))
-                    .collect()
+                selection.iter().filter_map(|&index| list.get(index).map(|a| a.shape.shape_type())).collect()
             });
+            types.sort_by_key(|t| *t as u8);
             types.dedup();
             return types;
         }
-        pending_tool
-            .get_value()
-            .unwrap_or(editor.tool.get_untracked())
-            .shape_type()
-            .into_iter()
-            .collect()
+        pending_tool.get_value().unwrap_or(editor.tool.get_untracked()).shape_type().into_iter().collect()
     };
-    let allows = |label: &Label, shapes: &[ShapeType]| {
-        shapes.iter().all(|shape| label.shape_types.contains(shape))
-    };
+    let allows = |label: &Label, shapes: &[ShapeType]| shapes.iter().all(|shape| label.shape_types.contains(shape));
 
+    let item = |slot, name: &str, key: Option<&str>, enabled, current, action| PieItem {
+        slot,
+        name: name.to_owned(),
+        key: key.map(str::to_owned),
+        swatch: None,
+        enabled,
+        current,
+        action,
+    };
     let tool_pie = move |centre: Point, held: bool| {
         let current = editor.tool.get_untracked();
-        let item = |slot, name: &str, key: &str, tool: Option<Tool>| PieItem {
-            slot,
-            name: name.to_owned(),
-            key: Some(key.to_owned()),
-            swatch: None,
-            enabled: tool.is_some(),
-            current: tool == Some(current),
-            action: tool.map_or(PieAction::Keep, PieAction::Tool),
-        };
+        let tool = |slot, tool: Tool, key: &str| item(slot, tool.name(), Some(key), true, tool == current, PieAction::Tool(tool));
+        let later = |slot, name: &str, key: &str| item(slot, name, Some(key), false, false, PieAction::Keep);
         // The approved layout; tools of later tickets keep their places, disabled.
         let items = vec![
-            item(Compass::N, "Select", "V", Some(Tool::Select)),
-            item(Compass::NE, "Rectangle", "R", Some(Tool::Rectangle)),
-            item(Compass::E, "Polygon", "P", None),
-            item(Compass::SE, "Points", ".", None),
-            item(Compass::S, "Polyline", "L", None),
-            item(Compass::SW, "Brush", "B", None),
-            item(Compass::W, "Eraser", "E", None),
-            item(Compass::NW, "Tag", "T", None),
+            tool(Compass::N, Tool::Select, "V"),
+            tool(Compass::NE, Tool::Rectangle, "R"),
+            tool(Compass::E, Tool::Polygon, "P"),
+            tool(Compass::SE, Tool::Points, "."),
+            tool(Compass::S, Tool::Polyline, "L"),
+            later(Compass::SW, "Brush", "B"),
+            later(Compass::W, "Eraser", "E"),
+            later(Compass::NW, "Tag", "T"),
         ];
-        Pie {
-            label: "Tools",
-            items,
-            centre,
-            wide: false,
-            held,
-            opened_at: now(),
-        }
+        Pie { label: "Tools", items, centre, wide: false, held, opened_at: now() }
     };
     let label_pie = move |centre: Point, held: bool| {
         let shapes = target_shapes();
         let current = editor.label.get_untracked();
-        let slots = [
-            Compass::N,
-            Compass::NE,
-            Compass::E,
-            Compass::SE,
-            Compass::S,
-            Compass::SW,
-            Compass::W,
-            Compass::NW,
-        ];
+        let slots = [Compass::N, Compass::NE, Compass::E, Compass::SE, Compass::S, Compass::SW, Compass::W, Compass::NW];
         let mut items: Vec<PieItem> = all_labels.with_value(|labels| {
-            let shown = if labels.len() > slots.len() {
-                slots.len() - 1
-            } else {
-                slots.len()
-            };
+            let shown = if labels.len() > slots.len() { slots.len() - 1 } else { slots.len() };
             labels
                 .iter()
                 .take(shown)
@@ -415,70 +439,41 @@ pub fn AnnotationLayer(
                 .collect()
         });
         if all_labels.with_value(|labels| labels.len() > slots.len()) {
-            items.push(PieItem {
-                slot: Compass::NW,
-                name: "More…".to_owned(),
-                key: Some("/".to_owned()),
-                swatch: None,
-                enabled: true,
-                current: false,
-                action: PieAction::MoreLabels,
-            });
+            items.push(item(Compass::NW, "More…", Some("/"), true, false, PieAction::MoreLabels));
         }
-        Pie {
-            label: "Labels",
-            items,
-            centre,
-            wide: false,
-            held,
-            opened_at: now(),
-        }
+        Pie { label: "Labels", items, centre, wide: false, held, opened_at: now() }
     };
     let options_pie = move |centre: Point, held: bool| {
-        let option = |slot, name: &str, key: Option<&str>, enabled, current, action| PieItem {
-            slot,
-            name: name.to_owned(),
-            key: key.map(str::to_owned),
-            swatch: None,
-            enabled,
-            current,
-            action,
+        let drawing = matches!(gesture.get_untracked(), Gesture::Path { .. });
+        let (label, items) = match editor.tool.get_untracked() {
+            Tool::Rectangle => {
+                let oriented = editor.oriented.get_untracked();
+                let items = vec![
+                    item(Compass::N, "2-point", None, true, !oriented, PieAction::SetOriented(false)),
+                    item(Compass::E, "3-point oriented", None, true, oriented, PieAction::SetOriented(true)),
+                    item(Compass::S, "From center", Some("Alt"), !oriented, editor.from_centre.get_untracked(), PieAction::ToggleFromCentre),
+                    item(Compass::W, "Square", Some("Shift"), !oriented, editor.square.get_untracked(), PieAction::ToggleSquare),
+                ];
+                ("Rectangle options", items)
+            }
+            Tool::Polygon | Tool::Polyline => {
+                let items = vec![
+                    item(Compass::N, "Snap 15°", Some("Shift"), true, editor.snap.get_untracked(), PieAction::ToggleSnap),
+                    item(Compass::E, "Finish shape", Some("Enter"), drawing, false, PieAction::FinishShape),
+                    item(Compass::W, "Remove last point", Some("Backspace"), drawing, false, PieAction::UndoPoint),
+                ];
+                (if editor.tool.get_untracked() == Tool::Polygon { "Polygon options" } else { "Polyline options" }, items)
+            }
+            Tool::Points => {
+                let items = vec![
+                    item(Compass::E, "Finish shape", Some("Enter"), drawing, false, PieAction::FinishShape),
+                    item(Compass::W, "Remove last point", Some("Backspace"), drawing, false, PieAction::UndoPoint),
+                ];
+                ("Points options", items)
+            }
+            Tool::Select => ("Options", Vec::new()),
         };
-        let items = vec![
-            option(Compass::N, "2-point", None, true, true, PieAction::Keep),
-            option(
-                Compass::E,
-                "3-point oriented",
-                None,
-                false,
-                false,
-                PieAction::Keep,
-            ),
-            option(
-                Compass::S,
-                "From center",
-                Some("Alt"),
-                true,
-                editor.from_centre.get_untracked(),
-                PieAction::ToggleFromCentre,
-            ),
-            option(
-                Compass::W,
-                "Square",
-                Some("Shift"),
-                true,
-                editor.square.get_untracked(),
-                PieAction::ToggleSquare,
-            ),
-        ];
-        Pie {
-            label: "Rectangle options",
-            items,
-            centre,
-            wide: true,
-            held,
-            opened_at: now(),
-        }
+        Pie { label, items, centre, wide: true, held, opened_at: now() }
     };
 
     let close_pie = move || {
@@ -495,7 +490,7 @@ pub fn AnnotationLayer(
         let opened = if labels_only || has_selection {
             relabel.set_value(has_selection);
             label_pie(centre, held)
-        } else if editor.tool.get_untracked() == Tool::Select {
+        } else if selecting {
             tool_pie(centre, held)
         } else {
             options_pie(centre, held)
@@ -503,23 +498,24 @@ pub fn AnnotationLayer(
         pointer.set(centre);
         pie.set(Some(opened));
     };
+    let undo_point = move || match gesture.get_untracked() {
+        Gesture::Path { mut points, current } if points.len() > 1 => {
+            points.pop();
+            gesture.set(Gesture::Path { points, current });
+        }
+        Gesture::Path { .. } => gesture.set(Gesture::Idle),
+        _ => {}
+    };
     let finish_label = move |id: i64| {
         let (relabelling, tool) = (relabel.get_value(), pending_tool.get_value());
         let shapes = target_shapes();
-        let usable = all_labels.with_value(|labels| {
-            labels
-                .iter()
-                .any(|label| label.id == id && allows(label, &shapes))
-        });
+        let usable = all_labels.with_value(|labels| labels.iter().any(|label| label.id == id && allows(label, &shapes)));
         close_pie();
         if !usable {
             return;
         }
         match (relabelling, tool) {
-            (true, _) => editor.change_selected(|annotation| Annotation {
-                label: id,
-                ..annotation.clone()
-            }),
+            (true, _) => editor.change_selected(|annotation| Annotation { label: id, ..annotation.clone() }),
             (false, Some(tool)) => {
                 editor.tool.set(tool);
                 editor.label.set(Some(id));
@@ -528,9 +524,7 @@ pub fn AnnotationLayer(
         }
     };
     let choose = move |action: PieAction| {
-        let centre = pie
-            .get_untracked()
-            .map_or(cursor_at.get_value(), |open| open.centre);
+        let centre = pie.get_untracked().map_or(cursor_at.get_value(), |open| open.centre);
         pie.set(None);
         match action {
             PieAction::Tool(Tool::Select) => {
@@ -555,21 +549,32 @@ pub fn AnnotationLayer(
                 close_pie();
                 editor.from_centre.update(|on| *on = !*on);
             }
+            PieAction::SetOriented(on) => {
+                close_pie();
+                gesture.set(Gesture::Idle);
+                editor.oriented.set(on);
+            }
+            PieAction::ToggleSnap => {
+                close_pie();
+                editor.snap.update(|on| *on = !*on);
+            }
+            PieAction::FinishShape => {
+                close_pie();
+                finish_path();
+            }
+            PieAction::UndoPoint => {
+                close_pie();
+                undo_point();
+            }
             PieAction::Keep => close_pie(),
         }
     };
     // Releasing the pie key or button: a tap repeats the last tool and label (or leaves the pie
     // open for clicking), otherwise the highlighted item is picked.
     let release = move || {
-        let Some(open) = pie.get_untracked().filter(|open| open.held) else {
-            return;
-        };
+        let Some(open) = pie.get_untracked().filter(|open| open.held) else { return };
         let at = pointer.get_untracked();
-        if is_tap(
-            now() - open.opened_at,
-            at.x - open.centre.x,
-            at.y - open.centre.y,
-        ) {
+        if is_tap(now() - open.opened_at, at.x - open.centre.x, at.y - open.centre.y) {
             match editor.last.get_untracked() {
                 Some((tool, label)) if open.label == "Tools" => {
                     close_pie();
@@ -611,12 +616,25 @@ pub fn AnnotationLayer(
             editor.last.set(Some((tool, label)));
         }
     });
+    // A drawing tool needs a label that allows its shape: switch to the first one that does.
+    Effect::new(move |_| {
+        let Some(shape) = editor.tool.get().shape_type() else { return };
+        if editor.label.get_untracked().is_some_and(|label| label_allows(label, shape)) {
+            return;
+        }
+        let first = all_labels.with_value(|labels| labels.iter().find(|label| label.shape_types.contains(&shape)).map(|l| l.id));
+        match first {
+            Some(id) => editor.label.set(Some(id)),
+            None => editor.notice.set(Some(format!(
+                "No label allows {} shapes; allow it on the Labels tab first.",
+                editor.tool.get_untracked().name().to_lowercase()
+            ))),
+        }
+    });
     let pointer_moves = window_event_listener(ev::pointermove, move |ev| {
         let at = Point::new(f64::from(ev.client_x()), f64::from(ev.client_y()));
         cursor_at.set_value(at);
-        let Some(open) = pie.get_untracked() else {
-            return;
-        };
+        let Some(open) = pie.get_untracked() else { return };
         pointer.set(at);
         // Flick: moving far enough picks at once, whether the pie is held or open for clicking.
         if (at.x - open.centre.x).hypot(at.y - open.centre.y) >= FLICK_DISTANCE
@@ -638,10 +656,10 @@ pub fn AnnotationLayer(
         }
     });
     // A click in an open pie picks the item in that direction; in the centre it closes the pie.
-    let background_click = move || match pie.get_untracked().and_then(|open| {
-        open.highlighted(pointer.get_untracked())
-            .map(|item| item.action.clone())
-    }) {
+    let background_click = move || match pie
+        .get_untracked()
+        .and_then(|open| open.highlighted(pointer.get_untracked()).map(|item| item.action.clone()))
+    {
         Some(action) => choose(action),
         None => close_pie(),
     };
@@ -651,14 +669,113 @@ pub fn AnnotationLayer(
         key_ups.remove();
     });
 
+    // ---- Pointer handling on the canvas.
+    let select_press = move |ev: &ev::PointerEvent, point: Point, current: View| {
+        let (extend, subtract) = (ev.shift_key(), ev.ctrl_key() || ev.meta_key());
+        if !extend && let Some((index, grip)) = grip_at(point, current.scale) {
+            let Some(shape) = editor.annotation(index).map(|a| a.shape) else { return };
+            match grip {
+                // Ctrl+click on a vertex removes it, if the shape keeps enough.
+                Grip::Vertex(vertex) if subtract => match shape.without_vertex(vertex) {
+                    Some(smaller) => editor.reshape(index, smaller),
+                    None => editor.notice.set(Some("That shape cannot lose another point.".into())),
+                },
+                _ if subtract => {}
+                Grip::Resize(handle, rect) => gesture.set(Gesture::Resizing { index, handle, before: rect, current: rect }),
+                Grip::Vertex(vertex) => gesture.set(Gesture::Vertex { index, vertex, current: shape }),
+                // Dragging an edge's "+" inserts a vertex there and drags it.
+                Grip::Midpoint(edge) => {
+                    if let Some(grown) = shape.with_inserted_vertex(edge + 1, point) {
+                        gesture.set(Gesture::Vertex { index, vertex: edge + 1, current: grown });
+                    }
+                }
+                Grip::Rotate(rect) => gesture.set(Gesture::Rotating { index, before: rect, current: rect }),
+            }
+            return;
+        }
+        let hit = editor.annotations.with_untracked(|list| topmost_at(list, point, PICK_MARGIN / current.scale));
+        match hit {
+            // Shift+click toggles a shape, Ctrl+click removes it from the selection.
+            Some(index) if extend => editor.selection.update(|set| {
+                if !set.remove(&index) {
+                    set.insert(index);
+                }
+            }),
+            Some(index) if subtract => editor.selection.update(|set| {
+                set.remove(&index);
+            }),
+            // Dragging a selected shape moves the whole selection.
+            Some(index) => {
+                if !editor.selection.with_untracked(|set| set.contains(&index)) {
+                    editor.selection.set(BTreeSet::from([index]));
+                }
+                gesture.set(Gesture::Moving { grab: point, dx: 0.0, dy: 0.0 });
+            }
+            // On empty space a drag draws a selection box.
+            None => {
+                let mode = if extend {
+                    BoxMode::Extend
+                } else if subtract {
+                    BoxMode::Subtract
+                } else {
+                    editor.selection.set(BTreeSet::new());
+                    BoxMode::Replace
+                };
+                gesture.set(Gesture::Selecting { start: point, current: point, mode });
+            }
+        }
+    };
+    let draw_press = move |ev: &ev::PointerEvent, tool: Tool, point: Point, current: View| {
+        if editor.label.get_untracked().is_none() {
+            let shape = tool.name().to_lowercase();
+            editor.notice.set(Some(format!("Add a label that allows {shape} shapes on the Labels tab first.")));
+            return;
+        }
+        let point = inside(point);
+        match (tool, gesture.get_untracked()) {
+            (Tool::Rectangle, Gesture::Drawing { start, square, from_centre, .. }) => {
+                finish_rectangle(start, point, square, from_centre, current.scale)
+            }
+            (Tool::Rectangle, Gesture::Oriented { mut points, .. }) => {
+                let point = snapped(points.last().copied(), point, ev.shift_key());
+                points.push(point);
+                if let [a, b, c] = points[..] {
+                    add_shape(Shape::OrientedRectangle(OrientedRect::from_three_points(a, b, c)));
+                } else {
+                    gesture.set(Gesture::Oriented { points, current: point });
+                }
+            }
+            (Tool::Rectangle, _) if editor.oriented.get_untracked() => {
+                gesture.set(Gesture::Oriented { points: vec![point], current: point });
+            }
+            (Tool::Rectangle, _) => gesture.set(Gesture::Drawing {
+                start: point,
+                current: point,
+                dragged: false,
+                square: ev.shift_key() != editor.square.get_untracked(),
+                from_centre: ev.alt_key() != editor.from_centre.get_untracked(),
+            }),
+            (_, Gesture::Path { mut points, .. }) => {
+                // Clicking a polygon's first vertex closes it.
+                let closes = tool == Tool::Polygon
+                    && points.len() >= 3
+                    && current.to_screen(points[0]).distance(current.to_screen(point)) <= HANDLE_REACH;
+                if closes {
+                    finish_path();
+                } else {
+                    let next = if tool == Tool::Points { point } else { snapped(points.last().copied(), point, ev.shift_key()) };
+                    points.push(next);
+                    gesture.set(Gesture::Path { points, current: next });
+                }
+            }
+            _ => gesture.set(Gesture::Path { points: vec![point], current: point }),
+        }
+    };
     let on_pointer_down = move |ev: ev::PointerEvent| {
         // The right button opens the pie, like holding Q.
         if ev.button() == 2 {
             ev.prevent_default();
-            cursor_at.set_value(Point::new(
-                f64::from(ev.client_x()),
-                f64::from(ev.client_y()),
-            ));
+            cursor_at.set_value(Point::new(f64::from(ev.client_x()), f64::from(ev.client_y())));
             trigger_down.set_value(true);
             open_pie(true, false);
             return;
@@ -667,107 +784,21 @@ pub fn AnnotationLayer(
         if ev.button() != 0 || space_held.get_untracked() {
             return;
         }
-        let Some((_, point, current)) = locate(&ev) else {
-            return;
-        };
+        let Some((_, point, current)) = locate(&ev) else { return };
         if let Some(canvas) = canvas_ref.get_untracked() {
             canvas.set_pointer_capture(ev.pointer_id()).ok();
         }
         match editor.tool.get_untracked() {
-            Tool::Rectangle => match gesture.get_untracked() {
-                Gesture::Drawing {
-                    start,
-                    square,
-                    from_centre,
-                    ..
-                } => finish_drawing(start, inside(point), square, from_centre, current.scale),
-                _ if editor.label.get_untracked().is_none() => {
-                    editor.notice.set(Some(
-                        "Add a label that allows rectangles on the Labels tab first.".into(),
-                    ));
-                }
-                _ => {
-                    let start = inside(point);
-                    gesture.set(Gesture::Drawing {
-                        start,
-                        current: start,
-                        dragged: false,
-                        square: ev.shift_key() != editor.square.get_untracked(),
-                        from_centre: ev.alt_key() != editor.from_centre.get_untracked(),
-                    });
-                }
-            },
-            Tool::Select => {
-                let (extend, subtract) = (ev.shift_key(), ev.ctrl_key() || ev.meta_key());
-                let reach = HANDLE_REACH / current.scale;
-                if !extend
-                    && !subtract
-                    && let Some(index) = editor.single_selection()
-                    && let Some(before) = rectangle_of(index)
-                    && let Some(handle) = before.handle_at(point, reach)
-                {
-                    gesture.set(Gesture::Resizing {
-                        index,
-                        handle,
-                        before,
-                        current: before,
-                    });
-                    return;
-                }
-                let hit = editor
-                    .annotations
-                    .with_untracked(|list| topmost_at(list, point, PICK_MARGIN / current.scale));
-                match hit {
-                    // Shift+click toggles a shape, Ctrl+click removes it from the selection.
-                    Some(index) if extend => editor.selection.update(|set| {
-                        if !set.remove(&index) {
-                            set.insert(index);
-                        }
-                    }),
-                    Some(index) if subtract => editor.selection.update(|set| {
-                        set.remove(&index);
-                    }),
-                    // Dragging a selected shape moves the whole selection.
-                    Some(index) => {
-                        if !editor.selection.with_untracked(|set| set.contains(&index)) {
-                            editor.selection.set(BTreeSet::from([index]));
-                        }
-                        gesture.set(Gesture::Moving {
-                            grab: point,
-                            dx: 0.0,
-                            dy: 0.0,
-                        });
-                    }
-                    // On empty space a drag draws a selection box.
-                    None => {
-                        let mode = if extend {
-                            BoxMode::Extend
-                        } else if subtract {
-                            BoxMode::Subtract
-                        } else {
-                            editor.selection.set(BTreeSet::new());
-                            BoxMode::Replace
-                        };
-                        gesture.set(Gesture::Selecting {
-                            start: point,
-                            current: point,
-                            mode,
-                        });
-                    }
-                }
-            }
+            Tool::Select => select_press(&ev, point, current),
+            tool => draw_press(&ev, tool, point, current),
         }
     };
 
     let on_pointer_move = move |ev: ev::PointerEvent| {
-        let Some((screen, point, current)) = locate(&ev) else {
-            return;
-        };
+        let Some((screen, point, current)) = locate(&ev) else { return };
         match gesture.get_untracked() {
             Gesture::Drawing { start, dragged, .. } => {
-                let start_screen = current.to_screen(start);
-                let moved =
-                    (screen.x - start_screen.x).hypot(screen.y - start_screen.y) > DRAG_THRESHOLD;
+                let moved = current.to_screen(start).distance(screen) > DRAG_THRESHOLD;
                 gesture.set(Gesture::Drawing {
                     start,
                     current: inside(point),
@@ -776,104 +807,90 @@ pub fn AnnotationLayer(
                     from_centre: ev.alt_key() != editor.from_centre.get_untracked(),
                 });
             }
-            Gesture::Moving { grab, .. } => {
-                let Some(bounds) = selection_bounds() else {
-                    return;
+            Gesture::Oriented { points, .. } => {
+                let current = snapped(points.last().copied(), inside(point), ev.shift_key() && points.len() == 1);
+                gesture.set(Gesture::Oriented { points, current });
+            }
+            Gesture::Path { points, .. } => {
+                let current = if editor.tool.get_untracked() == Tool::Points {
+                    inside(point)
+                } else {
+                    snapped(points.last().copied(), inside(point), ev.shift_key())
                 };
+                gesture.set(Gesture::Path { points, current });
+            }
+            Gesture::Moving { grab, .. } => {
+                let Some(bounds) = selection_bounds() else { return };
                 let moved = bounds.moved_within(point.x - grab.x, point.y - grab.y, width, height);
-                gesture.set(Gesture::Moving {
-                    grab,
-                    dx: moved.min.x - bounds.min.x,
-                    dy: moved.min.y - bounds.min.y,
-                });
+                gesture.set(Gesture::Moving { grab, dx: moved.min.x - bounds.min.x, dy: moved.min.y - bounds.min.y });
             }
-            Gesture::Resizing {
-                index,
-                handle,
-                before,
-                ..
-            } => {
-                gesture.set(Gesture::Resizing {
-                    index,
-                    handle,
-                    before,
-                    current: before.resized(handle, inside(point)),
-                });
+            Gesture::Resizing { index, handle, before, .. } => {
+                gesture.set(Gesture::Resizing { index, handle, before, current: before.resized(handle, inside(point)) });
             }
-            Gesture::Selecting { start, mode, .. } => gesture.set(Gesture::Selecting {
-                start,
-                current: point,
-                mode,
+            Gesture::Vertex { index, vertex, current: shape } => {
+                gesture.set(Gesture::Vertex { index, vertex, current: shape.with_vertex(vertex, inside(point)) });
+            }
+            Gesture::Rotating { index, before, .. } => {
+                let mut angle = before.angle_towards(point);
+                if ev.shift_key() != editor.snap.get_untracked() {
+                    let step = SNAP_DEGREES.to_radians();
+                    angle = (angle / step).round() * step;
+                }
+                gesture.set(Gesture::Rotating { index, before, current: before.rotated_to(angle) });
+            }
+            Gesture::Selecting { start, mode, .. } => gesture.set(Gesture::Selecting { start, current: point, mode }),
+            Gesture::Idle => cursor.set(match (editor.tool.get_untracked(), grip_at(point, current.scale)) {
+                (Tool::Select, Some((_, Grip::Resize(handle, _)))) => handle.cursor(),
+                (Tool::Select, Some((_, Grip::Rotate(_)))) => "grab",
+                (Tool::Select, Some(_)) => "move",
+                _ => "default",
             }),
-            Gesture::Idle => cursor.set(hover_cursor(editor, point, current, rectangle_of)),
         }
     };
 
     let on_pointer_up = move |ev: ev::PointerEvent| {
-        let Some((_, _, current)) = locate(&ev) else {
-            return;
-        };
+        let Some((_, _, current)) = locate(&ev) else { return };
         match gesture.get_untracked() {
             // A click without dragging leaves the rectangle open for a second click.
-            Gesture::Drawing {
-                start,
-                current: end,
-                dragged: true,
-                square,
-                from_centre,
-            } => finish_drawing(start, end, square, from_centre, current.scale),
+            Gesture::Drawing { start, current: end, dragged: true, square, from_centre } => {
+                finish_rectangle(start, end, square, from_centre, current.scale)
+            }
             Gesture::Moving { dx, dy, .. } => {
                 gesture.set(Gesture::Idle);
                 if dx != 0.0 || dy != 0.0 {
-                    editor.change_selected(|annotation| Annotation {
-                        shape: annotation.shape.translated(dx, dy),
-                        ..annotation.clone()
-                    });
+                    editor.change_selected(|annotation| Annotation { shape: annotation.shape.translated(dx, dy), ..annotation.clone() });
                 }
             }
-            Gesture::Resizing {
-                index,
-                before,
-                current: after,
-                ..
-            } => {
+            Gesture::Resizing { index, before, current: after, .. } => {
                 gesture.set(Gesture::Idle);
-                let big_enough = after.width() * current.scale >= MIN_SHAPE_SIZE
-                    && after.height() * current.scale >= MIN_SHAPE_SIZE;
+                let big_enough = after.width() * current.scale >= MIN_SHAPE_SIZE && after.height() * current.scale >= MIN_SHAPE_SIZE;
                 if after != before && big_enough {
-                    let Some(old) = editor
-                        .annotations
-                        .with_untracked(|list| list.get(index).cloned())
-                    else {
-                        return;
-                    };
-                    let new = Annotation {
-                        shape: Shape::Rectangle(after),
-                        ..old.clone()
-                    };
-                    editor.apply(Edit::Replace {
-                        index,
-                        before: old,
-                        after: new,
-                    });
+                    editor.reshape(index, Shape::Rectangle(after));
                 }
             }
-            Gesture::Selecting {
-                start,
-                current: end,
-                mode,
-            } => {
+            Gesture::Vertex { index, current: shape, .. } => {
+                gesture.set(Gesture::Idle);
+                match shape.validate(image_size.0, image_size.1) {
+                    Ok(()) => editor.reshape(index, shape),
+                    Err(reason) => editor.notice.set(Some(format!("Not changed: {reason}."))),
+                }
+            }
+            Gesture::Rotating { index, current: rect, .. } => {
+                gesture.set(Gesture::Idle);
+                let shape = Shape::OrientedRectangle(rect);
+                match shape.validate(image_size.0, image_size.1) {
+                    Ok(()) => editor.reshape(index, shape),
+                    Err(reason) => editor.notice.set(Some(format!("Not changed: {reason}."))),
+                }
+            }
+            Gesture::Selecting { start, current: end, mode } => {
                 gesture.set(Gesture::Idle);
                 let region = Rect::from_corners(start, end);
                 // A click without a drag only cleared the selection (or did nothing with Shift/Ctrl).
-                if region.width() * current.scale < DRAG_THRESHOLD
-                    && region.height() * current.scale < DRAG_THRESHOLD
-                {
+                if region.width() * current.scale < DRAG_THRESHOLD && region.height() * current.scale < DRAG_THRESHOLD {
                     return;
                 }
-                let hits = editor
-                    .annotations
-                    .with_untracked(|list| overlapping(list, region));
+                let hits = editor.annotations.with_untracked(|list| overlapping(list, region));
                 editor.selection.update(|set| match mode {
                     BoxMode::Replace | BoxMode::Extend => set.extend(hits),
                     BoxMode::Subtract => hits.iter().for_each(|hit| {
@@ -886,13 +903,7 @@ pub fn AnnotationLayer(
     };
 
     let keys = window_event_listener(ev::keydown, move |ev| {
-        if typing_in_a_field()
-            || document()
-                .query_selector(".backdrop")
-                .ok()
-                .flatten()
-                .is_some()
-        {
+        if typing_in_a_field() || document().query_selector(".backdrop").ok().flatten().is_some() {
             return;
         }
         let key = ev.key();
@@ -919,6 +930,7 @@ pub fn AnnotationLayer(
             ev.prevent_default();
             return;
         }
+        let drawing_path = matches!(gesture.get_untracked(), Gesture::Path { .. });
         match key.as_str() {
             "z" | "Z" if command && ev.shift_key() => editor.redo(),
             "z" | "Z" if command => editor.undo(),
@@ -930,6 +942,8 @@ pub fn AnnotationLayer(
                 editor.selection.set((0..count).collect());
             }
             _ if command || ev.alt_key() => return,
+            "Enter" if drawing_path => finish_path(),
+            "Backspace" if drawing_path => undo_point(),
             "Escape" => {
                 if gesture.get_untracked() != Gesture::Idle {
                     gesture.set(Gesture::Idle);
@@ -940,129 +954,96 @@ pub fn AnnotationLayer(
                 }
             }
             "Delete" | "Backspace" | "x" | "X" => editor.delete_selected(),
-            "v" | "V" => {
-                gesture.set(Gesture::Idle);
-                editor.tool.set(Tool::Select);
+            _ => {
+                if let Some(tool) = Tool::for_key(&key) {
+                    gesture.set(Gesture::Idle);
+                    editor.tool.set(tool);
+                } else if let Some((_, id)) = hotkeys.iter().find(|(hotkey, _)| hotkey.eq_ignore_ascii_case(&key)) {
+                    match editor.tool.get_untracked().shape_type() {
+                        Some(shape) if !label_allows(*id, shape) => editor.notice.set(Some(format!(
+                            "“{}” cannot be used for {} shapes.",
+                            label_name(*id),
+                            editor.tool.get_untracked().name().to_lowercase()
+                        ))),
+                        _ => editor.label.set(Some(*id)),
+                    }
+                } else {
+                    return;
+                }
             }
-            "r" | "R" => {
-                gesture.set(Gesture::Idle);
-                editor.tool.set(Tool::Rectangle);
-            }
-            _ => match hotkeys
-                .iter()
-                .find(|(hotkey, _)| hotkey.eq_ignore_ascii_case(&key))
-            {
-                Some((_, id)) if rectangle_labels.contains(id) => editor.label.set(Some(*id)),
-                Some((_, id)) => editor.notice.set(Some(format!(
-                    "“{}” cannot be used for rectangles.",
-                    label_names.get(id).cloned().unwrap_or_default()
-                ))),
-                None => return,
-            },
         }
         ev.prevent_default();
     });
     on_cleanup(move || keys.remove());
 
     let draw = move || {
-        let (Some(canvas), Some(current)) = (canvas_ref.get_untracked(), view.get_untracked())
-        else {
-            return;
-        };
+        let (Some(canvas), Some(current)) = (canvas_ref.get_untracked(), view.get_untracked()) else { return };
         let ratio = window().device_pixel_ratio();
         let (css_width, css_height) = size.get_untracked();
-        let (pixel_width, pixel_height) = (
-            (css_width * ratio).round() as u32,
-            (css_height * ratio).round() as u32,
-        );
+        let (pixel_width, pixel_height) = ((css_width * ratio).round() as u32, (css_height * ratio).round() as u32);
         if canvas.width() != pixel_width || canvas.height() != pixel_height {
             canvas.set_width(pixel_width);
             canvas.set_height(pixel_height);
         }
-        let Some(context) = context_2d(&canvas) else {
-            return;
-        };
+        let Some(context) = context_2d(&canvas) else { return };
         context.set_transform(ratio, 0.0, 0.0, ratio, 0.0, 0.0).ok();
         context.clear_rect(0.0, 0.0, css_width, css_height);
 
         let gesture = gesture.get_untracked();
         let selection = editor.selection.get_untracked();
-        let single = (selection.len() == 1)
-            .then(|| selection.first().copied())
-            .flatten();
-        let color_of = |label: i64| {
-            colors
-                .get(&label)
-                .cloned()
-                .unwrap_or_else(|| "#ffffff".to_owned())
-        };
+        let single = editor.single_selection();
+        let color_of = |label: i64| colors.get(&label).cloned().unwrap_or_else(|| "#ffffff".to_owned());
         editor.annotations.with_untracked(|list| {
             for (index, annotation) in list.iter().enumerate() {
-                let Shape::Rectangle(stored) = &annotation.shape;
                 let selected = selection.contains(&index);
-                let rect = match gesture {
-                    Gesture::Resizing {
-                        index: resizing,
-                        current,
-                        ..
-                    } if resizing == index => current,
-                    Gesture::Moving { dx, dy, .. } if selected => {
-                        stored.moved_within(dx, dy, width, height)
-                    }
-                    _ => *stored,
+                // Shapes being edited show their new form.
+                let shape = match &gesture {
+                    Gesture::Resizing { index: i, current, .. } if *i == index => Shape::Rectangle(*current),
+                    Gesture::Vertex { index: i, current, .. } if *i == index => current.clone(),
+                    Gesture::Rotating { index: i, current, .. } if *i == index => Shape::OrientedRectangle(*current),
+                    Gesture::Moving { dx, dy, .. } if selected => annotation.shape.translated(*dx, *dy),
+                    _ => annotation.shape.clone(),
                 };
                 let color = color_of(annotation.label);
-                let screen = to_screen_rect(current, rect);
-                stroke_rect(&context, screen, &color, selected, false);
+                draw::shape(&context, current, &shape, Look { color: &color, selected, dashed: false });
                 if selected {
                     let name = names.get(&annotation.label).cloned().unwrap_or_default();
-                    draw_tag(&context, screen, &name, &color);
+                    draw::tag(&context, current.to_screen(shape.bounds().min), &name, &color);
                 }
-                // Handles only when one shape is selected: they resize that shape.
+                // Handles only when one shape is selected: they edit that shape.
                 if single == Some(index) {
-                    draw_handles(&context, screen, &color);
+                    match &shape {
+                        Shape::Rectangle(rect) => draw::rectangle_handles(&context, current, *rect, &color),
+                        Shape::OrientedRectangle(rect) => {
+                            draw::vertex_handles(&context, current, &shape, &color, false);
+                            draw::rotation_handle(&context, current, *rect, &color);
+                        }
+                        Shape::Points { .. } => draw::vertex_handles(&context, current, &shape, &color, false),
+                        Shape::Polygon { .. } | Shape::Polyline { .. } => {
+                            draw::vertex_handles(&context, current, &shape, &color, true)
+                        }
+                    }
                 }
             }
         });
-        if let Gesture::Selecting {
-            start,
-            current: end,
-            ..
-        } = gesture
-        {
-            let screen = to_screen_rect(current, Rect::from_corners(start, end));
-            context.set_fill_style_str("#ffffff");
-            context.set_global_alpha(0.06);
-            context.fill_rect(screen.min.x, screen.min.y, screen.width(), screen.height());
-            context.set_global_alpha(1.0);
-            context.set_stroke_style_str("#e8e6e1");
-            context.set_line_width(1.0);
-            context.set_line_dash(&js_dashes(&[4.0, 4.0])).ok();
-            context.stroke_rect(screen.min.x, screen.min.y, screen.width(), screen.height());
-            context.set_line_dash(&js_dashes(&[])).ok();
-        }
-        if let Gesture::Drawing {
-            start,
-            current: end,
-            square,
-            from_centre,
-            ..
-        } = gesture
-        {
-            let rect = Rect::from_drag(start, end, square, from_centre).clamped(width, height);
-            let color = editor
-                .label
-                .get_untracked()
-                .map(color_of)
-                .unwrap_or_else(|| "#ffffff".to_owned());
-            let screen = to_screen_rect(current, rect);
-            stroke_rect(&context, screen, &color, false, true);
-            draw_tag(
-                &context,
-                screen,
-                &format!("{:.0} × {:.0}", rect.width(), rect.height()),
-                &color,
-            );
+        let pen = editor.label.get_untracked().map(color_of).unwrap_or_else(|| "#ffffff".to_owned());
+        match gesture {
+            Gesture::Selecting { start, current: end, .. } => draw::selection_box(&context, current, Rect::from_corners(start, end)),
+            Gesture::Drawing { start, current: end, square, from_centre, .. } => {
+                let rect = Rect::from_drag(start, end, square, from_centre).clamped(width, height);
+                draw::shape(&context, current, &Shape::Rectangle(rect), Look { color: &pen, selected: false, dashed: true });
+                draw::tag(&context, current.to_screen(rect.min), &format!("{:.0} × {:.0}", rect.width(), rect.height()), &pen);
+            }
+            Gesture::Oriented { points, current: next } => match points[..] {
+                [a] => draw::path_preview(&context, current, &[a], next, false, false, &pen),
+                [a, b] => draw::oriented_preview(&context, current, OrientedRect::from_three_points(a, b, next), &pen),
+                _ => {}
+            },
+            Gesture::Path { points, current: next } => {
+                let tool = editor.tool.get_untracked();
+                draw::path_preview(&context, current, &points, next, tool == Tool::Polygon, tool == Tool::Points, &pen);
+            }
+            _ => {}
         }
     };
     Effect::new(move |_| {
@@ -1074,15 +1055,16 @@ pub fn AnnotationLayer(
         editor.label.track();
         draw();
     });
-    // Drop a half-drawn shape when the tool changes.
+    // Drop a half-drawn shape when the tool or the rectangle mode changes.
     Effect::new(move |_| {
         editor.tool.track();
+        editor.oriented.track();
         gesture.set(Gesture::Idle);
     });
 
     let canvas_cursor = move || match editor.tool.get() {
-        Tool::Rectangle => "crosshair",
         Tool::Select => cursor.get(),
+        _ => "crosshair",
     };
     view! {
         <PieMenu pie=pie pointer=pointer on_pick=choose on_background=background_click />
@@ -1096,86 +1078,24 @@ pub fn AnnotationLayer(
             data-count=move || editor.annotations.with(Vec::len)
             data-selected={move || editor.selection.get().iter().map(usize::to_string).collect::<Vec<_>>().join(",")}
             data-revision=move || editor.revision.get()
+            data-drawing={move || match gesture.get() { Gesture::Path { points, .. } | Gesture::Oriented { points, .. } => points.len(), _ => 0 }}
             style:cursor=canvas_cursor
             on:pointerdown=on_pointer_down
             on:pointermove=on_pointer_move
             on:pointerup=on_pointer_up
+            on:dblclick=move |_| finish_path()
             on:contextmenu=|ev: ev::MouseEvent| ev.prevent_default()
         ></canvas>
     }
 }
 
-/// The cursor for hovering at `point` with the Select tool: a resize arrow over the handles of
-/// the one selected shape, otherwise the plain arrow (hovering a shape does not change it).
-fn hover_cursor(
-    editor: Editor,
-    point: Point,
-    view: View,
-    rectangle_of: impl Fn(usize) -> Option<Rect>,
-) -> &'static str {
-    editor
-        .single_selection()
-        .and_then(rectangle_of)
-        .and_then(|rect| rect.handle_at(point, HANDLE_REACH / view.scale))
-        .map_or("default", |handle| handle.cursor())
-}
-
-fn to_screen_rect(view: View, rect: Rect) -> Rect {
-    Rect {
-        min: view.to_screen(rect.min),
-        max: view.to_screen(rect.max),
-    }
-}
-
-fn stroke_rect(
-    context: &CanvasRenderingContext2d,
-    rect: Rect,
-    color: &str,
-    selected: bool,
-    dashed: bool,
-) {
-    context.set_fill_style_str(color);
-    context.set_global_alpha(if selected { 0.22 } else { 0.12 });
-    context.fill_rect(rect.min.x, rect.min.y, rect.width(), rect.height());
-    context.set_global_alpha(1.0);
-    context.set_stroke_style_str(color);
-    context.set_line_width(if selected { 2.5 } else { 1.5 });
-    let dashes = js_dashes(if dashed { &[6.0, 4.0] } else { &[] });
-    context.set_line_dash(&dashes).ok();
-    context.stroke_rect(rect.min.x, rect.min.y, rect.width(), rect.height());
-    context.set_line_dash(&js_dashes(&[])).ok();
-}
-
-fn draw_handles(context: &CanvasRenderingContext2d, rect: Rect, color: &str) {
-    context.set_line_width(1.5);
-    for handle in Handle::ALL {
-        let at = rect.handle_position(handle);
-        let (x, y) = (at.x - HANDLE_SIZE / 2.0, at.y - HANDLE_SIZE / 2.0);
-        context.set_fill_style_str("#ffffff");
-        context.fill_rect(x, y, HANDLE_SIZE, HANDLE_SIZE);
-        context.set_stroke_style_str(color);
-        context.stroke_rect(x, y, HANDLE_SIZE, HANDLE_SIZE);
-    }
-}
-
-/// A small filled tag with `text` above the rectangle's top-left corner.
-fn draw_tag(context: &CanvasRenderingContext2d, rect: Rect, text: &str, color: &str) {
-    if text.is_empty() {
-        return;
-    }
-    context.set_font("500 12px 'IBM Plex Sans', system-ui, sans-serif");
-    let width = context.measure_text(text).map(|m| m.width()).unwrap_or(0.0) + 10.0;
-    let (x, y) = (rect.min.x, (rect.min.y - 20.0).max(0.0));
-    context.set_fill_style_str(color);
-    context.fill_rect(x, y, width, 18.0);
-    context.set_fill_style_str("#141517");
-    context.fill_text(text, x + 5.0, y + 13.0).ok();
-}
-
-fn js_dashes(dashes: &[f64]) -> wasm_bindgen::JsValue {
-    dashes
+/// Index of the point nearest to `to` within `reach`, if any.
+fn nearest(points: &[Point], to: Point, reach: f64) -> Option<usize> {
+    points
         .iter()
-        .map(|value| wasm_bindgen::JsValue::from_f64(*value))
-        .collect::<web_sys::js_sys::Array>()
-        .into()
+        .enumerate()
+        .map(|(index, point)| (index, point.distance(to)))
+        .filter(|(_, distance)| *distance <= reach)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(index, _)| index)
 }

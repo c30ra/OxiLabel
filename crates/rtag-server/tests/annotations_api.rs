@@ -170,3 +170,39 @@ async fn removing_an_image_removes_its_annotations() {
     call(&app, Method::POST, &format!("/api/projects/{project}/image-removals"), Some(json!({"ids": [image]}))).await;
     assert_eq!(label_usage(&app, project, 1).await, json!({"annotations": 0}));
 }
+
+#[tokio::test]
+async fn every_vector_shape_type_is_saved_and_reloaded() {
+    let app = test_app().await;
+    let (project, image) = setup(&app).await;
+    call(
+        &app,
+        Method::POST,
+        &format!("/api/projects/{project}/labels"),
+        Some(json!({"name": "any", "color": "#ffffff", "shape_types": ["polygon", "polyline", "points", "oriented_rectangle"]})),
+    )
+    .await;
+    let shapes = json!([
+        {"label": 3, "shape": {"type": "polygon", "points": [{"x": 10.0, "y": 10.0}, {"x": 90.0, "y": 15.0}, {"x": 40.0, "y": 80.0}]}},
+        {"label": 3, "shape": {"type": "polyline", "points": [{"x": 5.0, "y": 5.0}, {"x": 50.0, "y": 5.0}, {"x": 50.0, "y": 60.0}]}},
+        {"label": 3, "shape": {"type": "points", "points": [{"x": 1.0, "y": 2.0}, {"x": 3.5, "y": 4.25}]}},
+        {"label": 3, "shape": {"type": "oriented_rectangle", "centre": {"x": 200.0, "y": 150.0}, "width": 80.0, "height": 30.0, "angle": 0.5}}
+    ]);
+    let (status, saved) = save(&app, project, image, 0, shapes.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(load(&app, project, image).await["annotations"], shapes);
+}
+
+#[tokio::test]
+async fn labels_reject_shapes_they_do_not_allow_and_bad_new_shapes() {
+    let app = test_app().await;
+    let (project, image) = setup(&app).await;
+    // Label 2 ("crack") only allows polylines.
+    let polygon = json!({"label": 2, "shape": {"type": "polygon", "points": [{"x": 0.0, "y": 0.0}, {"x": 9.0, "y": 0.0}, {"x": 0.0, "y": 9.0}]}});
+    let (status, body) = save(&app, project, image, 0, json!([polygon])).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "annotation 1: label \"crack\" does not allow polygon shapes");
+    let short = json!({"label": 2, "shape": {"type": "polyline", "points": [{"x": 1.0, "y": 1.0}]}});
+    let (_, body) = save(&app, project, image, 0, json!([short])).await;
+    assert_eq!(body["error"], "annotation 1: a polyline needs at least two different points");
+}
