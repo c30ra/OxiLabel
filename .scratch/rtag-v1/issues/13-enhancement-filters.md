@@ -12,3 +12,4 @@
 - [ ] Filtered views are cached, and switching back to a seen setting is fast
 - [ ] Filter output matches the reference implementations in the author's `defect_detection` project on test images, within a small tolerance
 - [ ] Drawing on a filtered view still stores coordinates in the original image space
+- [ ] Edge snapping, fuzzy fill and the edge-limited brush (tickets 21, 22) each get a switch to analyse the active filter's view instead of the original, using lossless tiles of the filtered pyramid (ADR 0002)

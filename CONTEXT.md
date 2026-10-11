@@ -36,6 +36,10 @@ _Avoid_: Image label, category
 Extra named property attached to an annotation or tag (e.g. "occluded"), beyond its label.
 _Avoid_: Metadata, property
 
+**Enhancement filter**:
+A view-only transformation of an image (e.g. illumination flattening, local contrast) that makes faint structures visible. It never changes the image or where annotations lie; image-analysis aids such as edge snapping and fuzzy fill work on the original image unless the annotator chooses to use the filtered view.
+_Avoid_: Preprocessing, effect, enhancement (on its own)
+
 **Exporter**:
 A pluggable component that converts a project's annotations into one external format (e.g. YOLO, mask PNG) for a given model type.
 _Avoid_: Converter, writer

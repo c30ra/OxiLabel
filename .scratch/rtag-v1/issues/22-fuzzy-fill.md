@@ -4,13 +4,14 @@
 
 **Blocked by:** 09
 
-**Status:** needs-triage
+**Status:** ready-for-agent
 
 - [ ] A click with the fuzzy fill adds the connected region of similar pixels to the mask with the current label
 - [ ] The threshold can be set numerically and by dragging after the click, with a live preview of the region before it is committed
 - [ ] Contiguous and global modes; in eraser mode the region is removed from the mask
-- [ ] Similarity is measured on the original image by default, with an option to use the active enhancement filter's view (ticket 13) for faint structures
+- [ ] Similarity is measured on the original image; a switch to use the active enhancement filter's view is added with ticket 13
+- [ ] Analysis runs in the browser on lossless tiles of the viewed zoom level (ADR 0002); zooming in gives a finer region
 - [ ] Optional smoothing of the result (fill small holes, ignore regions smaller than N pixels) and a maximum region size to stop runaway fills
 - [ ] Each fill is one undo step, works on 6 MP+ images without noticeable lag, and the region growing is unit-tested in the core crate on synthetic images
 
-**Notes:** requested 2026-10-11. Related to ticket 21 (edge-limited brush): both need fast pixel access to the original image in the browser or on the server; triage should decide where that computation lives for both.
+**Notes:** requested 2026-10-11. Decisions (grilling 2026-10-11, ADR 0002): computation in the browser with region growing in `rtag-core`, at the viewed level, on lossless PNG analysis tiles generated on first use per image; the original image by default with a per-tool switch for the filtered view. The same region growing bounds the edge-limited brush of ticket 21.
