@@ -59,6 +59,10 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>) -> impl IntoView {
         anchor.set(Some(index));
         confirming.set(false);
     };
+    let turn_page = move |by: i64| {
+        anchor.set(None);
+        offset.update(|o| *o = (*o + by).max(0));
+    };
     let select_page = move |_| selected.update(|set| set.extend(page_ids()));
     let select_all = move |_| {
         busy.set(true);
@@ -133,14 +137,24 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>) -> impl IntoView {
         }
     };
 
-    let keydown = move |ev: leptos::ev::KeyboardEvent| match ev.key().as_str() {
-        "Escape" if !selected.read_untracked().is_empty() => clear(),
-        "Delete" if !selected.read_untracked().is_empty() => confirming.set(true),
-        _ => {}
-    };
+    // Esc clears the selection and Delete asks to remove it, unless a dialog is open or a field has focus.
+    let keys = window_event_listener(leptos::ev::keydown, move |ev| {
+        let document = document();
+        let typing = document.active_element().is_some_and(|el| matches!(el.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT") && !el.class_list().contains("pick"));
+        let dialog_open = document.query_selector(".backdrop").ok().flatten().is_some();
+        if typing || dialog_open || selected.read_untracked().is_empty() {
+            return;
+        }
+        match ev.key().as_str() {
+            "Escape" => clear(),
+            "Delete" => confirming.set(true),
+            _ => {}
+        }
+    });
+    on_cleanup(move || keys.remove());
 
     view! {
-        <div class="image-set" on:keydown=keydown>
+        <div class="image-set">
             {move || error.get().map(|message| view! { <p class="error" role="alert">{message}</p> })}
             {move || match images.get() {
                 None => view! { <p class="muted">"Loading…"</p> }.into_any(),
@@ -158,10 +172,10 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>) -> impl IntoView {
                             <Show when=move || !selected.read().is_empty()>{selection_bar}</Show>
                             <div class="pager">
                                 <button class="icon" aria-label="Previous page" disabled=move || offset.get() == 0
-                                    on:click=move |_| { anchor.set(None); offset.update(|o| *o = (*o - PAGE_SIZE).max(0)) }>"‹"</button>
+                                    on:click=move |_| turn_page(-PAGE_SIZE)>"‹"</button>
                                 <span class="mono">{format!("{first}–{last} of {total}")}</span>
-                                <button class="icon" aria-label="Next page" disabled=move || offset.get() + PAGE_SIZE >= total
-                                    on:click=move |_| { anchor.set(None); offset.update(|o| *o += PAGE_SIZE) }>"›"</button>
+                                <button class="icon" aria-label="Next page" disabled={move || offset.get() + PAGE_SIZE >= total}
+                                    on:click=move |_| turn_page(PAGE_SIZE)>"›"</button>
                             </div>
                         </div>
                         <ul class="grid" class:selecting=move || !selected.read().is_empty()>
