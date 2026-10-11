@@ -7,10 +7,11 @@ version.workspace = true
 axum = "0.8"
 blake3 = "1"
 image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png", "tiff", "webp"] }
+regex = "1"
 rtag-core = { path = "../rtag-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros", "regexp"] }
 tower-http = { version = "0.6", features = ["fs"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }

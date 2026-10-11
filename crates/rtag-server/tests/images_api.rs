@@ -359,3 +359,91 @@ async fn removing_nothing_is_rejected_and_unknown_projects_are_not_found() {
     let (status, _) = remove(&app, 999, &[1]).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+/// Sets a file's modification time to midday UTC of the given day count since 1970-01-01.
+fn set_modified_day(root: &Path, relative: &str, days: u64) {
+    let time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(days * 86_400 + 43_200);
+    std::fs::File::options().write(true).open(root.join(relative)).unwrap().set_modified(time).unwrap();
+}
+
+async fn filtered(app: &TestApp, project: i64, query: &str) -> Vec<String> {
+    let page = list(app, project, &format!("?{query}")).await;
+    let names: Vec<String> = paths(&page).into_iter().map(str::to_owned).collect();
+    assert_eq!(page["total"], names.len());
+    names
+}
+
+#[tokio::test]
+async fn images_can_be_filtered_by_a_case_insensitive_path_regex() {
+    let app = test_app().await;
+    let project = new_project(&app).await;
+    write_png(app.images.path(), "front/Crack_01.png", 2, 2, 1);
+    write_png(app.images.path(), "front/ok_02.png", 2, 2, 2);
+    write_png(app.images.path(), "back/crack_03.png", 2, 2, 3);
+    import_selection(&app, project, &["front", "back"]).await;
+
+    assert_eq!(filtered(&app, project, "name=crack").await, vec!["back/crack_03.png", "front/Crack_01.png"]);
+    assert_eq!(filtered(&app, project, "name=%5Efront%2F.*_0%5B12%5D").await, vec!["front/Crack_01.png", "front/ok_02.png"]);
+
+    let (status, body) = call(&app, Method::GET, &format!("/api/projects/{project}/images?name=%5B"), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid name filter: unclosed character class");
+}
+
+#[tokio::test]
+async fn images_can_be_filtered_by_dimensions() {
+    let app = test_app().await;
+    let project = new_project(&app).await;
+    write_png(app.images.path(), "set/small.png", 10, 10, 1);
+    write_png(app.images.path(), "set/wide.png", 100, 10, 2);
+    write_png(app.images.path(), "set/big.png", 100, 100, 3);
+    import(&app, project, "set").await;
+
+    assert_eq!(filtered(&app, project, "min_width=50").await, vec!["set/big.png", "set/wide.png"]);
+    assert_eq!(filtered(&app, project, "min_width=50&max_height=50").await, vec!["set/wide.png"]);
+    assert_eq!(filtered(&app, project, "max_width=10&min_height=10").await, vec!["set/small.png"]);
+}
+
+#[tokio::test]
+async fn images_record_file_size_and_date_and_can_be_filtered_by_them() {
+    let app = test_app().await;
+    let project = new_project(&app).await;
+    write_png(app.images.path(), "set/old.png", 2, 2, 1);
+    write_png(app.images.path(), "set/new.png", 400, 400, 2);
+    set_modified_day(app.images.path(), "set/old.png", 19_000); // 2022-01-08
+    set_modified_day(app.images.path(), "set/new.png", 20_000); // 2024-10-04
+    import(&app, project, "set").await;
+
+    let page = list(&app, project, "").await;
+    let new = &page["images"][0];
+    let size = std::fs::metadata(app.images.path().join("set/new.png")).unwrap().len();
+    assert_eq!(new["size"], size);
+    assert!(new["modified"].as_str().unwrap().starts_with("2024-10-0"), "{new}");
+
+    assert_eq!(filtered(&app, project, &format!("min_size={size}")).await, vec!["set/new.png"]);
+    assert_eq!(filtered(&app, project, &format!("max_size={}", size - 1)).await, vec!["set/old.png"]);
+    assert_eq!(filtered(&app, project, "modified_from=2023-01-01").await, vec!["set/new.png"]);
+    assert_eq!(filtered(&app, project, "modified_to=2023-01-01").await, vec!["set/old.png"]);
+    assert_eq!(filtered(&app, project, "modified_from=2022-01-01&modified_to=2024-12-31").await.len(), 2);
+
+    let (status, body) = call(&app, Method::GET, &format!("/api/projects/{project}/images?modified_from=yesterday"), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "dates must look like 2024-12-31");
+}
+
+#[tokio::test]
+async fn ids_of_all_matching_images_are_listed_across_pages() {
+    let app = test_app().await;
+    let project = new_project(&app).await;
+    for index in 0..5 {
+        write_png(app.images.path(), &format!("set/{index}.png"), 2 + index, 2, index as u8);
+    }
+    import(&app, project, "set").await;
+    let all = ids(&list(&app, project, "").await);
+
+    let (status, body) = call(&app, Method::GET, &format!("/api/projects/{project}/image-ids"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!(all));
+    let (_, body) = call(&app, Method::GET, &format!("/api/projects/{project}/image-ids?min_width=5"), None).await;
+    assert_eq!(body, json!(all[3..]));
+}

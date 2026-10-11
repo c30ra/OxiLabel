@@ -123,6 +123,53 @@ pub struct Image {
     pub width: u32,
     pub height: u32,
     pub annotated: bool,
+    /// File size in bytes; unknown if the file was missing when it was recorded.
+    pub size: Option<u64>,
+    /// File modification time as `YYYY-MM-DD HH:MM`, in the server's local time.
+    pub modified: Option<String>,
+}
+
+/// Which images of a project to list. Every set field must match; `None` means no restriction.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageFilter {
+    /// Regular expression matched case-insensitively anywhere in the image path.
+    pub name: Option<String>,
+    pub min_width: Option<u32>,
+    pub max_width: Option<u32>,
+    pub min_height: Option<u32>,
+    pub max_height: Option<u32>,
+    /// File size bounds in bytes, inclusive.
+    pub min_size: Option<u64>,
+    pub max_size: Option<u64>,
+    /// Modification date bounds as `YYYY-MM-DD`, inclusive.
+    pub modified_from: Option<String>,
+    pub modified_to: Option<String>,
+}
+
+impl ImageFilter {
+    /// The set fields as URL query pairs.
+    pub fn to_query(&self) -> Vec<(&'static str, String)> {
+        let mut pairs = Vec::new();
+        let mut push = |key, value: Option<String>| {
+            if let Some(value) = value.filter(|v| !v.is_empty()) {
+                pairs.push((key, value));
+            }
+        };
+        push("name", self.name.clone());
+        push("min_width", self.min_width.map(|v| v.to_string()));
+        push("max_width", self.max_width.map(|v| v.to_string()));
+        push("min_height", self.min_height.map(|v| v.to_string()));
+        push("max_height", self.max_height.map(|v| v.to_string()));
+        push("min_size", self.min_size.map(|v| v.to_string()));
+        push("max_size", self.max_size.map(|v| v.to_string()));
+        push("modified_from", self.modified_from.clone());
+        push("modified_to", self.modified_to.clone());
+        pairs
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.to_query().is_empty()
+    }
 }
 
 /// One page of a project's images, ordered by path.

@@ -16,6 +16,8 @@
 
 **Removing images (added after review):** grid tiles can be selected (checkbox, click once something is selected, shift-click for a range, "Select page", "Select all N") and removed with `POST /api/projects/{id}/image-removals` `{ids}` after a confirmation. Only the database rows go; files stay on disk and can be imported again. Annotations of removed images must be deleted with them (cascade) once ticket 05 adds them.
 
+**Grid controls (added after review):** first/previous/next/last, jump to page, 30–240 per page, Page Up/Down. Filters: case-insensitive path regex (SQLite REGEXP via sqlx `regexp`), width, height, file size and modification date (migration 0004 adds `size` and `modified_at`; older rows are filled in at startup). "Select all" / A selects every image matching the filter (`GET /api/projects/{id}/image-ids`), Alt+A clears; changing the filter clears the selection so hidden images are never removed.
+
 **Known gap:** the browser marks images by path only, so a content duplicate under a new name shows as "new" and is then reported as skipped on import.
 
 **Follow-up (not in this ticket):** the import runs inside one HTTP request. For folders of many thousands of images it should become a background job with progress; hashing could also be parallelised.

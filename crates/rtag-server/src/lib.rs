@@ -42,9 +42,11 @@ pub async fn app(config: Config) -> Result<Router, sqlx::Error> {
     let connect = SqliteConnectOptions::from_str(&config.database_url)?
         .journal_mode(SqliteJournalMode::Wal)
         .busy_timeout(Duration::from_secs(5))
-        .foreign_keys(true);
+        .foreign_keys(true)
+        .with_regexp();
     let pool = options.connect_with(connect).await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
+    tokio::spawn(images::backfill_file_info(pool.clone(), config.images_root.clone()));
     let state = AppState { pool, images_root: config.images_root, cache_dir: config.cache_dir };
     Ok(Router::new()
         .merge(projects::routes())

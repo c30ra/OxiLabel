@@ -11,11 +11,11 @@ use axum::{
     routing::{get, post},
 };
 use rtag_core::{
-    BrowseEntry, BrowseListing, EntryKind, Image, ImagePage, ImportFailure, ImportReport, ImportRequest, RemovalReport,
-    RemovalRequest,
+    BrowseEntry, BrowseListing, EntryKind, Image, ImageFilter, ImagePage, ImportFailure, ImportReport, ImportRequest,
+    RemovalReport, RemovalRequest,
 };
 use serde::Deserialize;
-use sqlx::{Row, SqliteConnection, SqlitePool};
+use sqlx::{QueryBuilder, Row, Sqlite, SqliteConnection, SqlitePool};
 
 use crate::{AppState, error::ApiError, projects};
 
@@ -27,6 +27,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/browse", get(browse))
         .route("/api/projects/{project}/imports", post(import_selection))
         .route("/api/projects/{project}/images", get(list_images))
+        .route("/api/projects/{project}/image-ids", get(list_image_ids))
         .route("/api/projects/{project}/image-removals", post(remove_images))
 }
 
@@ -115,14 +116,18 @@ async fn import_selection(
 
     let mut tx = state.pool.begin().await?;
     for image in &new_images {
-        sqlx::query("INSERT INTO images (project_id, path, hash, width, height) VALUES (?, ?, ?, ?, ?)")
-            .bind(project)
-            .bind(&image.path)
-            .bind(&image.hash)
-            .bind(image.width)
-            .bind(image.height)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "INSERT INTO images (project_id, path, hash, width, height, size, modified_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(project)
+        .bind(&image.path)
+        .bind(&image.hash)
+        .bind(image.width)
+        .bind(image.height)
+        .bind(image.file.size)
+        .bind(image.file.modified_at)
+        .execute(&mut *tx)
+        .await?;
     }
     tx.commit().await?;
     Ok(Json(report))
@@ -181,6 +186,25 @@ struct NewImage {
     hash: String,
     width: u32,
     height: u32,
+    file: FileInfo,
+}
+
+/// Size in bytes and modification time in Unix seconds, as stored in the `images` table.
+#[derive(Clone, Copy)]
+struct FileInfo {
+    size: i64,
+    modified_at: Option<i64>,
+}
+
+impl FileInfo {
+    fn of(metadata: &fs::Metadata) -> Self {
+        let modified_at = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|age| age.as_secs() as i64);
+        FileInfo { size: metadata.len() as i64, modified_at }
+    }
 }
 
 /// Reads every image in the selection that is not already known. Folders are walked recursively;
@@ -208,11 +232,11 @@ fn scan(root: &Path, selection: &[PathBuf], mut known: Known) -> (ImportReport, 
             continue;
         }
         match read_image(&file) {
-            Ok((hash, _, _)) if known.hashes.contains(&hash) => report.skipped += 1,
-            Ok((hash, width, height)) => {
-                known.hashes.insert(hash.clone());
+            Ok(image) if known.hashes.contains(&image.hash) => report.skipped += 1,
+            Ok(image) => {
+                known.hashes.insert(image.hash.clone());
                 report.added += 1;
-                new_images.push(NewImage { path, hash, width, height });
+                new_images.push(NewImage { path, ..image });
             }
             Err(reason) => report.failed.push(ImportFailure { path, reason }),
         }
@@ -243,8 +267,9 @@ fn relative_path(root: &Path, file: &Path) -> String {
     relative.components().map(|part| part.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/")
 }
 
-/// Content hash and dimensions of an image file. Only the header is decoded.
-fn read_image(file: &Path) -> Result<(String, u32, u32), String> {
+/// Content hash, dimensions and file info of an image file (without its path). Only the header is decoded.
+fn read_image(file: &Path) -> Result<NewImage, String> {
+    let info = FileInfo::of(&fs::metadata(file).map_err(|err| err.to_string())?);
     let bytes = fs::read(file).map_err(|err| err.to_string())?;
     let hash = blake3::hash(&bytes).to_hex().to_string();
     let (width, height) = image::ImageReader::new(Cursor::new(&bytes))
@@ -252,7 +277,37 @@ fn read_image(file: &Path) -> Result<(String, u32, u32), String> {
         .map_err(|err| err.to_string())?
         .into_dimensions()
         .map_err(|err| err.to_string())?;
-    Ok((hash, width, height))
+    Ok(NewImage { path: String::new(), hash, width, height, file: info })
+}
+
+/// Fills in size and modification time for images recorded before they were stored.
+/// Files that are missing stay unknown.
+pub async fn backfill_file_info(pool: SqlitePool, root: PathBuf) {
+    let Ok(rows) = sqlx::query("SELECT id, path FROM images WHERE size IS NULL").fetch_all(&pool).await else { return };
+    if rows.is_empty() {
+        return;
+    }
+    let rows: Vec<(i64, String)> = rows.iter().map(|row| (row.get("id"), row.get("path"))).collect();
+    let found = tokio::task::spawn_blocking(move || {
+        rows.into_iter()
+            .filter_map(|(id, path)| fs::metadata(root.join(&path)).ok().map(|meta| (id, FileInfo::of(&meta))))
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
+    let Ok(mut tx) = pool.begin().await else { return };
+    for (id, info) in found {
+        let updated = sqlx::query("UPDATE images SET size = ?, modified_at = ? WHERE id = ?")
+            .bind(info.size)
+            .bind(info.modified_at)
+            .bind(id)
+            .execute(&mut *tx)
+            .await;
+        if updated.is_err() {
+            return;
+        }
+    }
+    let _ = tx.commit().await;
 }
 
 #[derive(Deserialize)]
@@ -267,26 +322,72 @@ fn default_page_size() -> i64 {
     100
 }
 
+/// Appends the conditions selecting the project's images that match `filter`.
+fn push_filter(query: &mut QueryBuilder<'_, Sqlite>, project: i64, filter: &ImageFilter) -> Result<(), ApiError> {
+    query.push(" WHERE project_id = ").push_bind(project);
+    if let Some(name) = filter.name.as_deref().filter(|name| !name.is_empty()) {
+        if let Err(err) = regex::RegexBuilder::new(name).case_insensitive(true).build() {
+            // Syntax errors span several lines pointing at the pattern; the last one says what is wrong.
+            let message = err.to_string();
+            let reason = message.lines().last().unwrap_or_default().trim_start_matches("error: ");
+            return Err(ApiError::BadRequest(format!("invalid name filter: {reason}")));
+        }
+        query.push(" AND path REGEXP ").push_bind(format!("(?i){name}"));
+    }
+    let bounds = [
+        ("width >= ", filter.min_width.map(i64::from)),
+        ("width <= ", filter.max_width.map(i64::from)),
+        ("height >= ", filter.min_height.map(i64::from)),
+        ("height <= ", filter.max_height.map(i64::from)),
+        ("size >= ", filter.min_size.map(|v| v as i64)),
+        ("size <= ", filter.max_size.map(|v| v as i64)),
+    ];
+    for (condition, value) in bounds {
+        if let Some(value) = value {
+            query.push(" AND ").push(condition).push_bind(value);
+        }
+    }
+    let dates = [(">= ", &filter.modified_from), ("<= ", &filter.modified_to)];
+    for (comparison, date) in dates {
+        if let Some(date) = date.as_deref().filter(|date| !date.is_empty()) {
+            if !is_date(date) {
+                return Err(ApiError::BadRequest("dates must look like 2024-12-31".into()));
+            }
+            query.push(" AND date(modified_at, 'unixepoch', 'localtime') ").push(comparison).push_bind(date.to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn is_date(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.len() == 10
+        && bytes.iter().enumerate().all(|(i, b)| if i == 4 || i == 7 { *b == b'-' } else { b.is_ascii_digit() })
+}
+
 async fn list_images(
     State(pool): State<SqlitePool>,
     UrlPath(project): UrlPath<i64>,
     Query(page): Query<PageQuery>,
+    Query(filter): Query<ImageFilter>,
 ) -> Result<Json<ImagePage>, ApiError> {
     let mut conn = pool.acquire().await?;
     projects::ensure_exists(&mut conn, project).await?;
-    let total: i64 = sqlx::query("SELECT COUNT(*) AS n FROM images WHERE project_id = ?")
-        .bind(project)
-        .fetch_one(&mut *conn)
-        .await?
-        .get("n");
-    let rows = sqlx::query(
-        "SELECT id, path, width, height, annotated FROM images WHERE project_id = ? ORDER BY path LIMIT ? OFFSET ?",
-    )
-    .bind(project)
-    .bind(page.limit.clamp(1, MAX_PAGE_SIZE))
-    .bind(page.offset.max(0))
-    .fetch_all(&mut *conn)
-    .await?;
+    let mut count = QueryBuilder::new("SELECT COUNT(*) AS n FROM images");
+    push_filter(&mut count, project, &filter)?;
+    let total: i64 = count.build().fetch_one(&mut *conn).await?.get("n");
+
+    let mut select = QueryBuilder::new(
+        "SELECT id, path, width, height, annotated, size, \
+         strftime('%Y-%m-%d %H:%M', modified_at, 'unixepoch', 'localtime') AS modified FROM images",
+    );
+    push_filter(&mut select, project, &filter)?;
+    select
+        .push(" ORDER BY path LIMIT ")
+        .push_bind(page.limit.clamp(1, MAX_PAGE_SIZE))
+        .push(" OFFSET ")
+        .push_bind(page.offset.max(0));
+    let rows = select.build().fetch_all(&mut *conn).await?;
     let images = rows
         .iter()
         .map(|row| Image {
@@ -295,7 +396,24 @@ async fn list_images(
             width: row.get("width"),
             height: row.get("height"),
             annotated: row.get("annotated"),
+            size: row.get::<Option<i64>, _>("size").map(|size| size as u64),
+            modified: row.get("modified"),
         })
         .collect();
     Ok(Json(ImagePage { total, images }))
+}
+
+/// Ids of every image matching the filter, in path order; used to select all of them at once.
+async fn list_image_ids(
+    State(pool): State<SqlitePool>,
+    UrlPath(project): UrlPath<i64>,
+    Query(filter): Query<ImageFilter>,
+) -> Result<Json<Vec<i64>>, ApiError> {
+    let mut conn = pool.acquire().await?;
+    projects::ensure_exists(&mut conn, project).await?;
+    let mut select = QueryBuilder::new("SELECT id FROM images");
+    push_filter(&mut select, project, &filter)?;
+    select.push(" ORDER BY path");
+    let rows = select.build().fetch_all(&mut *conn).await?;
+    Ok(Json(rows.iter().map(|row| row.get("id")).collect()))
 }
