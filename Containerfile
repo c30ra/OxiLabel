@@ -15,6 +15,7 @@ COPY --from=build /src/crates/rtag-ui/dist /srv/rtag/web
 ENV RTAG_WEB_ROOT=/srv/rtag/web \
     RTAG_DATABASE="sqlite:///data/rtag.db?mode=rwc" \
     RTAG_CACHE_DIR=/data/cache \
+    RTAG_EXPORT_DIR=/data/exports \
     RTAG_IMAGES_ROOT=/images
 # /data holds the database and caches; mount your datasets read-only at /images.
 VOLUME /data /images

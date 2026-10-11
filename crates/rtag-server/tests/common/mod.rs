@@ -17,6 +17,7 @@ pub struct TestApp {
     router: Router,
     pub images: TempDir,
     _cache: TempDir,
+    pub exports: TempDir,
 }
 
 impl Deref for TestApp {
@@ -29,14 +30,16 @@ impl Deref for TestApp {
 pub async fn test_app() -> TestApp {
     let images = TempDir::new().unwrap();
     let cache = TempDir::new().unwrap();
+    let exports = TempDir::new().unwrap();
     let router = rtag_server::app(rtag_server::Config {
         database_url: "sqlite::memory:".into(),
         images_root: images.path().to_owned(),
         cache_dir: cache.path().to_owned(),
+        export_dir: exports.path().to_owned(),
     })
     .await
     .unwrap();
-    TestApp { router, images, _cache: cache }
+    TestApp { router, images, _cache: cache, exports }
 }
 
 pub async fn call(app: &Router, method: Method, uri: &str, body: Option<Value>) -> (StatusCode, Value) {

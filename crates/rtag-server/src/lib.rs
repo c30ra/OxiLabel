@@ -1,12 +1,19 @@
 mod annotations;
 mod error;
+mod exports;
 mod images;
 mod labels;
 mod projects;
 mod thumbnails;
 mod tiles;
 
-use std::{path::PathBuf, str::FromStr, time::Duration};
+use std::{
+    fs,
+    io::{self, Write},
+    path::{Path, PathBuf},
+    str::FromStr,
+    time::Duration,
+};
 
 use axum::{Router, extract::FromRef};
 use sqlx::{
@@ -20,6 +27,8 @@ pub struct Config {
     pub images_root: PathBuf,
     /// Generated thumbnails and tiles live here; safe to delete.
     pub cache_dir: PathBuf,
+    /// Exports are written into folders here.
+    pub export_dir: PathBuf,
 }
 
 #[derive(Clone)]
@@ -27,6 +36,7 @@ struct AppState {
     pool: SqlitePool,
     images_root: PathBuf,
     cache_dir: PathBuf,
+    export_dir: PathBuf,
     pyramid_locks: tiles::GenerationLocks,
 }
 
@@ -54,6 +64,7 @@ pub async fn app(config: Config) -> Result<Router, sqlx::Error> {
         pool,
         images_root: config.images_root,
         cache_dir: config.cache_dir,
+        export_dir: config.export_dir,
         pyramid_locks: tiles::GenerationLocks::default(),
     };
     Ok(Router::new()
@@ -61,7 +72,22 @@ pub async fn app(config: Config) -> Result<Router, sqlx::Error> {
         .merge(labels::routes())
         .merge(images::routes())
         .merge(annotations::routes())
+        .merge(exports::routes())
         .merge(thumbnails::routes())
         .merge(tiles::routes())
         .with_state(state))
+}
+
+/// Writes `path` through a temporary file in the same folder, so a concurrent reader never sees
+/// a partial file.
+pub(crate) fn write_atomically_to(path: &Path, write: impl FnOnce(&mut fs::File) -> io::Result<()>) -> io::Result<()> {
+    let dir = path.parent().expect("written files have a parent folder");
+    fs::create_dir_all(dir)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(dir)?;
+    write(temporary.as_file_mut())?;
+    temporary.persist(path).map(|_| ()).map_err(|err| err.error)
+}
+
+pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_atomically_to(path, |file| file.write_all(bytes))
 }

@@ -23,11 +23,7 @@ use image::{DynamicImage, ImageBuffer, Pixel, codecs::jpeg::JpegEncoder, imageop
 use rtag_core::pyramid::{Pyramid, TILE_SIZE};
 use sqlx::Row;
 
-use crate::{
-    AppState,
-    error::ApiError,
-    thumbnails::{open_image, write_atomically},
-};
+use crate::{AppState, error::ApiError, thumbnails::open_image, write_atomically};
 
 const JPEG_QUALITY: u8 = 90;
 /// Written last, so its presence means every tile of the pyramid is in the cache.

@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::{Cursor, Write},
+    io::Cursor,
     path::Path,
 };
 
@@ -14,7 +14,7 @@ use axum::{
 use image::{DynamicImage, ImageFormat};
 use sqlx::Row;
 
-use crate::{AppState, error::ApiError};
+use crate::{AppState, error::ApiError, write_atomically};
 
 /// Thumbnails fit in a square of this many pixels.
 const THUMBNAIL_SIZE: u32 = 256;
@@ -64,13 +64,4 @@ fn encode_thumbnail(image: &DynamicImage) -> image::ImageResult<Vec<u8>> {
     // JPEG has no alpha channel, so flatten to RGB first.
     DynamicImage::ImageRgb8(thumbnail.to_rgb8()).write_to(&mut Cursor::new(&mut bytes), ImageFormat::Jpeg)?;
     Ok(bytes)
-}
-
-/// Writes through a temporary file so a concurrent reader never sees a partial thumbnail.
-pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let dir = path.parent().expect("cache file has a parent folder");
-    fs::create_dir_all(dir)?;
-    let mut temporary = tempfile::NamedTempFile::new_in(dir)?;
-    temporary.write_all(bytes)?;
-    temporary.persist(path).map(|_| ()).map_err(|err| err.error)
 }

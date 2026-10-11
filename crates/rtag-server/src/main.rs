@@ -17,6 +17,7 @@ async fn main() {
         database_url: env_or("RTAG_DATABASE", "sqlite://data/rtag.db?mode=rwc"),
         images_root: PathBuf::from(env_or("RTAG_IMAGES_ROOT", "images")),
         cache_dir: PathBuf::from(env_or("RTAG_CACHE_DIR", "data/cache")),
+        export_dir: PathBuf::from(env_or("RTAG_EXPORT_DIR", "data/exports")),
     };
     let addr = env_or("RTAG_ADDR", "0.0.0.0:3000");
     let web_root = env_or("RTAG_WEB_ROOT", "crates/rtag-ui/dist");

@@ -22,7 +22,7 @@ pub fn exporter(id: &str) -> Option<Box<dyn Exporter>> {
     exporters().into_iter().find(|exporter| exporter.id() == id)
 }
 
-pub trait Exporter {
+pub trait Exporter: Send + Sync {
     /// Stable identifier used in requests, e.g. `yolo-detect`.
     fn id(&self) -> &'static str;
     /// Name shown to people.

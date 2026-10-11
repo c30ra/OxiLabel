@@ -38,15 +38,15 @@ async fn load_annotations(
         .bind(image)
         .fetch_all(&mut *conn)
         .await?;
-    let annotations = rows
-        .iter()
-        .map(|row| {
-            let shape = serde_json::from_str(row.get("shape"))
-                .map_err(|err| ApiError::Internal(format!("stored shape of image {image} is unreadable: {err}")))?;
-            Ok(Annotation { label: row.get("label_id"), shape, source: row.get("source"), confidence: row.get("confidence") })
-        })
-        .collect::<Result<_, ApiError>>()?;
+    let annotations = rows.iter().map(annotation_from_row).collect::<Result<_, ApiError>>()?;
     Ok(Json(ImageAnnotations { version, annotations }))
+}
+
+/// Reads an annotation from a row with `label_id`, `shape`, `source` and `confidence`.
+pub(crate) fn annotation_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Annotation, ApiError> {
+    let shape = serde_json::from_str(row.get("shape"))
+        .map_err(|err| ApiError::Internal(format!("a stored shape is unreadable: {err}")))?;
+    Ok(Annotation { label: row.get("label_id"), shape, source: row.get("source"), confidence: row.get("confidence") })
 }
 
 async fn save_annotations(
