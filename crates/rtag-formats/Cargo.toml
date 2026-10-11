@@ -1,0 +1,6 @@
+[package]
+name = "rtag-formats"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]

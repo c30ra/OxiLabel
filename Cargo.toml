@@ -1,0 +1,7 @@
+[workspace]
+resolver = "3"
+members = ["crates/rtag-core", "crates/rtag-server", "crates/rtag-formats", "crates/rtag-ui"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"

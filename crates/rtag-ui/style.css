@@ -1,0 +1,6 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+body { margin: 0 auto; max-width: 40rem; padding: 2rem 1rem; }
+ul { list-style: none; padding: 0; }
+li { display: flex; justify-content: space-between; align-items: center; padding: .5rem 0; border-bottom: 1px solid #8884; }
+form { display: flex; gap: .5rem; margin-block: 1rem; }
+input { flex: 1; padding: .4rem; }
