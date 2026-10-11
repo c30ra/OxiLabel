@@ -1,3 +1,4 @@
+mod images;
 mod labels;
 mod project;
 mod projects;

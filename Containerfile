@@ -13,7 +13,10 @@ FROM docker.io/library/debian:stable-slim
 COPY --from=build /src/target/release/rtag-server /usr/local/bin/rtag-server
 COPY --from=build /src/crates/rtag-ui/dist /srv/rtag/web
 ENV RTAG_WEB_ROOT=/srv/rtag/web \
-    RTAG_DATABASE="sqlite:///data/rtag.db?mode=rwc"
-VOLUME /data
+    RTAG_DATABASE="sqlite:///data/rtag.db?mode=rwc" \
+    RTAG_CACHE_DIR=/data/cache \
+    RTAG_IMAGES_ROOT=/images
+# /data holds the database and caches; mount your datasets read-only at /images.
+VOLUME /data /images
 EXPOSE 3000
 CMD ["rtag-server"]

@@ -18,3 +18,11 @@ td.actions { white-space: nowrap; text-align: right; }
 fieldset { border: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: .25rem 1rem; }
 label.check { display: inline-flex; gap: .3rem; align-items: center; }
 .error { color: var(--error); }
+.pager { display: flex; gap: 1rem; align-items: center; margin-block: .75rem; }
+.grid { list-style: none; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr)); gap: .75rem; }
+.grid li { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.grid img { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: contain; background: #0001; }
+.caption { display: flex; gap: .4rem; align-items: center; padding: .3rem .4rem; font-size: .8em; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.status { flex: none; width: .6rem; height: .6rem; border-radius: 50%; border: 1px solid var(--border); }
+.status.done { background: #27ae60; border-color: #27ae60; }
+.report { padding: .5rem .75rem; border: 1px solid var(--border); border-radius: 6px; }

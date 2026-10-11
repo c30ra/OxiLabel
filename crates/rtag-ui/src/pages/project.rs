@@ -2,7 +2,7 @@ use leptos::prelude::*;
 use leptos_router::{components::A, hooks::use_params_map};
 use rtag_core::Project;
 
-use super::labels::LabelSet;
+use super::{images::ImageSet, labels::LabelSet};
 use crate::api;
 
 #[component]
@@ -26,6 +26,7 @@ pub fn ProjectPage() -> impl IntoView {
             Some(Err(message)) => view! { <p class="error" role="alert">{message}</p> }.into_any(),
             Some(Ok(project)) => view! {
                 <h1>{project.name}</h1>
+                <ImageSet project=project.id />
                 <LabelSet project=project.id />
             }.into_any(),
         }}

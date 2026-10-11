@@ -7,9 +7,9 @@ use axum::{
 use rtag_core::{Label, LabelDefinition};
 use sqlx::{Row, SqliteConnection, SqlitePool, sqlite::SqliteRow};
 
-use crate::error::ApiError;
+use crate::{AppState, error::ApiError, projects};
 
-pub fn routes() -> Router<SqlitePool> {
+pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/projects/{project}/labels", get(list_labels).post(create_label))
         .route("/api/projects/{project}/labels/{id}", put(update_label).delete(delete_label))
@@ -56,14 +56,7 @@ async fn list_labels(State(pool): State<SqlitePool>, Path(project): Path<i64>) -
 
 /// All labels of a project, or `NotFound` if the project does not exist.
 async fn project_labels(conn: &mut SqliteConnection, project: i64) -> Result<Vec<Label>, ApiError> {
-    let exists = sqlx::query("SELECT 1 FROM projects WHERE id = ?")
-        .bind(project)
-        .fetch_optional(&mut *conn)
-        .await?
-        .is_some();
-    if !exists {
-        return Err(ApiError::NotFound);
-    }
+    projects::ensure_exists(conn, project).await?;
     let rows = sqlx::query("SELECT * FROM labels WHERE project_id = ? ORDER BY id")
         .bind(project)
         .fetch_all(&mut *conn)

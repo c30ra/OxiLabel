@@ -9,6 +9,8 @@ pub enum ApiError {
     BadRequest(String),
     NotFound,
     Database(sqlx::Error),
+    /// An unexpected failure; the detail is logged, not sent to the client.
+    Internal(String),
 }
 
 impl From<sqlx::Error> for ApiError {
@@ -24,6 +26,10 @@ impl IntoResponse for ApiError {
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not found".to_owned()),
             ApiError::Database(err) => {
                 eprintln!("database error: {err}");
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_owned())
+            }
+            ApiError::Internal(detail) => {
+                eprintln!("internal error: {detail}");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_owned())
             }
         };

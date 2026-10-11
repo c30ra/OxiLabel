@@ -5,11 +5,11 @@ use axum::{
     routing::get,
 };
 use rtag_core::{NewProject, Project};
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, SqliteConnection, SqlitePool};
 
-use crate::error::ApiError;
+use crate::{AppState, error::ApiError};
 
-pub fn routes() -> Router<SqlitePool> {
+pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/projects", get(list_projects).post(create_project))
         .route("/api/projects/{id}", get(get_project).delete(delete_project))
@@ -55,4 +55,14 @@ async fn delete_project(State(pool): State<SqlitePool>, Path(id): Path<i64>) -> 
         return Err(ApiError::NotFound);
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Fails with `NotFound` unless the project exists.
+pub async fn ensure_exists(conn: &mut SqliteConnection, project: i64) -> Result<(), ApiError> {
+    sqlx::query("SELECT 1 FROM projects WHERE id = ?")
+        .bind(project)
+        .fetch_optional(conn)
+        .await?
+        .map(|_| ())
+        .ok_or(ApiError::NotFound)
 }

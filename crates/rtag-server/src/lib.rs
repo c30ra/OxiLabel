@@ -1,26 +1,55 @@
 mod error;
+mod images;
 mod labels;
 mod projects;
+mod thumbnails;
 
-use std::{str::FromStr, time::Duration};
+use std::{path::PathBuf, str::FromStr, time::Duration};
 
-use axum::Router;
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+use axum::{Router, extract::FromRef};
+use sqlx::{
+    SqlitePool,
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
+};
 
-pub async fn app(database_url: &str) -> Result<Router, sqlx::Error> {
+pub struct Config {
+    pub database_url: String,
+    /// Images can only be imported from inside this folder.
+    pub images_root: PathBuf,
+    /// Generated thumbnails and tiles live here; safe to delete.
+    pub cache_dir: PathBuf,
+}
+
+#[derive(Clone)]
+struct AppState {
+    pool: SqlitePool,
+    images_root: PathBuf,
+    cache_dir: PathBuf,
+}
+
+impl FromRef<AppState> for SqlitePool {
+    fn from_ref(state: &AppState) -> Self {
+        state.pool.clone()
+    }
+}
+
+pub async fn app(config: Config) -> Result<Router, sqlx::Error> {
     let mut options = SqlitePoolOptions::new();
-    if database_url.contains(":memory:") {
+    if config.database_url.contains(":memory:") {
         // Each connection to `sqlite::memory:` is a separate database, so tests must share one.
         options = options.max_connections(1);
     }
-    let connect = SqliteConnectOptions::from_str(database_url)?
+    let connect = SqliteConnectOptions::from_str(&config.database_url)?
         .journal_mode(SqliteJournalMode::Wal)
         .busy_timeout(Duration::from_secs(5))
         .foreign_keys(true);
     let pool = options.connect_with(connect).await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
+    let state = AppState { pool, images_root: config.images_root, cache_dir: config.cache_dir };
     Ok(Router::new()
         .merge(projects::routes())
         .merge(labels::routes())
-        .with_state(pool))
+        .merge(images::routes())
+        .merge(thumbnails::routes())
+        .with_state(state))
 }

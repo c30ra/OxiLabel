@@ -6,8 +6,12 @@
 
 **Status:** ready-for-agent
 
-- [ ] Importing a folder adds all supported images recursively and reports how many were added
-- [ ] Importing the same folder again skips images already known by hash or path
-- [ ] The grid shows thumbnails, annotation count and status for each image, with simple pagination or virtual scrolling
-- [ ] Unreadable or unsupported files are reported, not silently dropped
-- [ ] API tests cover import, re-import, and dimension and hash recording
+- [x] Importing a folder adds all supported images recursively and reports how many were added
+- [x] Importing the same folder again skips images already known by hash or path
+- [ ] The grid shows thumbnails ~~, annotation count~~ and status for each image (annotation count moved to ticket 05), with simple pagination or virtual scrolling
+- [x] Unreadable or unsupported files are reported, not silently dropped
+- [x] API tests cover import, re-import, and dimension and hash recording
+
+**Implementation note:** imports are confined to `RTAG_IMAGES_ROOT` (mounted at `/images` in the container); the folder is given relative to it. Known paths are skipped without reading; new files are hashed with blake3 and content duplicates are skipped. Thumbnails (max 256 px, never upscaled) are generated on first request and cached by hash under `RTAG_CACHE_DIR`. Measured on the author's data: 487 files / 2.2 GB imported in 16 s, re-import 0.5 s, cold 6 MP thumbnail about 0.2 s.
+
+**Follow-up (not in this ticket):** the import runs inside one HTTP request. For folders of many thousands of images it should become a background job with progress; hashing could also be parallelised.

@@ -114,3 +114,42 @@ impl Label {
         Label { id, name, color, hotkey, shape_types, ignore }
     }
 }
+
+/// An image in a project. `path` is relative to the server's image root, with `/` separators.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Image {
+    pub id: i64,
+    pub path: String,
+    pub width: u32,
+    pub height: u32,
+    pub annotated: bool,
+}
+
+/// One page of a project's images, ordered by path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImagePage {
+    pub total: i64,
+    pub images: Vec<Image>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportRequest {
+    /// Folder relative to the image root; empty means the root itself.
+    pub folder: String,
+}
+
+/// What an import did: new images added, known ones (same path or same content) skipped,
+/// files that are not images counted, and images that could not be read listed with a reason.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportReport {
+    pub added: usize,
+    pub skipped: usize,
+    pub unsupported: usize,
+    pub failed: Vec<ImportFailure>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportFailure {
+    pub path: String,
+    pub reason: String,
+}
