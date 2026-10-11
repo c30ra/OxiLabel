@@ -12,6 +12,11 @@ pub async fn get<T: DeserializeOwned>(url: &str) -> Result<T, String> {
     read_json(check(Request::get(url).send().await).await?).await
 }
 
+/// GET with query parameters, which are URL-encoded.
+pub async fn get_with_query<T: DeserializeOwned>(url: &str, query: &[(&str, &str)]) -> Result<T, String> {
+    read_json(check(Request::get(url).query(query.iter().copied()).send().await).await?).await
+}
+
 pub async fn post<B: Serialize, T: DeserializeOwned>(url: &str, body: &B) -> Result<T, String> {
     send_json(Request::post(url), body).await
 }

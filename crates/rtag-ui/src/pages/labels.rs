@@ -111,7 +111,6 @@ pub fn LabelSet(project: i64) -> impl IntoView {
     };
 
     view! {
-        <h2>"Labels"</h2>
         {move || match labels.get() {
             None => view! { <p>"Loading…"</p> }.into_any(),
             Some(Err(message)) => view! { <p class="error" role="alert">{message}</p> }.into_any(),
@@ -187,7 +186,7 @@ pub fn LabelSet(project: i64) -> impl IntoView {
                 <p class="error" role="alert">{move || error.get()}</p>
             </Show>
             <div class="row">
-                <button type="submit">{move || if editing.get().is_some() { "Save" } else { "Add" }}</button>
+                <button class="primary" type="submit">{move || if editing.get().is_some() { "Save" } else { "Add label" }}</button>
                 <Show when=move || editing.get().is_some()>
                     <button type="button" on:click=move |_| reset()>"Cancel"</button>
                 </Show>

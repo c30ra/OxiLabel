@@ -42,10 +42,14 @@ pub fn ProjectsPage() -> impl IntoView {
     };
 
     view! {
+        <header class="topbar">
+            <A href="/" attr:class="brand">"rtag"</A>
+        </header>
+        <main class="page narrow">
         <h1>"Projects"</h1>
         <form class="row" on:submit=on_create>
             <input placeholder="New project name" prop:value=name on:input:target=move |ev| name.set(ev.target().value()) />
-            <button type="submit">"Create"</button>
+            <button class="primary" type="submit">"New project"</button>
         </form>
         <Show when=move || error.get().is_some()>
             <p class="error" role="alert">{move || error.get()}</p>
@@ -68,5 +72,6 @@ pub fn ProjectsPage() -> impl IntoView {
                 </ul>
             }.into_any(),
         }}
+        </main>
     }
 }

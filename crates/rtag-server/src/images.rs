@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeSet, HashSet},
     fs,
     io::Cursor,
     path::{Component, Path, PathBuf},
@@ -10,9 +10,9 @@ use axum::{
     extract::{Path as UrlPath, Query, State},
     routing::{get, post},
 };
-use rtag_core::{Image, ImagePage, ImportFailure, ImportReport, ImportRequest};
+use rtag_core::{BrowseEntry, BrowseListing, EntryKind, Image, ImagePage, ImportFailure, ImportReport, ImportRequest};
 use serde::Deserialize;
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, SqliteConnection, SqlitePool};
 
 use crate::{AppState, error::ApiError, projects};
 
@@ -21,35 +21,93 @@ const MAX_PAGE_SIZE: i64 = 500;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/api/projects/{project}/imports", post(import_folder))
+        .route("/api/browse", get(browse))
+        .route("/api/projects/{project}/imports", post(import_selection))
         .route("/api/projects/{project}/images", get(list_images))
 }
 
-async fn import_folder(
+/// Images in the project, as a set of paths and a set of content hashes.
+#[derive(Default)]
+struct Known {
+    paths: HashSet<String>,
+    hashes: HashSet<String>,
+}
+
+async fn known_images(conn: &mut SqliteConnection, project: i64) -> Result<Known, ApiError> {
+    let mut known = Known::default();
+    for row in sqlx::query("SELECT path, hash FROM images WHERE project_id = ?")
+        .bind(project)
+        .fetch_all(conn)
+        .await?
+    {
+        known.paths.insert(row.get("path"));
+        known.hashes.insert(row.get("hash"));
+    }
+    Ok(known)
+}
+
+#[derive(Deserialize)]
+struct BrowseQuery {
+    #[serde(default)]
+    path: String,
+    project: Option<i64>,
+}
+
+async fn browse(State(state): State<AppState>, Query(query): Query<BrowseQuery>) -> Result<Json<BrowseListing>, ApiError> {
+    let root = image_root(&state)?;
+    let folder = resolve(&root, &query.path)?;
+    if !folder.is_dir() {
+        return Err(ApiError::BadRequest(format!("\"{}\" is not a folder", query.path.trim())));
+    }
+    let imported = match query.project {
+        Some(project) => {
+            let mut conn = state.pool.acquire().await?;
+            projects::ensure_exists(&mut conn, project).await?;
+            Some(known_images(&mut conn, project).await?.paths)
+        }
+        None => None,
+    };
+
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(&folder).map_err(|err| ApiError::Internal(format!("cannot list {}: {err}", folder.display())))?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Ok(kind) = entry.file_type() else { continue };
+        if name.starts_with('.') {
+            continue;
+        }
+        let path = relative_path(&root, &entry.path());
+        if kind.is_dir() {
+            entries.push(BrowseEntry { name, path, kind: EntryKind::Folder, imported: None });
+        } else if kind.is_file() && is_supported(&entry.path()) {
+            let imported = imported.as_ref().map(|known| known.contains(&path));
+            entries.push(BrowseEntry { name, path, kind: EntryKind::Image, imported });
+        }
+    }
+    entries.sort_by(|a, b| {
+        (a.kind != EntryKind::Folder, a.name.to_lowercase()).cmp(&(b.kind != EntryKind::Folder, b.name.to_lowercase()))
+    });
+    Ok(Json(BrowseListing { path: relative_path(&root, &folder), entries }))
+}
+
+async fn import_selection(
     State(state): State<AppState>,
     UrlPath(project): UrlPath<i64>,
     Json(request): Json<ImportRequest>,
 ) -> Result<Json<ImportReport>, ApiError> {
     let mut conn = state.pool.acquire().await?;
     projects::ensure_exists(&mut conn, project).await?;
-    let root = state.images_root.canonicalize().map_err(|_| ApiError::BadRequest("image root is not available".into()))?;
-    let folder = resolve_folder(&root, &request.folder)?;
-
-    let mut known = Known::default();
-    for row in sqlx::query("SELECT path, hash FROM images WHERE project_id = ?")
-        .bind(project)
-        .fetch_all(&mut *conn)
-        .await?
-    {
-        known.paths.insert(row.get("path"));
-        known.hashes.insert(row.get("hash"));
+    if request.paths.is_empty() {
+        return Err(ApiError::BadRequest("select at least one folder or image".into()));
     }
+    let root = image_root(&state)?;
+    let selection = request.paths.iter().map(|path| resolve(&root, path)).collect::<Result<Vec<_>, _>>()?;
+    let known = known_images(&mut conn, project).await?;
     // Don't hold a database connection through a scan that may take minutes.
     drop(conn);
 
-    let (report, new_images) = tokio::task::spawn_blocking(move || scan(&root, &folder, known))
+    let (report, new_images) = tokio::task::spawn_blocking(move || scan(&root, &selection, known))
         .await
-        .expect("folder scan panicked");
+        .expect("image scan panicked");
 
     let mut tx = state.pool.begin().await?;
     for image in &new_images {
@@ -66,28 +124,29 @@ async fn import_folder(
     Ok(Json(report))
 }
 
-/// Resolves a folder given relative to the image root, refusing anything that leaves the root.
-fn resolve_folder(root: &Path, folder: &str) -> Result<PathBuf, ApiError> {
-    let relative = Path::new(folder.trim());
-    if relative.components().any(|part| !matches!(part, Component::Normal(_) | Component::CurDir)) {
-        return Err(ApiError::BadRequest("folder must be a path inside the image root".into()));
-    }
-    let folder = root
-        .join(relative)
+fn image_root(state: &AppState) -> Result<PathBuf, ApiError> {
+    state
+        .images_root
         .canonicalize()
-        .ok()
-        .filter(|path| path.is_dir())
-        .ok_or_else(|| ApiError::BadRequest(format!("folder \"{}\" not found", relative.display())))?;
-    if !folder.starts_with(root) {
-        return Err(ApiError::BadRequest("folder must be a path inside the image root".into()));
-    }
-    Ok(folder)
+        .map_err(|err| ApiError::Internal(format!("image root {} is not available: {err}", state.images_root.display())))
 }
 
-#[derive(Default)]
-struct Known {
-    paths: HashSet<String>,
-    hashes: HashSet<String>,
+/// Resolves a folder or file given relative to the image root, refusing anything that leaves it.
+fn resolve(root: &Path, relative: &str) -> Result<PathBuf, ApiError> {
+    let relative = relative.trim();
+    let outside = || ApiError::BadRequest("path must be inside the image root".into());
+    if Path::new(relative).components().any(|part| !matches!(part, Component::Normal(_) | Component::CurDir)) {
+        return Err(outside());
+    }
+    let path = root
+        .join(relative)
+        .canonicalize()
+        .map_err(|_| ApiError::BadRequest(format!("\"{relative}\" not found")))?;
+    // A symlink inside the root may still point outside it.
+    if !path.starts_with(root) {
+        return Err(outside());
+    }
+    Ok(path)
 }
 
 struct NewImage {
@@ -97,21 +156,23 @@ struct NewImage {
     height: u32,
 }
 
-/// Walks `folder` recursively in path order and reads every image not already known.
-fn scan(root: &Path, folder: &Path, mut known: Known) -> (ImportReport, Vec<NewImage>) {
+/// Reads every image in the selection that is not already known. Folders are walked recursively;
+/// a file reached twice (selected on its own and through its folder) is handled once.
+fn scan(root: &Path, selection: &[PathBuf], mut known: Known) -> (ImportReport, Vec<NewImage>) {
+    let mut files = BTreeSet::new();
+    for path in selection {
+        if path.is_dir() {
+            collect_files(path, &mut files);
+        } else {
+            files.insert(path.clone());
+        }
+    }
+
     let mut report = ImportReport::default();
     let mut new_images = Vec::new();
-    let mut files = Vec::new();
-    collect_files(folder, &mut files);
-    files.sort();
-
     for file in files {
         let path = relative_path(root, &file);
-        let supported = file
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| SUPPORTED_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()));
-        if !supported {
+        if !is_supported(&file) {
             report.unsupported += 1;
             continue;
         }
@@ -132,16 +193,22 @@ fn scan(root: &Path, folder: &Path, mut known: Known) -> (ImportReport, Vec<NewI
     (report, new_images)
 }
 
-fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) {
+fn collect_files(dir: &Path, files: &mut BTreeSet<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let Ok(kind) = entry.file_type() else { continue };
         if kind.is_dir() {
             collect_files(&entry.path(), files);
         } else if kind.is_file() {
-            files.push(entry.path());
+            files.insert(entry.path());
         }
     }
+}
+
+fn is_supported(file: &Path) -> bool {
+    file.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| SUPPORTED_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
 }
 
 fn relative_path(root: &Path, file: &Path) -> String {

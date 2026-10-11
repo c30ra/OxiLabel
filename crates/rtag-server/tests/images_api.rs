@@ -18,8 +18,16 @@ async fn new_project(app: &TestApp) -> i64 {
     project["id"].as_i64().unwrap()
 }
 
+async fn import_selection(app: &TestApp, project: i64, paths: &[&str]) -> (StatusCode, Value) {
+    call(app, Method::POST, &format!("/api/projects/{project}/imports"), Some(json!({"paths": paths}))).await
+}
+
 async fn import(app: &TestApp, project: i64, folder: &str) -> (StatusCode, Value) {
-    call(app, Method::POST, &format!("/api/projects/{project}/imports"), Some(json!({"folder": folder}))).await
+    import_selection(app, project, &[folder]).await
+}
+
+async fn browse(app: &TestApp, path: &str) -> (StatusCode, Value) {
+    call(app, Method::GET, &format!("/api/browse?path={path}"), None).await
 }
 
 async fn list(app: &TestApp, project: i64, query: &str) -> Value {
@@ -93,23 +101,96 @@ async fn unreadable_images_are_reported_and_other_files_counted() {
 }
 
 #[tokio::test]
-async fn folders_outside_the_image_root_are_refused() {
+async fn paths_outside_the_image_root_are_refused() {
     let app = test_app().await;
     let project = new_project(&app).await;
-    for folder in ["..", "a/../../etc", "/etc"] {
-        let (status, body) = import(&app, project, folder).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{folder}");
-        assert_eq!(body["error"], "folder must be a path inside the image root", "{folder}");
+    for path in ["..", "a/../../etc", "/etc"] {
+        let (status, body) = import(&app, project, path).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+        assert_eq!(body["error"], "path must be inside the image root", "{path}");
+        let (status, _) = browse(&app, path).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "browse {path}");
     }
 }
 
 #[tokio::test]
-async fn a_missing_folder_is_reported() {
+async fn a_missing_path_is_reported() {
     let app = test_app().await;
     let project = new_project(&app).await;
     let (status, body) = import(&app, project, "nope").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["error"], "folder \"nope\" not found");
+    assert_eq!(body["error"], "\"nope\" not found");
+}
+
+#[tokio::test]
+async fn an_empty_selection_is_rejected() {
+    let app = test_app().await;
+    let project = new_project(&app).await;
+    let (status, body) = import_selection(&app, project, &[]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "select at least one folder or image");
+}
+
+#[tokio::test]
+async fn a_selection_can_mix_single_images_and_folders() {
+    let app = test_app().await;
+    let project = new_project(&app).await;
+    write_png(app.images.path(), "loose/one.png", 2, 2, 1);
+    write_png(app.images.path(), "loose/two.png", 2, 2, 2);
+    write_png(app.images.path(), "batch/three.png", 2, 2, 3);
+    write_png(app.images.path(), "batch/deep/four.png", 2, 2, 4);
+
+    let (status, report) = import_selection(&app, project, &["loose/two.png", "batch"]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(report, json!({"added": 3, "skipped": 0, "unsupported": 0, "failed": []}));
+    assert_eq!(
+        paths(&list(&app, project, "").await),
+        vec!["batch/deep/four.png", "batch/three.png", "loose/two.png"]
+    );
+}
+
+#[tokio::test]
+async fn an_image_selected_together_with_its_folder_is_counted_once() {
+    let app = test_app().await;
+    let project = new_project(&app).await;
+    write_png(app.images.path(), "batch/a.png", 2, 2, 1);
+
+    let (_, report) = import_selection(&app, project, &["batch", "batch/a.png"]).await;
+    assert_eq!(report, json!({"added": 1, "skipped": 0, "unsupported": 0, "failed": []}));
+}
+
+#[tokio::test]
+async fn browsing_lists_folders_first_then_images_and_hides_other_files() {
+    let app = test_app().await;
+    write_png(app.images.path(), "set/b.png", 2, 2, 1);
+    write_png(app.images.path(), "set/A.png", 2, 2, 2);
+    write_png(app.images.path(), "set/zeta/c.png", 2, 2, 3);
+    std::fs::create_dir_all(app.images.path().join("set/alpha")).unwrap();
+    std::fs::write(app.images.path().join("set/readme.txt"), b"hi").unwrap();
+    std::fs::write(app.images.path().join("set/.hidden.png"), b"hi").unwrap();
+
+    let (status, listing) = browse(&app, "set").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        listing,
+        json!({
+            "path": "set",
+            "entries": [
+                {"name": "alpha", "path": "set/alpha", "kind": "folder"},
+                {"name": "zeta", "path": "set/zeta", "kind": "folder"},
+                {"name": "A.png", "path": "set/A.png", "kind": "image"},
+                {"name": "b.png", "path": "set/b.png", "kind": "image"}
+            ]
+        })
+    );
+}
+
+#[tokio::test]
+async fn browsing_without_a_path_lists_the_image_root() {
+    let app = test_app().await;
+    write_png(app.images.path(), "set/b.png", 2, 2, 1);
+    let (_, listing) = call(&app, Method::GET, "/api/browse", None).await;
+    assert_eq!(listing, json!({"path": "", "entries": [{"name": "set", "path": "set", "kind": "folder"}]}));
 }
 
 #[tokio::test]
@@ -190,4 +271,22 @@ async fn thumbnail_of_an_unknown_image_is_not_found() {
     let app = test_app().await;
     let (status, _, _) = get_bytes(&app, "/api/images/999/thumbnail").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn browsing_for_a_project_marks_images_already_imported() {
+    let app = test_app().await;
+    let project = new_project(&app).await;
+    write_png(app.images.path(), "set/old.png", 2, 2, 1);
+    import(&app, project, "set/old.png").await;
+    write_png(app.images.path(), "set/new.png", 2, 2, 2);
+
+    let (_, listing) = call(&app, Method::GET, &format!("/api/browse?path=set&project={project}"), None).await;
+    assert_eq!(
+        listing["entries"],
+        json!([
+            {"name": "new.png", "path": "set/new.png", "kind": "image", "imported": false},
+            {"name": "old.png", "path": "set/old.png", "kind": "image", "imported": true}
+        ])
+    );
 }

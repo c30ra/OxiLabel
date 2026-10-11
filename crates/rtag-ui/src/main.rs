@@ -7,18 +7,17 @@ use leptos_router::{
     path,
 };
 
-use pages::{ProjectPage, ProjectsPage};
+use pages::{ProjectPage, ProjectsPage, Tab};
 
 #[component]
 fn App() -> impl IntoView {
     view! {
         <Router>
-            <main>
-                <Routes fallback=|| view! { <p>"Page not found."</p> }>
-                    <Route path=path!("/") view=ProjectsPage />
-                    <Route path=path!("/projects/:id") view=ProjectPage />
-                </Routes>
-            </main>
+            <Routes fallback=|| view! { <p class="page">"Page not found."</p> }>
+                <Route path=path!("/") view=ProjectsPage />
+                <Route path=path!("/projects/:id") view=|| view! { <ProjectPage tab=Tab::Images /> } />
+                <Route path=path!("/projects/:id/labels") view=|| view! { <ProjectPage tab=Tab::Labels /> } />
+            </Routes>
         </Router>
     }
 }
