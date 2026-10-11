@@ -12,13 +12,12 @@ const BYTES_PER_MB: f64 = 1_000_000.0;
 /// Images can be selected (checkbox, or click once something is selected; shift-click for a range;
 /// A selects all matching images, Alt+A clears) and removed from the project.
 #[component]
-pub fn ImageSet(project: i64, version: RwSignal<u32>) -> impl IntoView {
+pub fn ImageSet(project: i64, version: RwSignal<u32>, selected: RwSignal<BTreeSet<i64>>) -> impl IntoView {
     let offset = RwSignal::new(0_i64);
     let page_size = RwSignal::new(60_i64);
     let filter = RwSignal::new(ImageFilter::default());
     let filters_open = RwSignal::new(false);
     let total = RwSignal::new(0_i64);
-    let selected = RwSignal::new(BTreeSet::<i64>::new());
     let anchor = RwSignal::new(None::<usize>);
     let confirming = RwSignal::new(false);
     let busy = RwSignal::new(false);

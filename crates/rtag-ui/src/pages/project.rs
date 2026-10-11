@@ -2,7 +2,9 @@ use leptos::prelude::*;
 use leptos_router::{components::A, hooks::use_params_map};
 use rtag_core::Project;
 
-use super::{images::ImageSet, import::ImportDialog, labels::LabelSet};
+use std::collections::BTreeSet;
+
+use super::{export::ExportDialog, images::ImageSet, import::ImportDialog, labels::LabelSet};
 use crate::api;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -30,7 +32,10 @@ pub fn ProjectPage(tab: Tab) -> impl IntoView {
         }
     });
     let importing = RwSignal::new(false);
+    let exporting = RwSignal::new(false);
     let images_version = RwSignal::new(0_u32);
+    // The grid's selection; the export dialog can export just these images.
+    let selected = RwSignal::new(BTreeSet::<i64>::new());
 
     move || match project.get() {
         None => view! { <p class="page muted">"Loading…"</p> }.into_any(),
@@ -38,6 +43,7 @@ pub fn ProjectPage(tab: Tab) -> impl IntoView {
         Some(Ok(project)) => {
             let id = project.id;
             let name = project.name.clone();
+            let export_name = project.name.clone();
             view! {
                 <header class="topbar">
                     <A href="/" attr:class="brand">"rtag"</A>
@@ -48,6 +54,7 @@ pub fn ProjectPage(tab: Tab) -> impl IntoView {
                     </nav>
                     <div class="actions">
                         <button on:click=move |_| importing.set(true)>"Import images…"</button>
+                        <button on:click=move |_| exporting.set(true)>"Export…"</button>
                     </div>
                 </header>
                 <nav class="tabs" aria-label="Project">
@@ -56,10 +63,13 @@ pub fn ProjectPage(tab: Tab) -> impl IntoView {
                 </nav>
                 <main class="page">
                     {match tab {
-                        Tab::Images => view! { <ImageSet project=id version=images_version /> }.into_any(),
+                        Tab::Images => view! { <ImageSet project=id version=images_version selected=selected /> }.into_any(),
                         Tab::Labels => view! { <LabelSet project=id /> }.into_any(),
                     }}
                 </main>
+                <Show when=move || exporting.get()>
+                    <ExportDialog project=id project_name=export_name.clone() selected=selected on_close=move || exporting.set(false) />
+                </Show>
                 <Show when=move || importing.get()>
                     <ImportDialog
                         project=id

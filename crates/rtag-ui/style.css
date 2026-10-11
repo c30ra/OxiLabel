@@ -179,3 +179,20 @@ button.small { height: 26px; padding: 0 10px; font-size: 12px; }
 .label-search li { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
 .label-search li:hover { background: var(--raised); }
 .label-search li.disabled { color: #6B6E75; cursor: default; }
+
+/* Export dialog */
+.export-dialog { max-width: 620px; }
+.dialog-body { padding: 4px 24px 12px; overflow: auto; border-top: 1px solid var(--border); }
+.dialog-body fieldset { flex-direction: column; flex-wrap: nowrap; gap: 8px; padding: 10px 14px 12px; }
+.dialog-body fieldset.split { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 8px 18px; }
+.dialog-body fieldset.split .hint, .dialog-body fieldset.split .error { flex-basis: 100%; margin: 0; font-size: 12px; }
+.choice { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; }
+.choice input { margin-top: 3px; accent-color: var(--accent); }
+.choice span { display: flex; flex-direction: column; }
+.choice small { font-size: 12px; }
+.choice.disabled { opacity: 0.5; cursor: default; }
+.percent { display: inline-flex; gap: 6px; align-items: center; }
+.percent input { width: 4.5rem; text-align: right; }
+.export-path { display: block; padding: 8px 10px; background: var(--ground); border: 1px solid var(--border); border-radius: 6px; word-break: break-all; user-select: all; }
+a.button { display: inline-flex; align-items: center; height: 36px; padding: 0 14px; border-radius: 6px; text-decoration: none; border: 1px solid var(--border); color: var(--text); }
+a.button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }

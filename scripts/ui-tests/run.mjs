@@ -65,6 +65,7 @@ start(server, [], {
   RTAG_DATABASE: `sqlite://${join(work, 'rtag.db')}?mode=rwc`,
   RTAG_IMAGES_ROOT: join(work, 'images'),
   RTAG_CACHE_DIR: join(work, 'cache'),
+  RTAG_EXPORT_DIR: join(work, 'exports'),
   RTAG_WEB_ROOT: join(root, 'crates', 'rtag-ui', 'dist'),
 });
 await until(async () => (await fetch(`${base}/api/projects`)).ok, 'the server');

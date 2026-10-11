@@ -221,4 +221,28 @@ export const tests = [
   },
 ];
 
+// Export (ticket 06).
+tests.push({
+  name: 'the export dialog writes a YOLO dataset and offers it as a zip',
+  async run(t) {
+    await t.api.setAnnotations(t.project, [box(1, 100, 100, 300, 200)]);
+    await t.b.goto(`${t.base}/projects/${t.project.id}`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.grid li')`), 'the grid');
+    const clickText = async (selector, text) => {
+      const rect = await t.b.json(`[...document.querySelectorAll(${JSON.stringify(selector)})].find((e) => e.textContent.includes(${JSON.stringify(text)})).getBoundingClientRect()`);
+      await t.b.click(rect.x + rect.width / 2, rect.y + rect.height / 2);
+    };
+    await clickText('.actions button', 'Export');
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.export-dialog')`), 'the export dialog');
+    await clickText('.export-dialog .choice', 'Images with annotations');
+    await clickText('.export-dialog .choice', 'Links to the originals');
+    await clickText('.export-dialog .dialog-foot button', 'Export');
+    const report = await t.b.waitFor(() => t.b.eval(`document.querySelector('.export-dialog .report')?.textContent`), 'the export result');
+    if (!report.includes('Exported 1 images') || !report.includes('1 annotations')) throw new Error(`report: ${report}`);
+    const href = await t.b.eval(`document.querySelector('.export-dialog a[download]').getAttribute('href')`);
+    const zip = Buffer.from(await (await fetch(t.base + href)).arrayBuffer());
+    equal(zip.subarray(0, 2).toString(), 'PK', 'zip signature');
+  },
+});
+
 export const LABELS = NINE_LABELS;
