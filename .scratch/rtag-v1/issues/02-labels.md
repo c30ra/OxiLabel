@@ -4,9 +4,9 @@
 
 **Blocked by:** 01
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] I can add, edit and remove labels in a project's label screen
+- [x] I can add, edit and remove labels in a project's label screen
 - [x] Each label gets a numeric id that is never reused or renumbered, even after deleting other labels
 - [x] A label can be restricted to certain shape types and flagged as an ignore label
 - [ ] ~~Deleting a label that is in use tells me what would be removed and requires confirmation~~ moved to ticket 05: no annotations exist before it. Deleting any label already asks for confirmation in the UI.
