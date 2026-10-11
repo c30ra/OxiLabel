@@ -1,5 +1,5 @@
 use leptos::{prelude::*, task::spawn_local};
-use rtag_core::{annotation::LabelUsage, Label, LabelDefinition, ShapeType};
+use rtag_core::{Label, LabelDefinition, ShapeType, annotation::LabelUsage};
 
 use crate::api;
 
@@ -101,13 +101,23 @@ pub fn LabelSet(project: i64) -> impl IntoView {
                 };
                 let question = match used {
                     0 => format!("Delete label \"{}\"?", label.name),
-                    1 => format!("Delete label \"{}\" and the 1 annotation that uses it? This cannot be undone.", label.name),
-                    n => format!("Delete label \"{}\" and the {n} annotations that use it? This cannot be undone.", label.name),
+                    1 => format!(
+                        "Delete label \"{}\" and the 1 annotation that uses it? This cannot be undone.",
+                        label.name
+                    ),
+                    n => format!(
+                        "Delete label \"{}\" and the {n} annotations that use it? This cannot be undone.",
+                        label.name
+                    ),
                 };
                 if !window().confirm_with_message(&question).unwrap_or(false) {
                     return;
                 }
-                let url = if used > 0 { format!("{url}?confirm=true") } else { url };
+                let url = if used > 0 {
+                    format!("{url}?confirm=true")
+                } else {
+                    url
+                };
                 match api::delete(&url).await {
                     Ok(()) => {
                         if editing.get_untracked() == Some(label.id) {

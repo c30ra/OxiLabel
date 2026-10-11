@@ -10,12 +10,12 @@
 //! to relabel it. Release or flick picks; a quick tap repeats the last tool and label. Shift+Q
 //! opens only the label pie.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use leptos::{ev, html, prelude::*};
 use rtag_core::{
     Label, ShapeType,
-    annotation::{Annotation, Shape, topmost_at},
+    annotation::{Annotation, Shape, overlapping, topmost_at},
     geometry::{Handle, Point, Rect},
     history::{Edit, History},
     view::View,
@@ -59,7 +59,8 @@ impl Tool {
 pub struct Editor {
     pub annotations: RwSignal<Vec<Annotation>>,
     history: StoredValue<History>,
-    pub selected: RwSignal<Option<usize>>,
+    /// Indices of the selected annotations.
+    pub selection: RwSignal<BTreeSet<usize>>,
     pub tool: RwSignal<Tool>,
     /// The label new shapes get.
     pub label: RwSignal<Option<i64>>,
@@ -80,7 +81,7 @@ impl Editor {
         Editor {
             annotations: RwSignal::new(annotations),
             history: StoredValue::new(History::default()),
-            selected: RwSignal::new(None),
+            selection: RwSignal::new(BTreeSet::new()),
             tool: RwSignal::new(Tool::Select),
             label: RwSignal::new(label),
             revision: RwSignal::new(0),
@@ -94,7 +95,7 @@ impl Editor {
     /// Replaces everything with `annotations` as loaded from the server; nothing to undo.
     pub fn reset(&self, annotations: Vec<Annotation>) {
         self.history.set_value(History::default());
-        self.selected.set(None);
+        self.selection.set(BTreeSet::new());
         self.annotations.set(annotations);
     }
 
@@ -113,7 +114,7 @@ impl Editor {
                 .update_value(|history| undone = history.undo(list))
         });
         if undone {
-            self.selected.set(None);
+            self.selection.set(BTreeSet::new());
             self.revision.update(|r| *r += 1);
         }
     }
@@ -125,24 +126,74 @@ impl Editor {
                 .update_value(|history| redone = history.redo(list))
         });
         if redone {
-            self.selected.set(None);
+            self.selection.set(BTreeSet::new());
             self.revision.update(|r| *r += 1);
         }
     }
 
-    pub fn delete_selected(&self) {
-        let Some(index) = self.selected.get_untracked() else {
-            return;
-        };
-        let Some(annotation) = self
-            .annotations
-            .with_untracked(|list| list.get(index).cloned())
-        else {
-            return;
-        };
-        self.selected.set(None);
-        self.apply(Edit::Remove { index, annotation });
+    /// The only selected annotation, if exactly one is selected.
+    pub fn single_selection(&self) -> Option<usize> {
+        self.selection.with_untracked(|set| {
+            if set.len() == 1 {
+                set.first().copied()
+            } else {
+                None
+            }
+        })
     }
+
+    /// Removes every selected annotation in one undo step.
+    pub fn delete_selected(&self) {
+        let selection = self.selection.get_untracked();
+        // Highest index first, so the others keep their positions while removing.
+        let removals: Vec<Edit> = self.annotations.with_untracked(|list| {
+            selection
+                .iter()
+                .rev()
+                .filter_map(|&index| {
+                    list.get(index).map(|annotation| Edit::Remove {
+                        index,
+                        annotation: annotation.clone(),
+                    })
+                })
+                .collect()
+        });
+        self.selection.set(BTreeSet::new());
+        if !removals.is_empty() {
+            self.apply(Edit::Batch(removals));
+        }
+    }
+
+    /// Replaces the selected annotations with `change` applied to each, in one undo step; those
+    /// it leaves unchanged are skipped.
+    pub fn change_selected(&self, change: impl Fn(&Annotation) -> Annotation) {
+        let selection = self.selection.get_untracked();
+        let edits: Vec<Edit> = self.annotations.with_untracked(|list| {
+            selection
+                .iter()
+                .filter_map(|&index| {
+                    let before = list.get(index)?.clone();
+                    let after = change(&before);
+                    (after != before).then_some(Edit::Replace {
+                        index,
+                        before,
+                        after,
+                    })
+                })
+                .collect()
+        });
+        if !edits.is_empty() {
+            self.apply(Edit::Batch(edits));
+        }
+    }
+}
+
+/// How a box selection combines with what is already selected (Blender: drag, Shift+drag, Ctrl+drag).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum BoxMode {
+    Replace,
+    Extend,
+    Subtract,
 }
 
 /// What the pointer is doing right now.
@@ -157,17 +208,23 @@ enum Gesture {
         square: bool,
         from_centre: bool,
     },
+    /// The selection moved together by (`dx`, `dy`), limited so every shape stays in the image.
     Moving {
-        index: usize,
         grab: Point,
-        before: Rect,
-        current: Rect,
+        dx: f64,
+        dy: f64,
     },
     Resizing {
         index: usize,
         handle: Handle,
         before: Rect,
         current: Rect,
+    },
+    /// Dragging a selection box over empty space.
+    Selecting {
+        start: Point,
+        current: Point,
+        mode: BoxMode,
     },
 }
 
@@ -217,11 +274,22 @@ pub fn AnnotationLayer(
         Some((screen, current.to_image(screen), current))
     };
     let rectangle_of = move |index: usize| {
-        editor
-            .annotations
-            .with_untracked(|list| list.get(index).map(|annotation| match annotation.shape {
+        editor.annotations.with_untracked(|list| {
+            list.get(index).map(|annotation| match annotation.shape {
                 Shape::Rectangle(rect) => rect,
-            }))
+            })
+        })
+    };
+
+    // The box around every selected shape; moving keeps it inside the image.
+    let selection_bounds = move || {
+        let selection = editor.selection.get_untracked();
+        editor.annotations.with_untracked(|list| {
+            selection
+                .iter()
+                .filter_map(|&index| list.get(index).map(|a| a.shape.bounds()))
+                .reduce(|a, b| a.union(&b))
+        })
     };
 
     let finish_drawing =
@@ -241,32 +309,45 @@ pub fn AnnotationLayer(
             });
         };
 
-    // Pie menus. `pending_tool` waits for its label after the tool pie; `relabel` is the shape
-    // whose label the label pie changes.
+    // Pie menus. `pending_tool` waits for its label after the tool pie; `relabel` means the label
+    // pie changes the label of the selected shapes.
     let pie = RwSignal::new(None::<Pie>);
     let pointer = RwSignal::new(Point::new(0.0, 0.0));
     let cursor_at = StoredValue::new(Point::new(0.0, 0.0));
     let search = RwSignal::new(None::<Point>);
     let pending_tool = StoredValue::new(None::<Tool>);
-    let relabel = StoredValue::new(None::<usize>);
+    // Whether Q or the right button that opened the pie is still down.
+    let trigger_down = StoredValue::new(false);
+    let relabel = StoredValue::new(false);
     let all_labels = StoredValue::new({
         let mut sorted = labels.clone();
         sorted.sort_by_key(|label| label.id);
         sorted
     });
-    let shape_type_of = move |index: usize| {
-        editor
-            .annotations
-            .with_untracked(|list| list.get(index).map(|annotation| annotation.shape.shape_type()))
+    // The shape types the next label must allow: those of the shapes being relabelled, of the tool
+    // just picked, or of the active tool. None at all allows every label.
+    let target_shapes = move || -> Vec<ShapeType> {
+        if relabel.get_value() {
+            let selection = editor.selection.get_untracked();
+            let mut types: Vec<ShapeType> = editor.annotations.with_untracked(|list| {
+                selection
+                    .iter()
+                    .filter_map(|&index| list.get(index).map(|a| a.shape.shape_type()))
+                    .collect()
+            });
+            types.dedup();
+            return types;
+        }
+        pending_tool
+            .get_value()
+            .unwrap_or(editor.tool.get_untracked())
+            .shape_type()
+            .into_iter()
+            .collect()
     };
-    // The shape the next label is for: the one being relabelled, the tool just picked, or the
-    // active tool's. `None` allows every label.
-    let target_shape = move || match (relabel.get_value(), pending_tool.get_value()) {
-        (Some(index), _) => shape_type_of(index),
-        (None, Some(tool)) => tool.shape_type(),
-        (None, None) => editor.tool.get_untracked().shape_type(),
+    let allows = |label: &Label, shapes: &[ShapeType]| {
+        shapes.iter().all(|shape| label.shape_types.contains(shape))
     };
-    let allows = |label: &Label, shape: Option<ShapeType>| shape.is_none_or(|shape| label.shape_types.contains(&shape));
 
     let tool_pie = move |centre: Point, held: bool| {
         let current = editor.tool.get_untracked();
@@ -290,14 +371,34 @@ pub fn AnnotationLayer(
             item(Compass::W, "Eraser", "E", None),
             item(Compass::NW, "Tag", "T", None),
         ];
-        Pie { label: "Tools", items, centre, wide: false, held, opened_at: now() }
+        Pie {
+            label: "Tools",
+            items,
+            centre,
+            wide: false,
+            held,
+            opened_at: now(),
+        }
     };
     let label_pie = move |centre: Point, held: bool| {
-        let shape = target_shape();
+        let shapes = target_shapes();
         let current = editor.label.get_untracked();
-        let slots = [Compass::N, Compass::NE, Compass::E, Compass::SE, Compass::S, Compass::SW, Compass::W, Compass::NW];
+        let slots = [
+            Compass::N,
+            Compass::NE,
+            Compass::E,
+            Compass::SE,
+            Compass::S,
+            Compass::SW,
+            Compass::W,
+            Compass::NW,
+        ];
         let mut items: Vec<PieItem> = all_labels.with_value(|labels| {
-            let shown = if labels.len() > slots.len() { slots.len() - 1 } else { slots.len() };
+            let shown = if labels.len() > slots.len() {
+                slots.len() - 1
+            } else {
+                slots.len()
+            };
             labels
                 .iter()
                 .take(shown)
@@ -307,7 +408,7 @@ pub fn AnnotationLayer(
                     name: label.name.clone(),
                     key: label.hotkey.clone(),
                     swatch: Some(label.color.clone()),
-                    enabled: allows(label, shape),
+                    enabled: allows(label, &shapes),
                     current: current == Some(label.id),
                     action: PieAction::Label(label.id),
                 })
@@ -324,7 +425,14 @@ pub fn AnnotationLayer(
                 action: PieAction::MoreLabels,
             });
         }
-        Pie { label: "Labels", items, centre, wide: false, held, opened_at: now() }
+        Pie {
+            label: "Labels",
+            items,
+            centre,
+            wide: false,
+            held,
+            opened_at: now(),
+        }
     };
     let options_pie = move |centre: Point, held: bool| {
         let option = |slot, name: &str, key: Option<&str>, enabled, current, action| PieItem {
@@ -338,25 +446,54 @@ pub fn AnnotationLayer(
         };
         let items = vec![
             option(Compass::N, "2-point", None, true, true, PieAction::Keep),
-            option(Compass::E, "3-point oriented", None, false, false, PieAction::Keep),
-            option(Compass::S, "From center", Some("Alt"), true, editor.from_centre.get_untracked(), PieAction::ToggleFromCentre),
-            option(Compass::W, "Square", Some("Shift"), true, editor.square.get_untracked(), PieAction::ToggleSquare),
+            option(
+                Compass::E,
+                "3-point oriented",
+                None,
+                false,
+                false,
+                PieAction::Keep,
+            ),
+            option(
+                Compass::S,
+                "From center",
+                Some("Alt"),
+                true,
+                editor.from_centre.get_untracked(),
+                PieAction::ToggleFromCentre,
+            ),
+            option(
+                Compass::W,
+                "Square",
+                Some("Shift"),
+                true,
+                editor.square.get_untracked(),
+                PieAction::ToggleSquare,
+            ),
         ];
-        Pie { label: "Rectangle options", items, centre, wide: true, held, opened_at: now() }
+        Pie {
+            label: "Rectangle options",
+            items,
+            centre,
+            wide: true,
+            held,
+            opened_at: now(),
+        }
     };
 
     let close_pie = move || {
         pie.set(None);
         search.set(None);
         pending_tool.set_value(None);
-        relabel.set_value(None);
+        relabel.set_value(false);
     };
     let open_pie = move |held: bool, labels_only: bool| {
         close_pie();
         let centre = cursor_at.get_value();
-        let selected = editor.selected.get_untracked().filter(|_| editor.tool.get_untracked() == Tool::Select);
-        let opened = if labels_only || selected.is_some() {
-            relabel.set_value(selected);
+        let selecting = editor.tool.get_untracked() == Tool::Select;
+        let has_selection = selecting && !editor.selection.with_untracked(BTreeSet::is_empty);
+        let opened = if labels_only || has_selection {
+            relabel.set_value(has_selection);
             label_pie(centre, held)
         } else if editor.tool.get_untracked() == Tool::Select {
             tool_pie(centre, held)
@@ -366,42 +503,47 @@ pub fn AnnotationLayer(
         pointer.set(centre);
         pie.set(Some(opened));
     };
-    let relabel_shape = move |index: usize, id: i64| {
-        let Some(old) = editor.annotations.with_untracked(|list| list.get(index).cloned()) else { return };
-        if old.label != id {
-            let new = Annotation { label: id, ..old.clone() };
-            editor.apply(Edit::Replace { index, before: old, after: new });
-        }
-    };
     let finish_label = move |id: i64| {
         let (relabelling, tool) = (relabel.get_value(), pending_tool.get_value());
-        let shape = target_shape();
-        let usable = all_labels.with_value(|labels| labels.iter().any(|label| label.id == id && allows(label, shape)));
+        let shapes = target_shapes();
+        let usable = all_labels.with_value(|labels| {
+            labels
+                .iter()
+                .any(|label| label.id == id && allows(label, &shapes))
+        });
         close_pie();
         if !usable {
             return;
         }
         match (relabelling, tool) {
-            (Some(index), _) => relabel_shape(index, id),
-            (None, Some(tool)) => {
+            (true, _) => editor.change_selected(|annotation| Annotation {
+                label: id,
+                ..annotation.clone()
+            }),
+            (false, Some(tool)) => {
                 editor.tool.set(tool);
                 editor.label.set(Some(id));
             }
-            (None, None) => editor.label.set(Some(id)),
+            (false, None) => editor.label.set(Some(id)),
         }
     };
     let choose = move |action: PieAction| {
-        let centre = pie.get_untracked().map_or(cursor_at.get_value(), |open| open.centre);
+        let centre = pie
+            .get_untracked()
+            .map_or(cursor_at.get_value(), |open| open.centre);
         pie.set(None);
         match action {
             PieAction::Tool(Tool::Select) => {
                 close_pie();
                 editor.tool.set(Tool::Select);
             }
-            // Picking a tool opens the label pie in the same spot.
+            // Picking a tool chains to the label pie, centred where the pointer is so the next
+            // flick starts fresh; it stays held while Q or the right button is still down.
             PieAction::Tool(tool) => {
                 pending_tool.set_value(Some(tool));
-                pie.set(Some(label_pie(centre, false)));
+                let at = cursor_at.get_value();
+                pointer.set(at);
+                pie.set(Some(label_pie(at, trigger_down.get_value())));
             }
             PieAction::Label(id) => finish_label(id),
             PieAction::MoreLabels => search.set(Some(centre)),
@@ -419,9 +561,15 @@ pub fn AnnotationLayer(
     // Releasing the pie key or button: a tap repeats the last tool and label (or leaves the pie
     // open for clicking), otherwise the highlighted item is picked.
     let release = move || {
-        let Some(open) = pie.get_untracked().filter(|open| open.held) else { return };
+        let Some(open) = pie.get_untracked().filter(|open| open.held) else {
+            return;
+        };
         let at = pointer.get_untracked();
-        if is_tap(now() - open.opened_at, at.x - open.centre.x, at.y - open.centre.y) {
+        if is_tap(
+            now() - open.opened_at,
+            at.x - open.centre.x,
+            at.y - open.centre.y,
+        ) {
             match editor.last.get_untracked() {
                 Some((tool, label)) if open.label == "Tools" => {
                     close_pie();
@@ -442,7 +590,7 @@ pub fn AnnotationLayer(
         }
     };
     let search_entries = move || {
-        let shape = target_shape();
+        let shapes = target_shapes();
         all_labels.with_value(|labels| {
             labels
                 .iter()
@@ -451,7 +599,7 @@ pub fn AnnotationLayer(
                     name: label.name.clone(),
                     color: label.color.clone(),
                     key: label.hotkey.clone(),
-                    enabled: allows(label, shape),
+                    enabled: allows(label, &shapes),
                 })
                 .collect::<Vec<_>>()
         })
@@ -466,11 +614,12 @@ pub fn AnnotationLayer(
     let pointer_moves = window_event_listener(ev::pointermove, move |ev| {
         let at = Point::new(f64::from(ev.client_x()), f64::from(ev.client_y()));
         cursor_at.set_value(at);
-        let Some(open) = pie.get_untracked() else { return };
+        let Some(open) = pie.get_untracked() else {
+            return;
+        };
         pointer.set(at);
-        // Flick: moving far enough while still holding picks at once.
-        if open.held
-            && (at.x - open.centre.x).hypot(at.y - open.centre.y) >= FLICK_DISTANCE
+        // Flick: moving far enough picks at once, whether the pie is held or open for clicking.
+        if (at.x - open.centre.x).hypot(at.y - open.centre.y) >= FLICK_DISTANCE
             && let Some(action) = open.highlighted(at).map(|item| item.action.clone())
         {
             choose(action);
@@ -478,14 +627,24 @@ pub fn AnnotationLayer(
     });
     let pointer_ups = window_event_listener(ev::pointerup, move |ev| {
         if ev.button() == 2 {
+            trigger_down.set_value(false);
             release();
         }
     });
     let key_ups = window_event_listener(ev::keyup, move |ev| {
         if ev.key().eq_ignore_ascii_case("q") {
+            trigger_down.set_value(false);
             release();
         }
     });
+    // A click in an open pie picks the item in that direction; in the centre it closes the pie.
+    let background_click = move || match pie.get_untracked().and_then(|open| {
+        open.highlighted(pointer.get_untracked())
+            .map(|item| item.action.clone())
+    }) {
+        Some(action) => choose(action),
+        None => close_pie(),
+    };
     on_cleanup(move || {
         pointer_moves.remove();
         pointer_ups.remove();
@@ -496,7 +655,11 @@ pub fn AnnotationLayer(
         // The right button opens the pie, like holding Q.
         if ev.button() == 2 {
             ev.prevent_default();
-            cursor_at.set_value(Point::new(f64::from(ev.client_x()), f64::from(ev.client_y())));
+            cursor_at.set_value(Point::new(
+                f64::from(ev.client_x()),
+                f64::from(ev.client_y()),
+            ));
+            trigger_down.set_value(true);
             open_pie(true, false);
             return;
         }
@@ -535,8 +698,11 @@ pub fn AnnotationLayer(
                 }
             },
             Tool::Select => {
+                let (extend, subtract) = (ev.shift_key(), ev.ctrl_key() || ev.meta_key());
                 let reach = HANDLE_REACH / current.scale;
-                if let Some(index) = editor.selected.get_untracked()
+                if !extend
+                    && !subtract
+                    && let Some(index) = editor.single_selection()
                     && let Some(before) = rectangle_of(index)
                     && let Some(handle) = before.handle_at(point, reach)
                 {
@@ -551,16 +717,43 @@ pub fn AnnotationLayer(
                 let hit = editor
                     .annotations
                     .with_untracked(|list| topmost_at(list, point, PICK_MARGIN / current.scale));
-                editor.selected.set(hit);
-                if let Some(index) = hit
-                    && let Some(before) = rectangle_of(index)
-                {
-                    gesture.set(Gesture::Moving {
-                        index,
-                        grab: point,
-                        before,
-                        current: before,
-                    });
+                match hit {
+                    // Shift+click toggles a shape, Ctrl+click removes it from the selection.
+                    Some(index) if extend => editor.selection.update(|set| {
+                        if !set.remove(&index) {
+                            set.insert(index);
+                        }
+                    }),
+                    Some(index) if subtract => editor.selection.update(|set| {
+                        set.remove(&index);
+                    }),
+                    // Dragging a selected shape moves the whole selection.
+                    Some(index) => {
+                        if !editor.selection.with_untracked(|set| set.contains(&index)) {
+                            editor.selection.set(BTreeSet::from([index]));
+                        }
+                        gesture.set(Gesture::Moving {
+                            grab: point,
+                            dx: 0.0,
+                            dy: 0.0,
+                        });
+                    }
+                    // On empty space a drag draws a selection box.
+                    None => {
+                        let mode = if extend {
+                            BoxMode::Extend
+                        } else if subtract {
+                            BoxMode::Subtract
+                        } else {
+                            editor.selection.set(BTreeSet::new());
+                            BoxMode::Replace
+                        };
+                        gesture.set(Gesture::Selecting {
+                            start: point,
+                            current: point,
+                            mode,
+                        });
+                    }
                 }
             }
         }
@@ -583,19 +776,15 @@ pub fn AnnotationLayer(
                     from_centre: ev.alt_key() != editor.from_centre.get_untracked(),
                 });
             }
-            Gesture::Moving {
-                index,
-                grab,
-                before,
-                ..
-            } => {
-                let current =
-                    before.moved_within(point.x - grab.x, point.y - grab.y, width, height);
+            Gesture::Moving { grab, .. } => {
+                let Some(bounds) = selection_bounds() else {
+                    return;
+                };
+                let moved = bounds.moved_within(point.x - grab.x, point.y - grab.y, width, height);
                 gesture.set(Gesture::Moving {
-                    index,
                     grab,
-                    before,
-                    current,
+                    dx: moved.min.x - bounds.min.x,
+                    dy: moved.min.y - bounds.min.y,
                 });
             }
             Gesture::Resizing {
@@ -611,6 +800,11 @@ pub fn AnnotationLayer(
                     current: before.resized(handle, inside(point)),
                 });
             }
+            Gesture::Selecting { start, mode, .. } => gesture.set(Gesture::Selecting {
+                start,
+                current: point,
+                mode,
+            }),
             Gesture::Idle => cursor.set(hover_cursor(editor, point, current, rectangle_of)),
         }
     };
@@ -628,13 +822,16 @@ pub fn AnnotationLayer(
                 square,
                 from_centre,
             } => finish_drawing(start, end, square, from_centre, current.scale),
-            Gesture::Moving {
-                index,
-                before,
-                current: after,
-                ..
+            Gesture::Moving { dx, dy, .. } => {
+                gesture.set(Gesture::Idle);
+                if dx != 0.0 || dy != 0.0 {
+                    editor.change_selected(|annotation| Annotation {
+                        shape: annotation.shape.translated(dx, dy),
+                        ..annotation.clone()
+                    });
+                }
             }
-            | Gesture::Resizing {
+            Gesture::Resizing {
                 index,
                 before,
                 current: after,
@@ -660,6 +857,29 @@ pub fn AnnotationLayer(
                         after: new,
                     });
                 }
+            }
+            Gesture::Selecting {
+                start,
+                current: end,
+                mode,
+            } => {
+                gesture.set(Gesture::Idle);
+                let region = Rect::from_corners(start, end);
+                // A click without a drag only cleared the selection (or did nothing with Shift/Ctrl).
+                if region.width() * current.scale < DRAG_THRESHOLD
+                    && region.height() * current.scale < DRAG_THRESHOLD
+                {
+                    return;
+                }
+                let hits = editor
+                    .annotations
+                    .with_untracked(|list| overlapping(list, region));
+                editor.selection.update(|set| match mode {
+                    BoxMode::Replace | BoxMode::Extend => set.extend(hits),
+                    BoxMode::Subtract => hits.iter().for_each(|hit| {
+                        set.remove(hit);
+                    }),
+                });
             }
             _ => {}
         }
@@ -692,8 +912,9 @@ pub fn AnnotationLayer(
         }
         if key.eq_ignore_ascii_case("q") && !command && !ev.alt_key() {
             if !ev.repeat() {
-                // Shift+Q opens only the label pie, and it stays open for a click.
-                open_pie(!ev.shift_key(), ev.shift_key());
+                trigger_down.set_value(true);
+                // Shift+Q opens only the label pie; releasing Q over a label picks it too.
+                open_pie(true, ev.shift_key());
             }
             ev.prevent_default();
             return;
@@ -702,12 +923,18 @@ pub fn AnnotationLayer(
             "z" | "Z" if command && ev.shift_key() => editor.redo(),
             "z" | "Z" if command => editor.undo(),
             "y" | "Y" if command => editor.redo(),
+            // Blender: A selects everything, Alt+A nothing.
+            "a" | "A" if ev.alt_key() => editor.selection.set(BTreeSet::new()),
+            "a" | "A" if !command => {
+                let count = editor.annotations.with_untracked(Vec::len);
+                editor.selection.set((0..count).collect());
+            }
             _ if command || ev.alt_key() => return,
             "Escape" => {
                 if gesture.get_untracked() != Gesture::Idle {
                     gesture.set(Gesture::Idle);
-                } else if editor.selected.get_untracked().is_some() {
-                    editor.selected.set(None);
+                } else if !editor.selection.with_untracked(BTreeSet::is_empty) {
+                    editor.selection.set(BTreeSet::new());
                 } else {
                     editor.tool.set(Tool::Select);
                 }
@@ -759,7 +986,10 @@ pub fn AnnotationLayer(
         context.clear_rect(0.0, 0.0, css_width, css_height);
 
         let gesture = gesture.get_untracked();
-        let selected = editor.selected.get_untracked();
+        let selection = editor.selection.get_untracked();
+        let single = (selection.len() == 1)
+            .then(|| selection.first().copied())
+            .flatten();
         let color_of = |label: i64| {
             colors
                 .get(&label)
@@ -769,29 +999,48 @@ pub fn AnnotationLayer(
         editor.annotations.with_untracked(|list| {
             for (index, annotation) in list.iter().enumerate() {
                 let Shape::Rectangle(stored) = &annotation.shape;
+                let selected = selection.contains(&index);
                 let rect = match gesture {
-                    Gesture::Moving {
-                        index: moving,
+                    Gesture::Resizing {
+                        index: resizing,
                         current,
                         ..
+                    } if resizing == index => current,
+                    Gesture::Moving { dx, dy, .. } if selected => {
+                        stored.moved_within(dx, dy, width, height)
                     }
-                    | Gesture::Resizing {
-                        index: moving,
-                        current,
-                        ..
-                    } if moving == index => current,
                     _ => *stored,
                 };
                 let color = color_of(annotation.label);
                 let screen = to_screen_rect(current, rect);
-                stroke_rect(&context, screen, &color, selected == Some(index), false);
-                if selected == Some(index) {
-                    draw_handles(&context, screen, &color);
+                stroke_rect(&context, screen, &color, selected, false);
+                if selected {
                     let name = names.get(&annotation.label).cloned().unwrap_or_default();
                     draw_tag(&context, screen, &name, &color);
                 }
+                // Handles only when one shape is selected: they resize that shape.
+                if single == Some(index) {
+                    draw_handles(&context, screen, &color);
+                }
             }
         });
+        if let Gesture::Selecting {
+            start,
+            current: end,
+            ..
+        } = gesture
+        {
+            let screen = to_screen_rect(current, Rect::from_corners(start, end));
+            context.set_fill_style_str("#ffffff");
+            context.set_global_alpha(0.06);
+            context.fill_rect(screen.min.x, screen.min.y, screen.width(), screen.height());
+            context.set_global_alpha(1.0);
+            context.set_stroke_style_str("#e8e6e1");
+            context.set_line_width(1.0);
+            context.set_line_dash(&js_dashes(&[4.0, 4.0])).ok();
+            context.stroke_rect(screen.min.x, screen.min.y, screen.width(), screen.height());
+            context.set_line_dash(&js_dashes(&[])).ok();
+        }
         if let Gesture::Drawing {
             start,
             current: end,
@@ -821,7 +1070,7 @@ pub fn AnnotationLayer(
         size.track();
         gesture.track();
         editor.annotations.track();
-        editor.selected.track();
+        editor.selection.track();
         editor.label.track();
         draw();
     });
@@ -836,7 +1085,7 @@ pub fn AnnotationLayer(
         Tool::Select => cursor.get(),
     };
     view! {
-        <PieMenu pie=pie pointer=pointer on_pick=choose on_close=close_pie />
+        <PieMenu pie=pie pointer=pointer on_pick=choose on_background=background_click />
         {move || search.get().map(|at| view! {
             <LabelSearch at=at entries=search_entries() on_pick=finish_label on_close=close_pie />
         })}
@@ -845,7 +1094,7 @@ pub fn AnnotationLayer(
             node_ref=canvas_ref
             // Editor state for browser tests; not used for rendering.
             data-count=move || editor.annotations.with(Vec::len)
-            data-selected=move || editor.selected.get().map(|i| i.to_string()).unwrap_or_default()
+            data-selected={move || editor.selection.get().iter().map(usize::to_string).collect::<Vec<_>>().join(",")}
             data-revision=move || editor.revision.get()
             style:cursor=canvas_cursor
             on:pointerdown=on_pointer_down
@@ -856,24 +1105,19 @@ pub fn AnnotationLayer(
     }
 }
 
-/// The cursor for hovering at `point` with the Select tool: a resize arrow over the selected
-/// shape's handles, a move cross over a shape, the arrow elsewhere.
+/// The cursor for hovering at `point` with the Select tool: a resize arrow over the handles of
+/// the one selected shape, otherwise the plain arrow (hovering a shape does not change it).
 fn hover_cursor(
     editor: Editor,
     point: Point,
     view: View,
     rectangle_of: impl Fn(usize) -> Option<Rect>,
 ) -> &'static str {
-    if let Some(index) = editor.selected.get_untracked()
-        && let Some(rect) = rectangle_of(index)
-        && let Some(handle) = rect.handle_at(point, HANDLE_REACH / view.scale)
-    {
-        return handle.cursor();
-    }
-    let over_shape = editor
-        .annotations
-        .with_untracked(|list| topmost_at(list, point, PICK_MARGIN / view.scale).is_some());
-    if over_shape { "move" } else { "default" }
+    editor
+        .single_selection()
+        .and_then(rectangle_of)
+        .and_then(|rect| rect.handle_at(point, HANDLE_REACH / view.scale))
+        .map_or("default", |handle| handle.cursor())
 }
 
 fn to_screen_rect(view: View, rect: Rect) -> Rect {

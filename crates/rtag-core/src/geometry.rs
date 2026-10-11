@@ -111,6 +111,21 @@ impl Rect {
             && point.y <= self.max.y + margin
     }
 
+    /// Whether the two rectangles share any area or touch.
+    pub fn intersects(&self, other: &Rect) -> bool {
+        self.min.x <= other.max.x && other.min.x <= self.max.x && self.min.y <= other.max.y && other.min.y <= self.max.y
+    }
+
+    /// The smallest rectangle containing both.
+    pub fn union(&self, other: &Rect) -> Rect {
+        Rect::new(
+            self.min.x.min(other.min.x),
+            self.min.y.min(other.min.y),
+            self.max.x.max(other.max.x),
+            self.max.y.max(other.max.y),
+        )
+    }
+
     pub fn centre(&self) -> Point {
         Point::new((self.min.x + self.max.x) / 2.0, (self.min.y + self.max.y) / 2.0)
     }
@@ -207,6 +222,15 @@ mod tests {
         assert!(rect.contains(Point::new(15.0, 15.0), 0.0));
         assert!(!rect.contains(Point::new(22.0, 15.0), 0.0));
         assert!(rect.contains(Point::new(22.0, 15.0), 3.0));
+    }
+
+    #[test]
+    fn intersection_and_union() {
+        let a = Rect::new(0.0, 0.0, 10.0, 10.0);
+        assert!(a.intersects(&Rect::new(5.0, 5.0, 20.0, 20.0)));
+        assert!(a.intersects(&Rect::new(10.0, 0.0, 20.0, 5.0)));
+        assert!(!a.intersects(&Rect::new(11.0, 0.0, 20.0, 5.0)));
+        assert_eq!(a.union(&Rect::new(5.0, -5.0, 20.0, 5.0)), Rect::new(0.0, -5.0, 20.0, 10.0));
     }
 
     #[test]

@@ -9,6 +9,8 @@ pub enum Edit {
     Add { index: usize, annotation: Annotation },
     Remove { index: usize, annotation: Annotation },
     Replace { index: usize, before: Annotation, after: Annotation },
+    /// Several edits done and undone as one step, applied in order.
+    Batch(Vec<Edit>),
 }
 
 impl Edit {
@@ -17,6 +19,7 @@ impl Edit {
             Edit::Add { index, annotation } => Edit::Remove { index, annotation },
             Edit::Remove { index, annotation } => Edit::Add { index, annotation },
             Edit::Replace { index, before, after } => Edit::Replace { index, before: after, after: before },
+            Edit::Batch(edits) => Edit::Batch(edits.iter().rev().map(Edit::inverse).collect()),
         }
     }
 
@@ -27,6 +30,7 @@ impl Edit {
                 annotations.remove(*index);
             }
             Edit::Replace { index, after, .. } => annotations[*index] = after.clone(),
+            Edit::Batch(edits) => edits.iter().for_each(|edit| edit.perform(annotations)),
         }
     }
 }
@@ -116,6 +120,26 @@ mod tests {
         history.apply(&mut annotations, Edit::Add { index: 0, annotation: boxed(2, 0.0) });
         assert!(!history.can_redo());
         assert_eq!(annotations, vec![boxed(2, 0.0)]);
+    }
+
+    #[test]
+    fn a_batch_is_one_undo_step() {
+        let mut annotations = vec![boxed(1, 0.0), boxed(2, 20.0), boxed(3, 40.0)];
+        let mut history = History::default();
+        // Removing several shapes: highest index first keeps the others' indices valid.
+        history.apply(
+            &mut annotations,
+            Edit::Batch(vec![
+                Edit::Remove { index: 2, annotation: boxed(3, 40.0) },
+                Edit::Remove { index: 0, annotation: boxed(1, 0.0) },
+            ]),
+        );
+        assert_eq!(annotations, vec![boxed(2, 20.0)]);
+        assert!(history.undo(&mut annotations));
+        assert_eq!(annotations, vec![boxed(1, 0.0), boxed(2, 20.0), boxed(3, 40.0)]);
+        assert!(!history.can_undo());
+        assert!(history.redo(&mut annotations));
+        assert_eq!(annotations, vec![boxed(2, 20.0)]);
     }
 
     #[test]

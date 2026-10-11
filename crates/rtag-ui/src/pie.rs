@@ -58,15 +58,24 @@ pub struct Pie {
 impl Pie {
     /// The enabled item the pointer points at.
     pub fn highlighted(&self, pointer: Point) -> Option<&PieItem> {
-        let slots: Vec<Compass> = self.items.iter().filter(|item| item.enabled).map(|item| item.slot).collect();
+        let slots: Vec<Compass> = self
+            .items
+            .iter()
+            .filter(|item| item.enabled)
+            .map(|item| item.slot)
+            .collect();
         let slot = pick(pointer.x - self.centre.x, pointer.y - self.centre.y, &slots)?;
         self.items.iter().find(|item| item.slot == slot)
     }
 
     pub fn item_for_key(&self, key: &str) -> Option<&PieItem> {
-        self.items
-            .iter()
-            .find(|item| item.enabled && item.key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(key)))
+        self.items.iter().find(|item| {
+            item.enabled
+                && item
+                    .key
+                    .as_deref()
+                    .is_some_and(|k| k.eq_ignore_ascii_case(key))
+        })
     }
 }
 
@@ -74,20 +83,28 @@ pub fn now() -> f64 {
     web_sys::js_sys::Date::now()
 }
 
-/// Shows `pie` when set. Clicking a button picks it; clicking elsewhere closes the pie.
+/// Shows `pie` when set. Clicking a button picks it; clicking anywhere else calls
+/// `on_background`, which picks by direction as in Blender.
 #[component]
 pub fn PieMenu(
     pie: RwSignal<Option<Pie>>,
     pointer: RwSignal<Point>,
     on_pick: impl Fn(PieAction) + Copy + Send + Sync + 'static,
-    on_close: impl Fn() + Copy + Send + Sync + 'static,
+    on_background: impl Fn() + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
     move || {
         let current = pie.get()?;
         let centre = current.centre;
-        let width = if current.wide { WIDE_BUTTON_WIDTH } else { BUTTON_WIDTH };
+        let width = if current.wide {
+            WIDE_BUTTON_WIDTH
+        } else {
+            BUTTON_WIDTH
+        };
         let highlighted = move || {
-            pie.with(|pie| pie.as_ref().and_then(|pie| pie.highlighted(pointer.get()).map(|item| item.slot)))
+            pie.with(|pie| {
+                pie.as_ref()
+                    .and_then(|pie| pie.highlighted(pointer.get()).map(|item| item.slot))
+            })
         };
         // The arc points from the centre towards the pointer, once outside the dead zone.
         let arc = move || {
@@ -127,7 +144,8 @@ pub fn PieMenu(
             })
             .collect_view();
         Some(view! {
-            <div class="pie-layer" on:pointerdown=move |_| on_close() on:contextmenu=|ev: ev::MouseEvent| ev.prevent_default()>
+            <div class="pie-layer" on:pointerdown=move |ev: ev::PointerEvent| if ev.button() == 0 { on_background() }
+                on:contextmenu=|ev: ev::MouseEvent| ev.prevent_default()>
                 <div class="pie" role="menu" aria-label=current.label
                     style:left=format!("{}px", centre.x) style:top=format!("{}px", centre.y)>
                     <svg class="pie-ring" width="64" height="64" viewBox="0 0 64 64" aria-hidden="true">
@@ -173,12 +191,21 @@ pub fn LabelSearch(
         let entries = entries.clone();
         move || {
             let needle = query.get().to_lowercase();
-            entries.iter().filter(|entry| entry.name.to_lowercase().contains(&needle)).cloned().collect::<Vec<_>>()
+            entries
+                .iter()
+                .filter(|entry| entry.name.to_lowercase().contains(&needle))
+                .cloned()
+                .collect::<Vec<_>>()
         }
     };
     let first = {
         let matches = matches.clone();
-        move || matches().into_iter().find(|entry| entry.enabled).map(|entry| entry.id)
+        move || {
+            matches()
+                .into_iter()
+                .find(|entry| entry.enabled)
+                .map(|entry| entry.id)
+        }
     };
     view! {
         <div class="pie-layer" on:pointerdown=move |_| on_close()>

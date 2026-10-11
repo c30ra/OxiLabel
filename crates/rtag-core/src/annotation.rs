@@ -21,6 +21,22 @@ impl Shape {
         }
     }
 
+    /// The smallest axis-aligned rectangle containing the shape.
+    pub fn bounds(&self) -> Rect {
+        match self {
+            Shape::Rectangle(rect) => *rect,
+        }
+    }
+
+    /// The shape moved by (`dx`, `dy`) image pixels.
+    pub fn translated(&self, dx: f64, dy: f64) -> Shape {
+        match self {
+            Shape::Rectangle(rect) => {
+                Shape::Rectangle(Rect::new(rect.min.x + dx, rect.min.y + dy, rect.max.x + dx, rect.max.y + dy))
+            }
+        }
+    }
+
     /// Whether `point` is on the shape, allowing `margin` image pixels around it.
     pub fn contains(&self, point: Point, margin: f64) -> bool {
         match self {
@@ -71,6 +87,16 @@ pub fn topmost_at(annotations: &[Annotation], point: Point, margin: f64) -> Opti
     annotations.iter().rposition(|annotation| annotation.shape.contains(point, margin))
 }
 
+/// Indices of the annotations whose bounds overlap `region` (box selection).
+pub fn overlapping(annotations: &[Annotation], region: Rect) -> Vec<usize> {
+    annotations
+        .iter()
+        .enumerate()
+        .filter(|(_, annotation)| annotation.shape.bounds().intersects(&region))
+        .map(|(index, _)| index)
+        .collect()
+}
+
 /// All annotations of one image, in drawing order (the last one is on top), and the version they
 /// belong to. Every successful save increases the version by one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -107,6 +133,19 @@ mod tests {
         assert_eq!(topmost_at(&annotations, Point::new(10.0, 10.0), 0.0), Some(0));
         assert_eq!(topmost_at(&annotations, Point::new(150.0, 10.0), 0.0), None);
         assert_eq!(topmost_at(&annotations, Point::new(102.0, 10.0), 3.0), Some(0));
+    }
+
+    #[test]
+    fn box_selection_finds_overlapping_shapes() {
+        let annotations = [boxed(1, (0.0, 0.0), (10.0, 10.0)), boxed(2, (20.0, 20.0), (30.0, 30.0)), boxed(3, (50.0, 0.0), (60.0, 10.0))];
+        assert_eq!(overlapping(&annotations, Rect::new(5.0, 5.0, 25.0, 25.0)), vec![0, 1]);
+        assert_eq!(overlapping(&annotations, Rect::new(35.0, 35.0, 45.0, 45.0)), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn shapes_translate() {
+        let moved = boxed(1, (1.0, 2.0), (3.0, 4.0)).shape.translated(10.0, -1.0);
+        assert_eq!(moved.bounds(), Rect::new(11.0, 1.0, 13.0, 3.0));
     }
 
     #[test]
