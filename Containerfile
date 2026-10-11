@@ -1,6 +1,10 @@
 FROM docker.io/library/rust:1 AS build
-RUN rustup target add wasm32-unknown-unknown && cargo install wasm-bindgen-cli --version 0.2.129 --locked
+RUN rustup target add wasm32-unknown-unknown
 WORKDIR /src
+# wasm-bindgen-cli must match the wasm-bindgen crate version in Cargo.lock exactly.
+COPY Cargo.lock .
+RUN version=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p') \
+    && cargo install wasm-bindgen-cli --version "$version" --locked
 COPY . .
 RUN scripts/build-ui.sh release
 RUN cargo build --release -p rtag-server

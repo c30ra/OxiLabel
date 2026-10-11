@@ -7,3 +7,4 @@ version.workspace = true
 gloo-net = { version = "0.6", default-features = false, features = ["http", "json"] }
 leptos = { version = "0.8", features = ["csr"] }
 rtag-core = { path = "../rtag-core" }
+serde = { version = "1", features = ["derive"] }

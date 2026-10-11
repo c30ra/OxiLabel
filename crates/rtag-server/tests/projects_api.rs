@@ -23,7 +23,8 @@ async fn call(app: &Router, method: Method, uri: &str, body: Option<Value>) -> (
     let res = app.clone().oneshot(req.body(body).unwrap()).await.unwrap();
     let status = res.status();
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
-    let json = if bytes.is_empty() { Value::Null } else { serde_json::from_slice(&bytes).unwrap() };
+    let json = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()));
     (status, json)
 }
 
@@ -58,4 +59,29 @@ async fn deleting_an_unknown_project_is_not_found() {
     let app = test_app().await;
     let (status, _) = call(&app, Method::DELETE, "/api/projects/999", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn project_name_must_not_be_blank() {
+    let app = test_app().await;
+    let (status, body) = call(&app, Method::POST, "/api/projects", Some(json!({"name": "   "}))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "project name must not be blank");
+
+    let (_, list) = call(&app, Method::GET, "/api/projects", None).await;
+    assert_eq!(list, json!([]));
+}
+
+#[tokio::test]
+async fn project_name_is_trimmed() {
+    let app = test_app().await;
+    let (_, created) = call(&app, Method::POST, "/api/projects", Some(json!({"name": "  Cracks "}))).await;
+    assert_eq!(created["name"], "Cracks");
+}
+
+#[tokio::test]
+async fn malformed_project_body_is_rejected() {
+    let app = test_app().await;
+    let (status, _) = call(&app, Method::POST, "/api/projects", Some(json!({"title": "x"}))).await;
+    assert!(status.is_client_error(), "got {status}");
 }
