@@ -29,7 +29,13 @@ pub fn ImportDialog(
     let listing = LocalResource::new(move || {
         let path = folder.get();
         let project = project_param.clone();
-        async move { api::get_with_query::<BrowseListing>("/api/browse", &[("path", &path), ("project", &project)]).await }
+        async move {
+            api::get_with_query::<BrowseListing>(
+                "/api/browse",
+                &[("path", &path), ("project", &project)],
+            )
+            .await
+        }
     });
 
     let open_folder = move |path: String| {
@@ -37,7 +43,10 @@ pub fn ImportDialog(
         folder.set(path);
     };
     let toggle = move |entry: &BrowseEntry| {
-        let item = Picked { path: entry.path.clone(), kind: entry.kind };
+        let item = Picked {
+            path: entry.path.clone(),
+            kind: entry.kind,
+        };
         picked.update(|list| match list.iter().position(|p| p.path == item.path) {
             Some(index) => {
                 list.remove(index);
@@ -58,14 +67,20 @@ pub fn ImportDialog(
     };
     let all_visible_picked = move || {
         let entries = visible();
-        !entries.is_empty() && entries.iter().all(|e| picked.read().iter().any(|p| p.path == e.path))
+        !entries.is_empty()
+            && entries
+                .iter()
+                .all(|e| picked.read().iter().any(|p| p.path == e.path))
     };
     let toggle_all = move |checked: bool| {
         let entries = visible();
         picked.update(|list| {
             list.retain(|p| !entries.iter().any(|e| e.path == p.path));
             if checked {
-                list.extend(entries.iter().map(|e| Picked { path: e.path.clone(), kind: e.kind }));
+                list.extend(entries.iter().map(|e| Picked {
+                    path: e.path.clone(),
+                    kind: e.kind,
+                }));
             }
         });
     };
@@ -84,10 +99,14 @@ pub fn ImportDialog(
     };
 
     let start_import = move |_| {
-        let request = ImportRequest { paths: picked.read().iter().map(|p| p.path.clone()).collect() };
+        let request = ImportRequest {
+            paths: picked.read().iter().map(|p| p.path.clone()).collect(),
+        };
         busy.set(true);
         spawn_local(async move {
-            let result = api::post::<_, ImportReport>(&format!("/api/projects/{project}/imports"), &request).await;
+            let result =
+                api::post::<_, ImportReport>(&format!("/api/projects/{project}/imports"), &request)
+                    .await;
             if result.is_ok() {
                 picked.set(Vec::new());
                 on_imported();
@@ -222,7 +241,9 @@ pub fn ImportDialog(
 #[component]
 fn ImportResult(outcome: RwSignal<Option<Result<ImportReport, String>>>) -> impl IntoView {
     move || match outcome.get() {
-        Some(Err(message)) => view! { <p class="browser-note error" role="alert">{message}</p> }.into_any(),
+        Some(Err(message)) => {
+            view! { <p class="browser-note error" role="alert">{message}</p> }.into_any()
+        }
         Some(Ok(report)) => {
             let failed = report.failed.len();
             view! {

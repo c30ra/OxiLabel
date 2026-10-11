@@ -1,3 +1,4 @@
+mod annotate;
 mod api;
 mod pages;
 mod viewer;

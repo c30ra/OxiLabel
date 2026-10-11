@@ -30,8 +30,12 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>) -> impl IntoView {
         query.push(("limit", page_size.get().to_string()));
         version.track();
         async move {
-            let pairs: Vec<(&str, &str)> = query.iter().map(|(key, value)| (*key, value.as_str())).collect();
-            api::get_with_query::<ImagePage>(&format!("/api/projects/{project}/images"), &pairs).await
+            let pairs: Vec<(&str, &str)> = query
+                .iter()
+                .map(|(key, value)| (*key, value.as_str()))
+                .collect();
+            api::get_with_query::<ImagePage>(&format!("/api/projects/{project}/images"), &pairs)
+                .await
         }
     });
     Effect::new(move |_| {
@@ -77,8 +81,16 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>) -> impl IntoView {
         busy.set(true);
         let query = filter.get_untracked().to_query();
         spawn_local(async move {
-            let pairs: Vec<(&str, &str)> = query.iter().map(|(key, value)| (*key, value.as_str())).collect();
-            match api::get_with_query::<Vec<i64>>(&format!("/api/projects/{project}/image-ids"), &pairs).await {
+            let pairs: Vec<(&str, &str)> = query
+                .iter()
+                .map(|(key, value)| (*key, value.as_str()))
+                .collect();
+            match api::get_with_query::<Vec<i64>>(
+                &format!("/api/projects/{project}/image-ids"),
+                &pairs,
+            )
+            .await
+            {
                 Ok(ids) => selected.set(ids.into_iter().collect()),
                 Err(message) => error.set(Some(message)),
             }
@@ -86,10 +98,17 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>) -> impl IntoView {
         });
     };
     let remove = move |_| {
-        let request = RemovalRequest { ids: selected.get_untracked().into_iter().collect() };
+        let request = RemovalRequest {
+            ids: selected.get_untracked().into_iter().collect(),
+        };
         busy.set(true);
         spawn_local(async move {
-            match api::post::<_, RemovalReport>(&format!("/api/projects/{project}/image-removals"), &request).await {
+            match api::post::<_, RemovalReport>(
+                &format!("/api/projects/{project}/image-removals"),
+                &request,
+            )
+            .await
+            {
                 Ok(report) => {
                     clear();
                     // Stay on the last page that still has images.
@@ -113,9 +132,18 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>) -> impl IntoView {
     let keys = window_event_listener(leptos::ev::keydown, move |ev| {
         let document = document();
         let typing = document.active_element().is_some_and(|el| {
-            matches!(el.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT") && !el.class_list().contains("pick")
+            matches!(el.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT")
+                && !el.class_list().contains("pick")
         });
-        if typing || document.query_selector(".backdrop").ok().flatten().is_some() || ev.ctrl_key() || ev.meta_key() {
+        if typing
+            || document
+                .query_selector(".backdrop")
+                .ok()
+                .flatten()
+                .is_some()
+            || ev.ctrl_key()
+            || ev.meta_key()
+        {
             return;
         }
         let has_selection = !selected.read_untracked().is_empty();
@@ -125,7 +153,9 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>) -> impl IntoView {
             "a" | "A" => select_all(),
             "Escape" if has_selection => clear(),
             "Delete" if has_selection => confirming.set(true),
-            "PageDown" => offset.update(|o| *o = (*o + size).min(((total.get_untracked() - 1).max(0) / size) * size)),
+            "PageDown" => offset.update(|o| {
+                *o = (*o + size).min(((total.get_untracked() - 1).max(0) / size) * size)
+            }),
             "PageUp" => offset.update(|o| *o = (*o - size).max(0)),
             _ => return,
         }
@@ -227,7 +257,10 @@ fn Tile(
 ) -> impl IntoView {
     let id = image.id;
     let name = image.path.rsplit('/').next().unwrap_or_default().to_owned();
-    let mut details = vec![image.path.clone(), format!("{} × {} px", image.width, image.height)];
+    let mut details = vec![
+        image.path.clone(),
+        format!("{} × {} px", image.width, image.height),
+    ];
     details.extend(image.size.map(human_size));
     details.extend(image.modified.clone());
     let is_selected = move || selected.read().contains(&id);
@@ -249,6 +282,9 @@ fn Tile(
                     <span class=if image.annotated { "status-dot done" } else { "status-dot" }
                         title=if image.annotated { "Annotated" } else { "Not annotated" }></span>
                     <span class="name">{name.clone()}</span>
+                    {(image.annotations > 0).then(|| view! {
+                        <span class="count mono" title=format!("{} annotations", image.annotations)>{image.annotations}</span>
+                    })}
                 </span>
             </a>
         </li>
@@ -257,7 +293,12 @@ fn Tile(
 
 /// First/previous/next/last buttons, a page number field to jump to, and the page size.
 #[component]
-fn Pager(offset: RwSignal<i64>, page_size: RwSignal<i64>, total: RwSignal<i64>, anchor: RwSignal<Option<usize>>) -> impl IntoView {
+fn Pager(
+    offset: RwSignal<i64>,
+    page_size: RwSignal<i64>,
+    total: RwSignal<i64>,
+    anchor: RwSignal<Option<usize>>,
+) -> impl IntoView {
     let pages = move || ((total.get() + page_size.get() - 1) / page_size.get()).max(1);
     let current = move || offset.get() / page_size.get() + 1;
     let go_to = move |page: i64| {
@@ -306,10 +347,23 @@ fn Pager(offset: RwSignal<i64>, page_size: RwSignal<i64>, total: RwSignal<i64>, 
 
 /// Width, height, file size and date bounds. Each field applies when it is changed.
 #[component]
-fn FilterPanel(filter: RwSignal<ImageFilter>, set_filter: impl Fn(&dyn Fn(&mut ImageFilter)) + Copy + Send + Sync + 'static) -> impl IntoView {
+fn FilterPanel(
+    filter: RwSignal<ImageFilter>,
+    set_filter: impl Fn(&dyn Fn(&mut ImageFilter)) + Copy + Send + Sync + 'static,
+) -> impl IntoView {
     let number = |text: &str| text.trim().parse::<u32>().ok();
-    let megabytes = |text: &str| text.trim().parse::<f64>().ok().filter(|mb| *mb >= 0.0).map(|mb| (mb * BYTES_PER_MB).round() as u64);
-    let show_mb = |bytes: Option<u64>| bytes.map(|b| format!("{}", b as f64 / BYTES_PER_MB)).unwrap_or_default();
+    let megabytes = |text: &str| {
+        text.trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|mb| *mb >= 0.0)
+            .map(|mb| (mb * BYTES_PER_MB).round() as u64)
+    };
+    let show_mb = |bytes: Option<u64>| {
+        bytes
+            .map(|b| format!("{}", b as f64 / BYTES_PER_MB))
+            .unwrap_or_default()
+    };
     let show = |value: Option<u32>| value.map(|v| v.to_string()).unwrap_or_default();
     let text = |value: &Option<String>| value.clone().unwrap_or_default();
     let date = |value: String| Some(value).filter(|v| !v.is_empty());

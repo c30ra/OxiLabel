@@ -12,7 +12,9 @@ pub fn ProjectsPage() -> impl IntoView {
 
     let on_create = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
-        let new = NewProject { name: name.get().trim().to_owned() };
+        let new = NewProject {
+            name: name.get().trim().to_owned(),
+        };
         if new.name.is_empty() {
             return;
         }
@@ -36,7 +38,11 @@ pub fn ProjectsPage() -> impl IntoView {
             return;
         }
         spawn_local(async move {
-            error.set(api::delete(&format!("/api/projects/{}", project.id)).await.err());
+            error.set(
+                api::delete(&format!("/api/projects/{}", project.id))
+                    .await
+                    .err(),
+            );
             projects.refetch();
         });
     };

@@ -1,5 +1,5 @@
 use leptos::{prelude::*, task::spawn_local};
-use rtag_core::{Label, LabelDefinition, ShapeType};
+use rtag_core::{annotation::LabelUsage, Label, LabelDefinition, ShapeType};
 
 use crate::api;
 
@@ -66,7 +66,10 @@ pub fn LabelSet(project: i64) -> impl IntoView {
                 name: name.get(),
                 color: color.get(),
                 hotkey: Some(hotkey.get()),
-                shape_types: ShapeType::ALL.into_iter().filter(|shape| shapes.read().contains(shape)).collect(),
+                shape_types: ShapeType::ALL
+                    .into_iter()
+                    .filter(|shape| shapes.read().contains(shape))
+                    .collect(),
                 ignore: ignore.get(),
             };
             let url = url.clone();
@@ -89,14 +92,22 @@ pub fn LabelSet(project: i64) -> impl IntoView {
     let on_delete = {
         let url = url.clone();
         move |label: Label| {
-            let confirmed = window()
-                .confirm_with_message(&format!("Delete label \"{}\"?", label.name))
-                .unwrap_or(false);
-            if !confirmed {
-                return;
-            }
             let url = format!("{url}/{}", label.id);
             spawn_local(async move {
+                // Say how many annotations go with the label before deleting it.
+                let used = match api::get::<LabelUsage>(&format!("{url}/usage")).await {
+                    Ok(usage) => usage.annotations,
+                    Err(message) => return error.set(Some(message)),
+                };
+                let question = match used {
+                    0 => format!("Delete label \"{}\"?", label.name),
+                    1 => format!("Delete label \"{}\" and the 1 annotation that uses it? This cannot be undone.", label.name),
+                    n => format!("Delete label \"{}\" and the {n} annotations that use it? This cannot be undone.", label.name),
+                };
+                if !window().confirm_with_message(&question).unwrap_or(false) {
+                    return;
+                }
+                let url = if used > 0 { format!("{url}?confirm=true") } else { url };
                 match api::delete(&url).await {
                     Ok(()) => {
                         if editing.get_untracked() == Some(label.id) {

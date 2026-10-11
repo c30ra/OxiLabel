@@ -13,8 +13,20 @@ pub async fn get<T: DeserializeOwned>(url: &str) -> Result<T, String> {
 }
 
 /// GET with query parameters, which are URL-encoded.
-pub async fn get_with_query<T: DeserializeOwned>(url: &str, query: &[(&str, &str)]) -> Result<T, String> {
-    read_json(check(Request::get(&absolute(url)).query(query.iter().copied()).send().await).await?).await
+pub async fn get_with_query<T: DeserializeOwned>(
+    url: &str,
+    query: &[(&str, &str)],
+) -> Result<T, String> {
+    read_json(
+        check(
+            Request::get(&absolute(url))
+                .query(query.iter().copied())
+                .send()
+                .await,
+        )
+        .await?,
+    )
+    .await
 }
 
 pub async fn post<B: Serialize, T: DeserializeOwned>(url: &str, body: &B) -> Result<T, String> {
@@ -25,24 +37,69 @@ pub async fn put<B: Serialize, T: DeserializeOwned>(url: &str, body: &B) -> Resu
     send_json(Request::put(&absolute(url)), body).await
 }
 
+/// A failed request: the HTTP status (0 when the server was unreachable) and a message for the user.
+pub struct Failure {
+    pub status: u16,
+    pub message: String,
+}
+
+/// PUT that keeps the status of a failure, for callers that treat some statuses specially.
+pub async fn put_detailed<B: Serialize, T: DeserializeOwned>(
+    url: &str,
+    body: &B,
+) -> Result<T, Failure> {
+    let request = Request::put(&absolute(url))
+        .json(body)
+        .map_err(|err| Failure {
+            status: 0,
+            message: err.to_string(),
+        })?;
+    let response = request.send().await.map_err(|err| Failure {
+        status: 0,
+        message: format!("Server unreachable: {err}"),
+    })?;
+    let status = response.status();
+    if !response.ok() {
+        let message = match response.json::<ErrorBody>().await {
+            Ok(body) => body.error,
+            Err(_) => format!("Request failed ({status})"),
+        };
+        return Err(Failure { status, message });
+    }
+    read_json(response)
+        .await
+        .map_err(|message| Failure { status, message })
+}
+
 pub async fn delete(url: &str) -> Result<(), String> {
-    check(Request::delete(&absolute(url)).send().await).await.map(|_| ())
+    check(Request::delete(&absolute(url)).send().await)
+        .await
+        .map(|_| ())
 }
 
 /// Prefixes a server path with the page's origin. Browsers resolve relative request URLs
 /// themselves, but some headless engines (Obscura, used for UI tests) do not.
 fn absolute(path: &str) -> String {
-    let origin = leptos::prelude::window().location().origin().unwrap_or_default();
+    let origin = leptos::prelude::window()
+        .location()
+        .origin()
+        .unwrap_or_default();
     format!("{origin}{path}")
 }
 
-async fn send_json<B: Serialize, T: DeserializeOwned>(builder: RequestBuilder, body: &B) -> Result<T, String> {
+async fn send_json<B: Serialize, T: DeserializeOwned>(
+    builder: RequestBuilder,
+    body: &B,
+) -> Result<T, String> {
     let request = builder.json(body).map_err(|err| err.to_string())?;
     read_json(check(request.send().await).await?).await
 }
 
 async fn read_json<T: DeserializeOwned>(response: Response) -> Result<T, String> {
-    response.json().await.map_err(|err| format!("Unexpected response: {err}"))
+    response
+        .json()
+        .await
+        .map_err(|err| format!("Unexpected response: {err}"))
 }
 
 /// Turns a non-2xx response or a network failure into a message for the user.

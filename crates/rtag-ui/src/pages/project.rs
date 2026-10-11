@@ -14,7 +14,12 @@ pub enum Tab {
 #[component]
 pub fn ProjectPage(tab: Tab) -> impl IntoView {
     let params = use_params_map();
-    let project_id = Memo::new(move |_| params.read().get("id").and_then(|id| id.parse::<i64>().ok()));
+    let project_id = Memo::new(move |_| {
+        params
+            .read()
+            .get("id")
+            .and_then(|id| id.parse::<i64>().ok())
+    });
     let project = LocalResource::new(move || {
         let id = project_id.get();
         async move {

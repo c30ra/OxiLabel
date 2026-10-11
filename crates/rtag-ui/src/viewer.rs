@@ -7,12 +7,7 @@
 use std::collections::HashMap;
 
 use leptos::{ev, html, prelude::*};
-use rtag_core::{
-    Image,
-    geometry::Point,
-    pyramid::Pyramid,
-    view::View,
-};
+use rtag_core::{Image, geometry::Point, pyramid::Pyramid, view::View};
 use wasm_bindgen::{JsCast, closure::Closure};
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, HtmlImageElement};
 
@@ -26,9 +21,18 @@ const KEY_ZOOM_STEP: f64 = 1.25;
 type TileKey = (u32, u32, u32);
 
 /// `view` is `None` until the canvas has a size; setting it to `None` fits the image again.
-/// `size` reports the canvas size in CSS pixels.
+/// `size` reports the canvas size in CSS pixels. `space_held` tells layers drawn on top (the
+/// `children`, e.g. annotations) that a left-drag pans. Pointer events those layers do not use
+/// bubble up here for zooming and panning.
 #[component]
-pub fn TileViewer(image: Image, view: RwSignal<Option<View>>, size: RwSignal<(f64, f64)>) -> impl IntoView {
+pub fn TileViewer(
+    image: Image,
+    view: RwSignal<Option<View>>,
+    size: RwSignal<(f64, f64)>,
+    space_held: RwSignal<bool>,
+    children: Children,
+) -> impl IntoView {
+    let stage_ref = NodeRef::<html::Div>::new();
     let canvas_ref = NodeRef::<html::Canvas>::new();
     let pyramid = Pyramid::new(image.width, image.height);
     let image_size = (image.width, image.height);
@@ -36,11 +40,12 @@ pub fn TileViewer(image: Image, view: RwSignal<Option<View>>, size: RwSignal<(f6
     let tiles = StoredValue::new_local(HashMap::<TileKey, HtmlImageElement>::new());
     // Bumped whenever a tile finishes loading, which triggers a redraw.
     let loaded = RwSignal::new(0_u32);
-    let space_held = RwSignal::new(false);
     let dragging = RwSignal::new(None::<(f64, f64)>);
 
     let request_tile = move |key: TileKey| {
-        let Ok(element) = HtmlImageElement::new() else { return };
+        let Ok(element) = HtmlImageElement::new() else {
+            return;
+        };
         let on_load = Closure::once_into_js(move || loaded.update(|n| *n = n.wrapping_add(1)));
         element.set_onload(Some(on_load.unchecked_ref()));
         let (level, x, y) = key;
@@ -51,12 +56,22 @@ pub fn TileViewer(image: Image, view: RwSignal<Option<View>>, size: RwSignal<(f6
     };
 
     let draw = move || {
-        let (Some(canvas), Some(current)) = (canvas_ref.get_untracked(), view.get_untracked()) else { return };
-        let Some(context) = context_2d(&canvas) else { return };
+        let (Some(canvas), Some(current)) = (canvas_ref.get_untracked(), view.get_untracked())
+        else {
+            return;
+        };
+        let Some(context) = context_2d(&canvas) else {
+            return;
+        };
         let ratio = window().device_pixel_ratio();
         context.set_transform(1.0, 0.0, 0.0, 1.0, 0.0, 0.0).ok();
         context.set_fill_style_str(BACKGROUND);
-        context.fill_rect(0.0, 0.0, f64::from(canvas.width()), f64::from(canvas.height()));
+        context.fill_rect(
+            0.0,
+            0.0,
+            f64::from(canvas.width()),
+            f64::from(canvas.height()),
+        );
         // Past 100% show crisp pixels, as image editors do; below it, smooth downscaling.
         context.set_image_smoothing_enabled(current.scale * ratio < 1.0);
 
@@ -77,18 +92,33 @@ pub fn TileViewer(image: Image, view: RwSignal<Option<View>>, size: RwSignal<(f6
                 if !element.complete() || element.natural_width() == 0 {
                     continue;
                 }
-                let bounds = pyramid.tile_bounds(level, column, row).expect("listed tiles exist");
+                let bounds = pyramid
+                    .tile_bounds(level, column, row)
+                    .expect("listed tiles exist");
                 // The last level pixel of an edge may cover less than `scale` image pixels.
-                let image_x = |level_x: u32| (f64::from(level_x) * scale).min(f64::from(image_size.0));
-                let image_y = |level_y: u32| (f64::from(level_y) * scale).min(f64::from(image_size.1));
+                let image_x =
+                    |level_x: u32| (f64::from(level_x) * scale).min(f64::from(image_size.0));
+                let image_y =
+                    |level_y: u32| (f64::from(level_y) * scale).min(f64::from(image_size.1));
                 let top_left = current.to_screen(Point::new(image_x(bounds.x), image_y(bounds.y)));
-                let bottom_right =
-                    current.to_screen(Point::new(image_x(bounds.x + bounds.width), image_y(bounds.y + bounds.height)));
+                let bottom_right = current.to_screen(Point::new(
+                    image_x(bounds.x + bounds.width),
+                    image_y(bounds.y + bounds.height),
+                ));
                 // Whole device pixels, so neighbouring tiles meet without seams.
                 let (x0, y0) = ((top_left.x * ratio).round(), (top_left.y * ratio).round());
-                let (x1, y1) = ((bottom_right.x * ratio).round(), (bottom_right.y * ratio).round());
+                let (x1, y1) = (
+                    (bottom_right.x * ratio).round(),
+                    (bottom_right.y * ratio).round(),
+                );
                 context
-                    .draw_image_with_html_image_element_and_dw_and_dh(&element, x0, y0, x1 - x0, y1 - y0)
+                    .draw_image_with_html_image_element_and_dw_and_dh(
+                        &element,
+                        x0,
+                        y0,
+                        x1 - x0,
+                        y1 - y0,
+                    )
                     .ok();
             }
         }
@@ -105,9 +135,14 @@ pub fn TileViewer(image: Image, view: RwSignal<Option<View>>, size: RwSignal<(f6
 
     // Match the canvas backing store to its displayed size, and fit the image when there is no view yet.
     let resize = move || {
-        let Some(canvas) = canvas_ref.get_untracked() else { return };
+        let Some(canvas) = canvas_ref.get_untracked() else {
+            return;
+        };
         let ratio = window().device_pixel_ratio();
-        let (width, height) = (f64::from(canvas.client_width()), f64::from(canvas.client_height()));
+        let (width, height) = (
+            f64::from(canvas.client_width()),
+            f64::from(canvas.client_height()),
+        );
         canvas.set_width((width * ratio).round() as u32);
         canvas.set_height((height * ratio).round() as u32);
         size.set((width, height));
@@ -127,7 +162,9 @@ pub fn TileViewer(image: Image, view: RwSignal<Option<View>>, size: RwSignal<(f6
 
     let zoom_at_centre = move |factor: f64| {
         let (width, height) = size.get_untracked();
-        view.update(|view| *view = view.map(|v| v.zoom_at(Point::new(width / 2.0, height / 2.0), factor)));
+        view.update(|view| {
+            *view = view.map(|v| v.zoom_at(Point::new(width / 2.0, height / 2.0), factor))
+        });
     };
     let on_key_down = window_event_listener(ev::keydown, move |ev| {
         if typing_in_a_field() || ev.ctrl_key() || ev.meta_key() || ev.alt_key() {
@@ -160,7 +197,9 @@ pub fn TileViewer(image: Image, view: RwSignal<Option<View>>, size: RwSignal<(f6
             2 => ev.delta_y() * 800.0, // pages
             _ => ev.delta_y(),
         };
-        let anchor = Point::new(f64::from(ev.offset_x()), f64::from(ev.offset_y()));
+        let Some(anchor) = stage_point(stage_ref, &ev) else {
+            return;
+        };
         let factor = (-pixels * WHEEL_ZOOM_SPEED).exp();
         view.update(|view| *view = view.map(|v| v.zoom_at(anchor, factor)));
     };
@@ -170,13 +209,15 @@ pub fn TileViewer(image: Image, view: RwSignal<Option<View>>, size: RwSignal<(f6
             return;
         }
         ev.prevent_default();
-        if let Some(canvas) = canvas_ref.get_untracked() {
-            canvas.set_pointer_capture(ev.pointer_id()).ok();
+        if let Some(stage) = stage_ref.get_untracked() {
+            stage.set_pointer_capture(ev.pointer_id()).ok();
         }
         dragging.set(Some((f64::from(ev.client_x()), f64::from(ev.client_y()))));
     };
     let on_pointer_move = move |ev: ev::PointerEvent| {
-        let Some((last_x, last_y)) = dragging.get_untracked() else { return };
+        let Some((last_x, last_y)) = dragging.get_untracked() else {
+            return;
+        };
         let (x, y) = (f64::from(ev.client_x()), f64::from(ev.client_y()));
         view.update(|view| *view = view.map(|v| v.pan(x - last_x, y - last_y)));
         dragging.set(Some((x, y)));
@@ -184,12 +225,11 @@ pub fn TileViewer(image: Image, view: RwSignal<Option<View>>, size: RwSignal<(f6
     let stop_drag = move |_: ev::PointerEvent| dragging.set(None);
 
     view! {
-        <canvas
-            class="viewer"
+        <div
+            class="stage"
             class:pan-ready=move || space_held.get()
             class:panning=move || dragging.get().is_some()
-            node_ref=canvas_ref
-            aria-label=format!("Image {}", image.path)
+            node_ref=stage_ref
             on:wheel=on_wheel
             on:pointerdown=on_pointer_down
             on:pointermove=on_pointer_move
@@ -197,18 +237,30 @@ pub fn TileViewer(image: Image, view: RwSignal<Option<View>>, size: RwSignal<(f6
             on:pointercancel=stop_drag
             // Middle-click would otherwise start autoscroll or paste.
             on:mousedown=|ev: ev::MouseEvent| if ev.button() == 1 { ev.prevent_default() }
-        ></canvas>
+        >
+            <canvas class="viewer" node_ref=canvas_ref aria-label=format!("Image {}", image.path)></canvas>
+            {children()}
+        </div>
     }
 }
 
-fn context_2d(canvas: &HtmlCanvasElement) -> Option<CanvasRenderingContext2d> {
+/// Where a mouse event happened, in CSS pixels relative to the stage (and so to its canvases).
+pub(crate) fn stage_point(stage: NodeRef<html::Div>, ev: &ev::MouseEvent) -> Option<Point> {
+    let rect = stage.get_untracked()?.get_bounding_client_rect();
+    Some(Point::new(
+        f64::from(ev.client_x()) - rect.left(),
+        f64::from(ev.client_y()) - rect.top(),
+    ))
+}
+
+pub(crate) fn context_2d(canvas: &HtmlCanvasElement) -> Option<CanvasRenderingContext2d> {
     // `getContext("2d")` always returns a 2D context; skip the `instanceof` check, which fails in
     // some headless engines (Obscura) whose context class has another name.
     Some(canvas.get_context("2d").ok().flatten()?.unchecked_into())
 }
 
-fn typing_in_a_field() -> bool {
-    document()
-        .active_element()
-        .is_some_and(|element| matches!(element.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT"))
+pub(crate) fn typing_in_a_field() -> bool {
+    document().active_element().is_some_and(|element| {
+        matches!(element.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT")
+    })
 }

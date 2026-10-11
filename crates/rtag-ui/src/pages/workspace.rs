@@ -1,10 +1,33 @@
-use leptos::prelude::*;
+use std::time::Duration;
+
+use leptos::{ev, prelude::*, task::spawn_local};
 use leptos_router::{components::A, hooks::use_params_map};
-use rtag_core::{Image, Project, geometry::Point, view::View};
+use rtag_core::{
+    Image, Label, Project, ShapeType,
+    annotation::{ImageAnnotations, SaveAnnotations},
+    geometry::Point,
+    view::View,
+};
 
-use crate::{api, viewer::TileViewer};
+use crate::{
+    annotate::{AnnotationLayer, Editor, Tool},
+    api,
+    viewer::TileViewer,
+};
 
-/// The annotation workspace for one image. For now it only views the image.
+/// Unsaved changes are saved this long after the last edit.
+const AUTOSAVE_DELAY: Duration = Duration::from_millis(1000);
+const NOTICE_DURATION: Duration = Duration::from_secs(4);
+
+#[derive(Clone)]
+struct Loaded {
+    project: Project,
+    image: Image,
+    labels: Vec<Label>,
+    annotations: ImageAnnotations,
+}
+
+/// The annotation workspace for one image.
 #[component]
 pub fn WorkspacePage() -> impl IntoView {
     let params = use_params_map();
@@ -17,33 +40,195 @@ pub fn WorkspacePage() -> impl IntoView {
         let ids = ids.get();
         async move {
             let (project, image) = ids.ok_or_else(|| "Invalid image link".to_owned())?;
-            let project = api::get::<Project>(&format!("/api/projects/{project}")).await?;
-            let image = api::get::<Image>(&format!("/api/projects/{}/images/{image}", project.id)).await?;
-            Ok::<_, String>((project, image))
+            let base = format!("/api/projects/{project}");
+            Ok::<_, String>(Loaded {
+                project: api::get::<Project>(&base).await?,
+                image: api::get::<Image>(&format!("{base}/images/{image}")).await?,
+                labels: api::get::<Vec<Label>>(&format!("{base}/labels")).await?,
+                annotations: api::get::<ImageAnnotations>(&format!(
+                    "{base}/images/{image}/annotations"
+                ))
+                .await?,
+            })
         }
     });
 
     move || match data.get() {
         None => view! { <p class="page muted">"Loading…"</p> }.into_any(),
         Some(Err(message)) => view! { <p class="page error" role="alert">{message}</p> }.into_any(),
-        Some(Ok((project, image))) => view! { <Workspace project=project image=image /> }.into_any(),
+        Some(Ok(loaded)) => {
+            let Loaded {
+                project,
+                image,
+                labels,
+                annotations,
+            } = loaded;
+            view! { <Workspace project=project image=image labels=labels annotations=annotations /> }.into_any()
+        }
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum SaveState {
+    Saved,
+    Unsaved,
+    Saving,
+    Failed(String),
+    /// The image changed elsewhere; saving stops until the user reloads.
+    Conflict(String),
+}
+
 #[component]
-fn Workspace(project: Project, image: Image) -> impl IntoView {
+fn Workspace(
+    project: Project,
+    image: Image,
+    labels: Vec<Label>,
+    annotations: ImageAnnotations,
+) -> impl IntoView {
     let view = RwSignal::new(None::<View>);
     let size = RwSignal::new((0.0, 0.0));
+    let space_held = RwSignal::new(false);
+    let rectangle_labels: Vec<Label> = labels
+        .iter()
+        .filter(|label| label.shape_types.contains(&ShapeType::Rectangle))
+        .cloned()
+        .collect();
+    let editor = Editor::new(
+        annotations.annotations,
+        rectangle_labels.first().map(|label| label.id),
+    );
+    let url = StoredValue::new(format!(
+        "/api/projects/{}/images/{}/annotations",
+        project.id, image.id
+    ));
+
+    // Autosave: the version the editor is based on and the last revision the server has.
+    let version = RwSignal::new(annotations.version);
+    let saved_revision = RwSignal::new(0_u64);
+    let state = RwSignal::new(SaveState::Saved);
+    let retry = RwSignal::new(0_u32);
+    let timer = StoredValue::new(0_u64);
+
+    let save = move || {
+        if matches!(
+            state.get_untracked(),
+            SaveState::Saving | SaveState::Conflict(_)
+        ) {
+            return;
+        }
+        let revision = editor.revision.get_untracked();
+        if revision == saved_revision.get_untracked() {
+            state.set(SaveState::Saved);
+            return;
+        }
+        let request = SaveAnnotations {
+            base_version: version.get_untracked(),
+            annotations: editor.annotations.get_untracked(),
+        };
+        state.set(SaveState::Saving);
+        spawn_local(async move {
+            match api::put_detailed::<_, ImageAnnotations>(&url.get_value(), &request).await {
+                Ok(saved) => {
+                    version.set(saved.version);
+                    saved_revision.set(revision);
+                    state.set(SaveState::Saved);
+                    // Edits made while saving are saved next.
+                    if editor.revision.get_untracked() != revision {
+                        retry.update(|n| *n += 1);
+                    }
+                }
+                Err(failure) if failure.status == 409 => {
+                    state.set(SaveState::Conflict(failure.message))
+                }
+                Err(failure) => state.set(SaveState::Failed(failure.message)),
+            }
+        });
+    };
+    Effect::new(move |_| {
+        let revision = editor.revision.get();
+        retry.track();
+        if revision == saved_revision.get_untracked()
+            || matches!(state.get_untracked(), SaveState::Conflict(_))
+        {
+            return;
+        }
+        if state.get_untracked() != SaveState::Saving {
+            state.set(SaveState::Unsaved);
+        }
+        let token = timer.get_value() + 1;
+        timer.set_value(token);
+        set_timeout(
+            move || {
+                if timer.get_value() == token {
+                    save();
+                }
+            },
+            AUTOSAVE_DELAY,
+        );
+    });
+    // Leaving the image saves at once; closing the tab with unsaved work asks first.
+    {
+        let url = url.get_value();
+        on_cleanup(move || {
+            if editor.revision.get_untracked() != saved_revision.get_untracked()
+                && !matches!(state.get_untracked(), SaveState::Conflict(_))
+            {
+                let request = SaveAnnotations {
+                    base_version: version.get_untracked(),
+                    annotations: editor.annotations.get_untracked(),
+                };
+                spawn_local(async move {
+                    let _ = api::put_detailed::<_, ImageAnnotations>(&url, &request).await;
+                });
+            }
+        });
+    }
+    let before_unload = window_event_listener(ev::beforeunload, move |ev| {
+        if editor.revision.get_untracked() != saved_revision.get_untracked() {
+            ev.prevent_default();
+            ev.set_return_value("");
+        }
+    });
+    on_cleanup(move || before_unload.remove());
+
+    let reload = move |_| {
+        spawn_local(async move {
+            match api::get::<ImageAnnotations>(&url.get_value()).await {
+                Ok(latest) => {
+                    editor.reset(latest.annotations);
+                    version.set(latest.version);
+                    saved_revision.set(editor.revision.get_untracked());
+                    state.set(SaveState::Saved);
+                }
+                Err(message) => editor.notice.set(Some(message)),
+            }
+        });
+    };
+
+    // Hints fade out on their own.
+    Effect::new(move |_| {
+        if editor.notice.get().is_some() {
+            set_timeout(move || editor.notice.set(None), NOTICE_DURATION);
+        }
+    });
+
     let name = image.path.rsplit('/').next().unwrap_or_default().to_owned();
-    let zoom_label = move || view.get().map(|v| format!("{:.0}%", v.scale * 100.0)).unwrap_or_default();
+    let zoom_label = move || {
+        view.get()
+            .map(|v| format!("{:.0}%", v.scale * 100.0))
+            .unwrap_or_default()
+    };
     // Toggles between 100% around the centre and fitting the whole image.
     let toggle_zoom = move |_| {
         let (width, height) = size.get_untracked();
         match view.get_untracked() {
-            Some(v) if (v.scale - 1.0).abs() > 1e-6 => view.set(Some(v.zoom_to(Point::new(width / 2.0, height / 2.0), 1.0))),
+            Some(v) if (v.scale - 1.0).abs() > 1e-6 => {
+                view.set(Some(v.zoom_to(Point::new(width / 2.0, height / 2.0), 1.0)))
+            }
             _ => view.set(None),
         }
     };
+    let image_size = (image.width, image.height);
 
     view! {
         <div class="workspace">
@@ -57,12 +242,122 @@ fn Workspace(project: Project, image: Image) -> impl IntoView {
                     <span class="current mono" title=image.path.clone()>{name}</span>
                 </nav>
                 <div class="actions">
-                    <span class="muted mono">{format!("{} × {}", image.width, image.height)}</span>
+                    <SaveIndicator state=state on_retry=save on_reload=reload />
+                    <LabelPicker labels=rectangle_labels editor=editor />
                     <button class="zoom mono" title="Zoom: click for 100% / fit (Home fits, + and − zoom)"
                         on:click=toggle_zoom>{zoom_label}</button>
                 </div>
             </header>
-            <TileViewer image=image view=view size=size />
+            <div class="workspace-body">
+                <ToolRail editor=editor />
+                <TileViewer image=image view=view size=size space_held=space_held>
+                    <AnnotationLayer editor=editor labels=labels image_size=image_size view=view size=size space_held=space_held />
+                    {move || editor.notice.get().map(|text| view! { <p class="notice" role="status">{text}</p> })}
+                </TileViewer>
+            </div>
         </div>
+    }
+}
+
+#[component]
+fn SaveIndicator(
+    state: RwSignal<SaveState>,
+    on_retry: impl Fn() + Copy + Send + Sync + 'static,
+    on_reload: impl Fn(ev::MouseEvent) + Copy + Send + Sync + 'static,
+) -> impl IntoView {
+    move || {
+        match state.get() {
+        SaveState::Saved => view! { <span class="save-state saved" role="status">"Saved"</span> }.into_any(),
+        SaveState::Unsaved => view! { <span class="save-state unsaved" role="status">"Unsaved changes"</span> }.into_any(),
+        SaveState::Saving => view! { <span class="save-state" role="status">"Saving…"</span> }.into_any(),
+        SaveState::Failed(message) => view! {
+            <span class="save-state failed" role="alert" title=message.clone()>"Save failed"</span>
+            <button class="small" on:click=move |_| on_retry()>"Retry"</button>
+        }
+        .into_any(),
+        SaveState::Conflict(message) => view! {
+            <span class="save-state failed" role="alert" title=message>"Changed elsewhere"</span>
+            <button class="small" title="Load the latest annotations; your unsaved edits are discarded" on:click=on_reload>"Reload"</button>
+        }
+        .into_any(),
+    }
+    }
+}
+
+/// The label new shapes get; number keys (the labels' hotkeys) switch it too.
+#[component]
+fn LabelPicker(labels: Vec<Label>, editor: Editor) -> impl IntoView {
+    let open = RwSignal::new(false);
+    let current = {
+        let labels = labels.clone();
+        move || {
+            let id = editor.label.get();
+            labels.iter().find(|label| Some(label.id) == id).cloned()
+        }
+    };
+    let close = window_event_listener(ev::pointerdown, move |ev| {
+        let inside = ev
+            .target()
+            .and_then(|target| wasm_bindgen::JsCast::dyn_into::<web_sys::Element>(target).ok())
+            .and_then(|element| element.closest(".label-picker").ok().flatten())
+            .is_some();
+        if !inside {
+            open.set(false);
+        }
+    });
+    on_cleanup(move || close.remove());
+    view! {
+        <div class="label-picker">
+            <button class="label-current" aria-haspopup="listbox" aria-expanded=move || open.get().to_string()
+                title="Label for new shapes (number keys switch)" on:click=move |_| open.update(|o| *o = !*o)>
+                {move || match current() {
+                    Some(label) => view! {
+                        <span class="swatch" style:background=label.color.clone()></span>
+                        <span>{label.name.clone()}</span>
+                        {label.hotkey.clone().map(|key| view! { <kbd>{key}</kbd> })}
+                    }.into_any(),
+                    None => view! { <span class="muted">"No rectangle label"</span> }.into_any(),
+                }}
+                <span class="chevron" aria-hidden="true">"▾"</span>
+            </button>
+            <Show when=move || open.get()>
+                <ul class="label-menu" role="listbox">
+                    {labels.iter().map(|label| {
+                        let id = label.id;
+                        view! {
+                            <li role="option" aria-selected=move || (editor.label.get() == Some(id)).to_string()
+                                class:active=move || editor.label.get() == Some(id)
+                                on:click=move |_| { editor.label.set(Some(id)); open.set(false); }>
+                                <span class="swatch" style:background=label.color.clone()></span>
+                                <span class="grow">{label.name.clone()}</span>
+                                {label.hotkey.clone().map(|key| view! { <kbd>{key}</kbd> })}
+                            </li>
+                        }
+                    }).collect_view()}
+                </ul>
+            </Show>
+        </div>
+    }
+}
+
+#[component]
+fn ToolRail(editor: Editor) -> impl IntoView {
+    let tool_button = move |tool: Tool,
+                            name: &'static str,
+                            key: &'static str,
+                            icon: &'static str| {
+        view! {
+            <button class="tool" class:active=move || editor.tool.get() == tool aria-pressed=move || (editor.tool.get() == tool).to_string()
+                title=format!("{name} ({key})") aria-label=name on:click=move |_| editor.tool.set(tool)>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d=icon /></svg>
+                <kbd>{key}</kbd>
+            </button>
+        }
+    };
+    view! {
+        <nav class="tool-rail" aria-label="Tools">
+            {tool_button(Tool::Select, "Select", "V", "M5 3l13 8-6 1.5L9.5 19z")}
+            {tool_button(Tool::Rectangle, "Rectangle", "R", "M4 6h16v12H4z")}
+        </nav>
     }
 }
