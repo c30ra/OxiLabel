@@ -4,11 +4,11 @@
 
 **Blocked by:** 03
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A 6 MP image opens quickly and stays responsive while panning and zooming
+- [x] A 6 MP image opens quickly and stays responsive while panning and zooming
 - [x] Tiles are generated on first request and served from cache afterwards
-- [ ] Zooming to 100% and beyond shows full-resolution detail
+- [x] Zooming to 100% and beyond shows full-resolution detail
 - [x] A coordinate transform between screen and original image coordinates exists in the core crate and is unit-tested
 - [x] API tests cover tile generation, caching and out-of-range requests
 
