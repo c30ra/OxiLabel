@@ -4,12 +4,12 @@
 
 **Blocked by:** 02, 04
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Drawing a rectangle with two points creates an annotation stored in original image coordinates
-- [ ] Click selects the topmost shape, handles resize it, Delete removes it, and Esc deselects
-- [ ] Ctrl+Z and Ctrl+Y undo and redo within the image using a client-side command history
-- [ ] Annotations autosave when I change or leave the image, with a visible saved, unsaved or failed indicator
+- [x] Drawing a rectangle with two points creates an annotation stored in original image coordinates
+- [x] Click selects the topmost shape, handles resize it, Delete removes it, and Esc deselects
+- [x] Ctrl+Z and Ctrl+Y undo and redo within the image using a client-side command history
+- [x] Annotations autosave when I change or leave the image, with a visible saved, unsaved or failed indicator
 - [x] A save based on a stale version is rejected with a clear message and nothing is overwritten
 - [x] The image grid shows each image's annotation count (moved from ticket 03)
 - [x] Deleting a label that is used by annotations tells me how many annotations would be removed and requires confirmation (moved from ticket 02)
