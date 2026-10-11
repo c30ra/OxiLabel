@@ -4,11 +4,11 @@
 
 **Blocked by:** 01
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] Importing a folder adds all supported images recursively and reports how many were added
 - [x] Importing the same folder again skips images already known by hash or path
-- [ ] The grid shows thumbnails ~~, annotation count~~ and status for each image (annotation count moved to ticket 05), with simple pagination or virtual scrolling
+- [x] The grid shows thumbnails ~~, annotation count~~ and status for each image (annotation count moved to ticket 05), with simple pagination or virtual scrolling
 - [x] Unreadable or unsupported files are reported, not silently dropped
 - [x] API tests cover import, re-import, and dimension and hash recording
 
