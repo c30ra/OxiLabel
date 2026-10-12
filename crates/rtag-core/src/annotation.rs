@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ShapeType,
+    attribute::Attributes,
     geometry::{Point, Rect, bounds_of, distance_to_segment, inside_polygon, polygon_area},
     mask::Mask,
     oriented::OrientedRect,
@@ -26,6 +27,8 @@ pub enum Shape {
     Circle { centre: Point, radius: f64 },
     /// Painted pixels (brush and eraser), run-length encoded.
     Mask(Mask),
+    /// An image-level tag: the label applies to the whole image, so there is no geometry.
+    Tag,
 }
 
 /// Coordinates may stick out of the image by this much (float rounding) and still count as inside.
@@ -41,7 +44,13 @@ impl Shape {
             Shape::Points { .. } => ShapeType::Points,
             Shape::Circle { .. } => ShapeType::Circle,
             Shape::Mask(_) => ShapeType::Mask,
+            Shape::Tag => ShapeType::Tag,
         }
+    }
+
+    /// Whether this is an image-level tag rather than a shape on the image.
+    pub fn is_tag(&self) -> bool {
+        matches!(self, Shape::Tag)
     }
 
     /// The editable vertices: polygon, polyline and point positions, or rectangle corners. Masks
@@ -54,7 +63,7 @@ impl Shape {
             Shape::OrientedRectangle(rect) => rect.corners().to_vec(),
             Shape::Polygon { points } | Shape::Polyline { points } | Shape::Points { points } => points.clone(),
             Shape::Circle { centre, .. } => vec![*centre],
-            Shape::Mask(_) => Vec::new(),
+            Shape::Mask(_) | Shape::Tag => Vec::new(),
         }
     }
 
@@ -65,7 +74,7 @@ impl Shape {
             Shape::Polygon { .. } => 3,
             Shape::Polyline { .. } => 2,
             Shape::Points { .. } | Shape::Circle { .. } => 1,
-            Shape::Mask(_) => 0,
+            Shape::Mask(_) | Shape::Tag => 0,
         }
     }
 
@@ -80,11 +89,12 @@ impl Shape {
                 let corners = self.vertices();
                 (0..4).map(|i| (corners[i], corners[(i + 1) % 4])).collect()
             }
-            Shape::Points { .. } | Shape::Circle { .. } | Shape::Mask(_) => Vec::new(),
+            Shape::Points { .. } | Shape::Circle { .. } | Shape::Mask(_) | Shape::Tag => Vec::new(),
         }
     }
 
-    /// The smallest axis-aligned rectangle containing the shape.
+    /// The smallest axis-aligned rectangle containing the shape (an empty one at the origin for
+    /// a tag).
     pub fn bounds(&self) -> Rect {
         match self {
             Shape::Rectangle(rect) => *rect,
@@ -97,6 +107,7 @@ impl Shape {
                 let area = mask.area();
                 Rect::new(f64::from(area.left), f64::from(area.top), f64::from(area.right()), f64::from(area.bottom()))
             }
+            Shape::Tag => Rect::new(0.0, 0.0, 0.0, 0.0),
         }
     }
 
@@ -116,6 +127,7 @@ impl Shape {
                 let shift = |at: u32, by: f64| (f64::from(at) + by).round().max(0.0) as u32;
                 Shape::Mask(Mask { left: shift(mask.left, dx), top: shift(mask.top, dy), ..mask.clone() })
             }
+            Shape::Tag => Shape::Tag,
         }
     }
 
@@ -131,6 +143,7 @@ impl Shape {
             Shape::Points { points } => points.iter().any(|p| p.distance(point) <= margin),
             Shape::Circle { centre, radius } => centre.distance(point) <= radius + margin,
             Shape::Mask(mask) => mask.contains(point),
+            Shape::Tag => false,
         }
     }
 
@@ -147,7 +160,7 @@ impl Shape {
                 }
             }
             Shape::Circle { centre, .. } => *centre = to,
-            Shape::Mask(_) => {}
+            Shape::Mask(_) | Shape::Tag => {}
         }
         moved
     }
@@ -180,8 +193,10 @@ impl Shape {
 
     /// Checks that the shape is well formed and lies inside a `width` × `height` image.
     pub fn validate(&self, width: u32, height: u32) -> Result<(), String> {
-        if let Shape::Mask(mask) = self {
-            return mask.validate(width, height);
+        match self {
+            Shape::Mask(mask) => return mask.validate(width, height),
+            Shape::Tag => return Ok(()),
+            _ => {}
         }
         let mut vertices = self.vertices();
         if let Shape::Circle { radius, .. } = self {
@@ -228,11 +243,14 @@ pub struct Annotation {
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f64>,
+    /// Values of the label's attributes; missing ones count as their defaults.
+    #[serde(default, skip_serializing_if = "Attributes::is_empty")]
+    pub attributes: Attributes,
 }
 
 impl Annotation {
     pub fn manual(label: i64, shape: Shape) -> Self {
-        Annotation { label, shape, source: None, confidence: None }
+        Annotation { label, shape, source: None, confidence: None, attributes: Attributes::new() }
     }
 }
 
@@ -241,12 +259,13 @@ pub fn topmost_at(annotations: &[Annotation], point: Point, margin: f64) -> Opti
     annotations.iter().rposition(|annotation| annotation.shape.contains(point, margin))
 }
 
-/// Indices of the annotations whose bounds overlap `region` (box selection).
+/// Indices of the annotations whose bounds overlap `region` (box selection); tags are not on
+/// the image, so never.
 pub fn overlapping(annotations: &[Annotation], region: Rect) -> Vec<usize> {
     annotations
         .iter()
         .enumerate()
-        .filter(|(_, annotation)| annotation.shape.bounds().intersects(&region))
+        .filter(|(_, annotation)| !annotation.shape.is_tag() && annotation.shape.bounds().intersects(&region))
         .map(|(index, _)| index)
         .collect()
 }
@@ -413,6 +432,28 @@ mod tests {
         let json = serde_json::to_value(&mask).unwrap();
         assert_eq!(json, serde_json::json!({"type": "mask", "left": 10, "top": 20, "width": 3, "height": 2, "rle": [0, 3, 3]}));
         assert_eq!(serde_json::from_value::<Shape>(json).unwrap(), mask);
+    }
+
+    #[test]
+    fn tags_are_shapes_without_geometry_that_nothing_hits() {
+        let tag = Shape::Tag;
+        assert_eq!(tag.shape_type(), ShapeType::Tag);
+        assert_eq!(serde_json::to_value(&tag).unwrap(), serde_json::json!({"type": "tag"}));
+        assert!(tag.is_tag() && !boxed(1, (0.0, 0.0), (1.0, 1.0)).shape.is_tag());
+        assert!(!tag.contains(Point::new(0.0, 0.0), 10.0));
+        assert_eq!(tag.validate(10, 10), Ok(()));
+        let annotations = [Annotation::manual(1, Shape::Tag), boxed(2, (0.0, 0.0), (10.0, 10.0))];
+        assert_eq!(overlapping(&annotations, Rect::new(-5.0, -5.0, 5.0, 5.0)), vec![1], "box selection skips tags");
+        assert_eq!(topmost_at(&annotations, Point::new(0.0, 0.0), 1.0), Some(1));
+    }
+
+    #[test]
+    fn attribute_values_serialize_only_when_present() {
+        let mut annotation = boxed(3, (1.0, 2.0), (3.0, 4.0));
+        annotation.attributes.insert("occluded".into(), crate::attribute::AttributeValue::Bool(true));
+        let json = serde_json::to_value(&annotation).unwrap();
+        assert_eq!(json["attributes"], serde_json::json!({"occluded": true}));
+        assert_eq!(serde_json::from_value::<Annotation>(json).unwrap(), annotation);
     }
 
     #[test]

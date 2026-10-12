@@ -21,7 +21,8 @@
 //! Holding Q or the right mouse button opens a pie at the cursor: with Select active the tool pie
 //! (then the label pie), with a drawing tool its options pie, with a shape selected the label pie
 //! to relabel it. Release or flick picks; a quick tap repeats the last tool and label. Shift+Q
-//! opens only the label pie.
+//! opens only the label pie. Tag (T, or the tool pie) opens the label pie and toggles that label
+//! as a tag of the whole image; tags show as chips over the image.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -29,6 +30,7 @@ use leptos::{ev, html, prelude::*};
 use rtag_core::{
     Label, ShapeType,
     annotation::{Annotation, Shape, overlapping, topmost_at},
+    attribute::Attributes,
     edges::EdgeMap,
     fill::{FillSettings, grow},
     geometry::{Handle, Point, Rect, snap_angle, steps_along, steps_towards},
@@ -92,6 +94,8 @@ pub enum Tool {
     Circle,
     /// Paints masks; its eraser mode erases them.
     Brush,
+    /// Never active: picking it, then a label, toggles that label as an image tag.
+    Tag,
 }
 
 impl Tool {
@@ -105,6 +109,7 @@ impl Tool {
             Tool::Points => Some(ShapeType::Points),
             Tool::Circle => Some(ShapeType::Circle),
             Tool::Brush => Some(ShapeType::Mask),
+            Tool::Tag => Some(ShapeType::Tag),
         }
     }
 
@@ -117,6 +122,7 @@ impl Tool {
             Tool::Points => "Points",
             Tool::Circle => "Circle",
             Tool::Brush => "Brush",
+            Tool::Tag => "Tag",
         }
     }
 
@@ -305,6 +311,14 @@ impl Editor {
         }
     }
 
+    /// Removes annotation `index` (one undo step) and clears the selection, whose indices would
+    /// no longer fit.
+    pub fn remove(&self, index: usize) {
+        let Some(annotation) = self.annotation(index) else { return };
+        self.selection.set(BTreeSet::new());
+        self.apply(Edit::Remove { index, annotation });
+    }
+
     /// Removes every selected annotation in one undo step.
     pub fn delete_selected(&self) {
         let selection = self.selection.get_untracked();
@@ -423,6 +437,11 @@ pub fn AnnotationLayer(
     let label_allows = move |id: i64, shape: ShapeType| {
         all_labels.with_value(|labels| labels.iter().any(|label| label.id == id && label.shape_types.contains(&shape)))
     };
+    // The attribute values new annotations with a label get, and values made to fit a label.
+    let conform = move |id: i64, values: &Attributes| {
+        all_labels.with_value(|labels| labels.iter().find(|l| l.id == id).map(|l| l.conform_attributes(values)).unwrap_or_default())
+    };
+    let defaults = move |id: i64| conform(id, &Attributes::new());
     let label_name = move |id: i64| all_labels.with_value(|labels| labels.iter().find(|l| l.id == id).map(|l| l.name.clone()).unwrap_or_default());
 
     // Pointer position in canvas pixels and in image coordinates.
@@ -437,7 +456,10 @@ pub fn AnnotationLayer(
     let selection_bounds = move || {
         let selection = editor.selection.get_untracked();
         editor.annotations.with_untracked(|list| {
-            selection.iter().filter_map(|&index| list.get(index).map(|a| a.shape.bounds())).reduce(|a, b| a.union(&b))
+            selection
+                .iter()
+                .filter_map(|&index| list.get(index).filter(|a| !a.shape.is_tag()).map(|a| a.shape.bounds()))
+                .reduce(|a, b| a.union(&b))
         })
     };
     // The handle of the single selected shape under `point`, if any.
@@ -461,7 +483,7 @@ pub fn AnnotationLayer(
                     nearest(&shape.vertices(), point, reach).map(Grip::Vertex)
                 }
             }
-            Shape::Mask(_) => None,
+            Shape::Mask(_) | Shape::Tag => None,
             Shape::Polygon { .. } | Shape::Polyline { .. } | Shape::Points { .. } => {
                 nearest(&shape.vertices(), point, reach).map(Grip::Vertex).or_else(|| {
                     let midpoints: Vec<Point> = match shape {
@@ -488,7 +510,7 @@ pub fn AnnotationLayer(
             return;
         }
         let index = editor.annotations.with_untracked(Vec::len);
-        editor.apply(Edit::Add { index, annotation: Annotation::manual(label, shape) });
+        editor.apply(Edit::Add { index, annotation: Annotation { attributes: defaults(label), ..Annotation::manual(label, shape) } });
     };
     let finish_rectangle = move |start: Point, end: Point, square: bool, from_centre: bool, scale: f64| {
         let rect = Rect::from_drag(start, end, square, from_centre).clamped(width, height);
@@ -563,6 +585,7 @@ pub fn AnnotationLayer(
         let mut done = None;
         stroke.update_value(|current| done = current.take());
         let Some(edit) = done.and_then(|done| editor.annotations.with_untracked(|list| done.finish(list))) else { return };
+        let edit = with_defaults(edit, &defaults);
         let count = editor.annotations.with_untracked(Vec::len);
         editor.apply(edit);
         // Joined or emptied masks were removed, so the selected indices no longer fit.
@@ -645,6 +668,7 @@ pub fn AnnotationLayer(
         let region = preview.region.scaled_up(preview.factor, image_size);
         let label = editor.label.get_untracked().unwrap_or_default();
         let edit = editor.annotations.with_untracked(|list| Stroke::from_region(erase, label, region, image_size, list).finish(list));
+        let edit = edit.map(|edit| with_defaults(edit, &defaults));
         if let Some(edit) = edit {
             let count = editor.annotations.with_untracked(Vec::len);
             editor.apply(edit);
@@ -807,8 +831,7 @@ pub fn AnnotationLayer(
     let tool_pie = move |centre: Point, held: bool| {
         let current = editor.tool.get_untracked();
         let tool = |slot, tool: Tool, key: &str| item(slot, tool.name(), Some(key), true, tool == current, PieAction::Tool(tool));
-        let later = |slot, name: &str, key: &str| item(slot, name, Some(key), false, false, PieAction::Keep);
-        // The approved layout; tools of later tickets keep their places, disabled.
+        // The approved layout.
         let items = vec![
             tool(Compass::N, Tool::Select, "V"),
             tool(Compass::NE, Tool::Rectangle, "R"),
@@ -817,7 +840,7 @@ pub fn AnnotationLayer(
             tool(Compass::S, Tool::Polyline, "L"),
             tool(Compass::SW, Tool::Brush, "B"),
             tool(Compass::W, Tool::Circle, "C"),
-            later(Compass::NW, "Tag", "T"),
+            tool(Compass::NW, Tool::Tag, "T"),
         ];
         Pie { label: "Tools", items, centre, wide: false, held, opened_at: now() }
     };
@@ -925,7 +948,7 @@ pub fn AnnotationLayer(
                 }
                 ("Brush options", items)
             }
-            Tool::Select => ("Options", Vec::new()),
+            Tool::Select | Tool::Tag => ("Options", Vec::new()),
         };
         // Four wide buttons, unless an option needs a diagonal slot.
         let wide = items.iter().all(|item| matches!(item.slot, Compass::N | Compass::E | Compass::S | Compass::W));
@@ -962,6 +985,18 @@ pub fn AnnotationLayer(
         Gesture::Path { .. } => gesture.set(Gesture::Idle),
         _ => {}
     };
+    // Adds `id` as a tag of the image, or removes it if the image has it.
+    let toggle_tag = move |id: i64| {
+        let existing = editor.annotations.with_untracked(|list| list.iter().position(|a| a.shape.is_tag() && a.label == id));
+        match existing {
+            Some(index) => editor.remove(index),
+            None => {
+                let index = editor.annotations.with_untracked(Vec::len);
+                let annotation = Annotation { attributes: defaults(id), ..Annotation::manual(id, Shape::Tag) };
+                editor.apply(Edit::Add { index, annotation });
+            }
+        }
+    };
     let finish_label = move |id: i64| {
         let (relabelling, tool) = (relabel.get_value(), pending_tool.get_value());
         let shapes = target_shapes();
@@ -971,7 +1006,20 @@ pub fn AnnotationLayer(
             return;
         }
         match (relabelling, tool) {
-            (true, _) => editor.change_selected(|annotation| Annotation { label: id, ..annotation.clone() }),
+            (true, _) => {
+                // An image has each tag once: a selected tag cannot become one it already has.
+                let tagged = editor.annotations.with_untracked(|list| list.iter().any(|a| a.shape.is_tag() && a.label == id));
+                if tagged && editor.selection.with_untracked(|set| set.iter().any(|&i| editor.annotation(i).is_some_and(|a| a.shape.is_tag()))) {
+                    editor.notice.set(Some(format!("The image already has the tag “{}”.", label_name(id))));
+                }
+                editor.change_selected(|annotation| {
+                    if annotation.shape.is_tag() && tagged {
+                        return annotation.clone();
+                    }
+                    Annotation { label: id, attributes: conform(id, &annotation.attributes), ..annotation.clone() }
+                })
+            }
+            (false, Some(Tool::Tag)) => toggle_tag(id),
             (false, Some(tool)) => {
                 editor.tool.set(tool);
                 editor.label.set(Some(id));
@@ -1058,7 +1106,6 @@ pub fn AnnotationLayer(
                 close_pie();
                 undo_point();
             }
-            PieAction::Keep => close_pie(),
         }
     };
     // Releasing the pie key or button: a tap repeats the last tool, label and modes, from Select
@@ -1610,6 +1657,14 @@ pub fn AnnotationLayer(
                 editor.tool.set(Tool::Brush);
                 editor.eraser.set(true);
             }
+            // T: the label pie, whose label is toggled as a tag of the image.
+            "t" | "T" => {
+                close_pie();
+                pending_tool.set_value(Some(Tool::Tag));
+                let at = cursor_at.get_value();
+                pointer.set(at);
+                pie.set(Some(label_pie(at, false)));
+            }
             // U: the brush's fuzzy fill (GIMP's fuzzy select key).
             "u" | "U" => {
                 cancel_gesture();
@@ -1661,6 +1716,10 @@ pub fn AnnotationLayer(
         let single = editor.single_selection();
         editor.annotations.with_untracked(|list| {
             for (index, annotation) in list.iter().enumerate() {
+                // Tags are chips over the image, not drawn on it.
+                if annotation.shape.is_tag() {
+                    continue;
+                }
                 let selected = selection.contains(&index);
                 // Shapes being edited show their new form.
                 let shape = match &gesture {
@@ -1706,7 +1765,7 @@ pub fn AnnotationLayer(
                         Shape::Polygon { .. } | Shape::Polyline { .. } => {
                             draw::vertex_handles(&context, current, &shape, &color, true)
                         }
-                        Shape::Mask(_) => {}
+                        Shape::Mask(_) | Shape::Tag => {}
                     }
                 }
             }
@@ -1781,6 +1840,21 @@ pub fn AnnotationLayer(
     };
     view! {
         <PieMenu pie=pie pointer=pointer on_pick=choose on_background=background_click />
+        <div class="tag-chips" aria-label="Image tags">
+            {move || editor.annotations.with(|list| {
+                list.iter().enumerate().filter(|(_, a)| a.shape.is_tag()).map(|(index, a)| {
+                    let name = label_name(a.label);
+                    let selected = move || editor.selection.with(|set| set.contains(&index));
+                    view! {
+                        <span class="tag-chip" class:selected=selected style:border-color=color_of(a.label)>
+                            <span class="swatch" style:background=color_of(a.label)></span>
+                            <button class="name" title="Select this tag" on:click=move |_| editor.selection.set(BTreeSet::from([index]))>{name.clone()}</button>
+                            <button class="remove" title="Remove this tag" aria-label=format!("Remove tag {name}") on:click=move |_| editor.remove(index)>"×"</button>
+                        </span>
+                    }
+                }).collect_view()
+            })}
+        </div>
         {move || search.get().map(|at| view! {
             <LabelSearch at=at entries=search_entries() on_pick=finish_label on_close=close_pie />
         })}
@@ -1816,4 +1890,18 @@ fn nearest(points: &[Point], to: Point, reach: f64) -> Option<usize> {
         .filter(|(_, distance)| *distance <= reach)
         .min_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(index, _)| index)
+}
+
+/// `edit` with new annotations given their label's default attribute values.
+fn with_defaults(edit: Edit, defaults: &dyn Fn(i64) -> Attributes) -> Edit {
+    match edit {
+        Edit::Add { index, mut annotation } => {
+            if annotation.attributes.is_empty() {
+                annotation.attributes = defaults(annotation.label);
+            }
+            Edit::Add { index, annotation }
+        }
+        Edit::Batch(edits) => Edit::Batch(edits.into_iter().map(|edit| with_defaults(edit, defaults)).collect()),
+        other => other,
+    }
 }

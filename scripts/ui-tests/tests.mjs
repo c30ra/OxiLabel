@@ -145,14 +145,14 @@ export const tests = [
     },
   },
   {
-    name: 'the tool pie keeps later tools in place, disabled',
+    name: 'the tool pie opens on a right-button tap and offers all eight tools',
     async run(t) {
       const w = await openWorkspace(t.b, t.base, t.project);
       await t.b.move(...w.at(800, 500));
       await t.b.click(...w.at(800, 500), { button: 2 });
       const state = await w.state();
       equal(state.pie, 'Tools', 'pie after a right-button tap without a last tool');
-      equal(state.pieItems.filter((item) => item.enabled).map((item) => item.name), ['Select', 'Rectangle', 'Polygon', 'Points', 'Polyline', 'Brush', 'Circle'], 'enabled tools');
+      equal(state.pieItems.filter((item) => item.enabled).map((item) => item.name), ['Select', 'Rectangle', 'Polygon', 'Points', 'Polyline', 'Brush', 'Circle', 'Tag'], 'enabled tools');
       equal(state.pieItems.length, 8, 'tool slots');
     },
   },
@@ -673,6 +673,87 @@ tests.push({
     const [moved] = await saved(t, (list) => list[0].shape.left !== 100, 'the move');
     near([moved.shape.left, moved.shape.top], [200, 150], 1 + 2 / w.scale, 'new position');
     equal([moved.shape.width, moved.shape.height, moved.shape.rle], [200, 100, mask.rle], 'same pixels');
+  },
+});
+
+// Tags and attributes (ticket 10).
+
+/** Gives label `id` of the test project `attributes`, keeping the rest of its definition. */
+async function setAttributes(t, id, attributes) {
+  const labels = await t.api.call('GET', `/api/projects/${t.project.id}/labels`);
+  const label = labels.find((l) => l.id === id);
+  await t.api.call('PUT', `/api/projects/${t.project.id}/labels/${id}`, { ...label, attributes });
+}
+const chips = (t) => t.b.json(`[...document.querySelectorAll('.tag-chip')].map((c) => c.querySelector('.name').textContent)`);
+const panelTags = (t) => t.b.json(`[...document.querySelectorAll('.side-panel .tags li')].map((c) => c.querySelector('.name').textContent)`);
+
+tests.push({
+  name: 'labels define attributes with types and defaults on the Labels tab',
+  async run(t) {
+    await t.b.goto(`${t.base}/projects/${t.project.id}/labels`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.label-form')`), 'the label form');
+    // Typed like a person: click into the field, type, Tab out.
+    const type = async (selector, text) => {
+      const box = await t.b.json(`(() => { const el = document.querySelector(${JSON.stringify(selector)}); el.scrollIntoView({ block: 'center' }); return el.getBoundingClientRect(); })()`);
+      await t.b.click(box.x + box.width / 2, box.y + box.height / 2);
+      for (const ch of text) await t.b.key(ch);
+      await t.b.key(KEY.tab);
+    };
+    const press = (text) => t.b.eval(`[...document.querySelectorAll('.label-form button')].find((b) => b.textContent.trim() === ${JSON.stringify(text)}).click(), 1`);
+    const choose = (selector, value) => t.b.eval(`(() => { const el = document.querySelector(${JSON.stringify(selector)}); el.value = ${JSON.stringify(value)}; el.dispatchEvent(new Event('change', { bubbles: true })); return 1; })()`);
+    await type('.label-form input[placeholder="Name"]', 'stain');
+    await press('Add attribute');
+    await type('.attribute:nth-of-type(1) input.attribute-name', 'severity');
+    await choose('.attribute:nth-of-type(1) select.attribute-type', 'select');
+    await type('.attribute:nth-of-type(1) input.options', 'low, high');
+    await choose('.attribute:nth-of-type(1) select.default', 'high');
+    await press('Add attribute');
+    await type('.attribute:nth-of-type(2) input.attribute-name', 'occluded');
+    await choose('.attribute:nth-of-type(2) select.attribute-type', 'checkbox');
+    await press('Add label');
+    const label = await t.b.waitFor(async () => (await t.api.call('GET', `/api/projects/${t.project.id}/labels`)).find((l) => l.name === 'stain'), 'the new label');
+    equal(label.attributes, [
+      { name: 'severity', type: 'select', options: ['low', 'high'], default: 'high' },
+      { name: 'occluded', type: 'checkbox', default: false },
+    ], 'attributes');
+  },
+}, {
+  name: 'T and a label key toggle an image tag, shown over the image and in the side panel',
+  async run(t) {
+    const w = await openWorkspace(t.b, t.base, t.project);
+    await t.b.move(...w.at(800, 500));
+    await t.b.key('t');
+    equal((await w.state()).pie, 'Labels', 'T opens the label pie');
+    await t.b.key('2');
+    let list = await saved(t, (list) => list.length === 1, 'the tag');
+    equal(list[0], { label: 2, shape: { type: 'tag' } }, 'a tag for "finger"');
+    equal([await chips(t), await panelTags(t), (await w.state()).tool], [['finger'], ['finger'], 'Select'], 'chips, panel and tool');
+    await t.b.key('t');
+    await t.b.key('2');
+    await saved(t, (list) => list.length === 0, 'the tag removed again');
+    equal(await chips(t), [], 'no chips');
+  },
+}, {
+  name: 'the attribute editor appears only for a selection whose label has attributes',
+  async run(t) {
+    await setAttributes(t, 1, [
+      { name: 'severity', type: 'select', options: ['low', 'high'], default: 'low' },
+      { name: 'occluded', type: 'checkbox', default: false },
+    ]);
+    await t.api.setAnnotations(t.project, [box(1, 100, 100, 300, 300), box(2, 500, 100, 700, 300), { label: 1, shape: { type: 'tag' } }]);
+    const w = await openWorkspace(t.b, t.base, t.project);
+    const editor = () => t.b.eval(`!!document.querySelector('.attribute-editor')`);
+    await t.b.click(...w.at(600, 200));
+    equal(await editor(), false, 'no editor for a label without attributes');
+    await t.b.click(...w.at(200, 200));
+    equal(await editor(), true, 'an editor for "crack"');
+    await t.b.eval(`(() => { const el = document.querySelector('.attribute-editor select'); el.value = 'high'; el.dispatchEvent(new Event('change', { bubbles: true })); return 1; })()`);
+    await t.b.eval(`document.querySelector('.attribute-editor input[type=checkbox]').click(), 1`);
+    let list = await saved(t, (list) => list[0].attributes?.occluded === true, 'the attribute values');
+    equal([list[0].attributes.severity, list[0].attributes.occluded], ['high', true], 'values');
+    // A tag is selected from its chip, and has the same editor.
+    await t.b.eval(`document.querySelector('.tag-chip .name').click(), 1`);
+    equal([(await w.state()).selected, await editor()], [[2], true], 'tag selected with an editor');
   },
 });
 

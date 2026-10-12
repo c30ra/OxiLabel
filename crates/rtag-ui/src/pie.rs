@@ -51,8 +51,6 @@ pub enum PieAction {
     FinishShape,
     /// Remove the last placed vertex.
     UndoPoint,
-    /// Picks nothing new (the option already in use).
-    Keep,
 }
 
 #[derive(Debug, Clone, PartialEq)]

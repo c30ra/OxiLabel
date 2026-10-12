@@ -4,7 +4,7 @@ use axum::{
     http::StatusCode,
     routing::{get, put},
 };
-use rtag_core::{Label, LabelDefinition, annotation::LabelUsage};
+use rtag_core::{Label, LabelDefinition, annotation::LabelUsage, attribute::Attributes};
 use serde::Deserialize;
 use sqlx::{Row, SqliteConnection, SqlitePool, sqlite::SqliteRow};
 
@@ -36,7 +36,7 @@ async fn create_label(
     .get("id");
     let label = Label::new(id, definition);
     sqlx::query(
-        "INSERT INTO labels (project_id, id, name, color, hotkey, shape_types, is_ignore) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO labels (project_id, id, name, color, hotkey, shape_types, is_ignore, attributes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(project)
     .bind(label.id)
@@ -45,6 +45,7 @@ async fn create_label(
     .bind(&label.hotkey)
     .bind(serde_json::to_string(&label.shape_types).expect("shape types serialize"))
     .bind(label.ignore)
+    .bind(serde_json::to_string(&label.attributes).expect("attributes serialize"))
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -71,26 +72,57 @@ async fn update_label(
     Path((project, id)): Path<(i64, i64)>,
     Json(definition): Json<LabelDefinition>,
 ) -> Result<Json<Label>, ApiError> {
-    let mut conn = pool.acquire().await?;
+    let mut tx = pool.begin().await?;
     let (current, others): (Vec<Label>, Vec<Label>) =
-        project_labels(&mut conn, project).await?.into_iter().partition(|label| label.id == id);
+        project_labels(&mut tx, project).await?.into_iter().partition(|label| label.id == id);
     if current.is_empty() {
         return Err(ApiError::NotFound);
     }
     let label = Label::new(id, definition.validated(&others).map_err(ApiError::BadRequest)?);
     sqlx::query(
-        "UPDATE labels SET name = ?, color = ?, hotkey = ?, shape_types = ?, is_ignore = ? WHERE project_id = ? AND id = ?",
+        "UPDATE labels SET name = ?, color = ?, hotkey = ?, shape_types = ?, is_ignore = ?, attributes = ? WHERE project_id = ? AND id = ?",
     )
     .bind(&label.name)
     .bind(&label.color)
     .bind(&label.hotkey)
     .bind(serde_json::to_string(&label.shape_types).expect("shape types serialize"))
     .bind(label.ignore)
+    .bind(serde_json::to_string(&label.attributes).expect("attributes serialize"))
     .bind(project)
     .bind(id)
-    .execute(&mut *conn)
+    .execute(&mut *tx)
     .await?;
+    conform_attribute_values(&mut tx, project, &label).await?;
+    tx.commit().await?;
     Ok(Json(label))
+}
+
+/// Makes the stored attribute values of `label`'s annotations fit its (changed) definitions:
+/// values of removed attributes go, values that no longer fit and missing ones become defaults.
+/// Images whose annotations change get a new version, so editors holding the old one reload.
+async fn conform_attribute_values(conn: &mut SqliteConnection, project: i64, label: &Label) -> Result<(), ApiError> {
+    let rows = sqlx::query("SELECT id, image_id, attributes FROM annotations WHERE project_id = ? AND label_id = ?")
+        .bind(project)
+        .bind(label.id)
+        .fetch_all(&mut *conn)
+        .await?;
+    let mut changed_images = std::collections::BTreeSet::new();
+    for row in rows {
+        let stored: Attributes = serde_json::from_str(row.get("attributes")).unwrap_or_default();
+        let conformed = label.conform_attributes(&stored);
+        if conformed != stored {
+            sqlx::query("UPDATE annotations SET attributes = ? WHERE id = ?")
+                .bind(serde_json::to_string(&conformed).expect("attributes serialize"))
+                .bind(row.get::<i64, _>("id"))
+                .execute(&mut *conn)
+                .await?;
+            changed_images.insert(row.get::<i64, _>("image_id"));
+        }
+    }
+    for image in changed_images {
+        sqlx::query("UPDATE images SET version = version + 1 WHERE id = ?").bind(image).execute(&mut *conn).await?;
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -166,5 +198,6 @@ fn label_from_row(row: &SqliteRow) -> Label {
         hotkey: row.get("hotkey"),
         shape_types: serde_json::from_str(row.get("shape_types")).unwrap_or_default(),
         ignore: row.get("is_ignore"),
+        attributes: serde_json::from_str(row.get("attributes")).unwrap_or_default(),
     }
 }

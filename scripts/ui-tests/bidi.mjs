@@ -4,7 +4,7 @@
 
 import { writeFileSync } from 'node:fs';
 
-export const KEY = { ctrl: '', shift: '', alt: '', escape: '', enter: '', delete: '', home: '' };
+export const KEY = { ctrl: '', shift: '', alt: '', escape: '', enter: '', delete: '', home: '', tab: '' };
 
 export async function connect(port) {
   const ws = new WebSocket(`ws://127.0.0.1:${port}/session`);

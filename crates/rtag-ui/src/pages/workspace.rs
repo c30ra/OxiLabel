@@ -4,7 +4,7 @@ use leptos::{ev, prelude::*, task::spawn_local};
 use leptos_router::{components::A, hooks::use_params_map};
 use rtag_core::{
     Image, Label, Project,
-    annotation::{ImageAnnotations, SaveAnnotations},
+    annotation::{Annotation, ImageAnnotations, SaveAnnotations},
     geometry::Point,
     view::View,
 };
@@ -12,6 +12,7 @@ use rtag_core::{
 use crate::{
     annotate::{AnnotationLayer, Editor, Tool},
     api,
+    side_panel::SidePanel,
     tool_options::ToolOptions,
     viewer::TileViewer,
 };
@@ -90,8 +91,10 @@ fn Workspace(
     let size = RwSignal::new((0.0, 0.0));
     let space_held = RwSignal::new(false);
     // Start with the first label; switching to a tool picks one that allows its shape.
-    let editor = Editor::new(annotations.annotations, labels.iter().map(|label| label.id).min());
+    let editor = Editor::new(conformed(&labels, annotations.annotations), labels.iter().map(|label| label.id).min());
+    let labels_for_reload = StoredValue::new(labels.clone());
     let picker_labels = labels.clone();
+    let layer_labels = labels.clone();
     let url = StoredValue::new(format!(
         "/api/projects/{}/images/{}/annotations",
         project.id, image.id
@@ -190,7 +193,7 @@ fn Workspace(
         spawn_local(async move {
             match api::get::<ImageAnnotations>(&url.get_value()).await {
                 Ok(latest) => {
-                    editor.reset(latest.annotations);
+                    editor.reset(conformed(&labels_for_reload.get_value(), latest.annotations));
                     version.set(latest.version);
                     saved_revision.set(editor.revision.get_untracked());
                     state.set(SaveState::Saved);
@@ -247,9 +250,10 @@ fn Workspace(
             <div class="workspace-body">
                 <ToolRail editor=editor />
                 <TileViewer image=image view=view size=size space_held=space_held>
-                    <AnnotationLayer editor=editor labels=labels image_id=image_id image_size=image_size view=view size=size space_held=space_held />
+                    <AnnotationLayer editor=editor labels=layer_labels image_id=image_id image_size=image_size view=view size=size space_held=space_held />
                     {move || editor.notice.get().map(|text| view! { <p class="notice" role="status">{text}</p> })}
                 </TileViewer>
+                <SidePanel editor=editor labels=labels />
             </div>
         </div>
     }
@@ -368,4 +372,16 @@ fn ToolRail(editor: Editor) -> impl IntoView {
             {tool_button(Tool::Points, "Points", ".", "M4.4 7a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0 M15.4 6a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0 M9.9 12.5a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0 M5.4 18a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0 M16.4 17a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0")}
         </nav>
     }
+}
+
+/// Annotations with their attribute values made to fit their labels' current definitions, which
+/// may have changed since they were saved.
+fn conformed(labels: &[Label], annotations: Vec<Annotation>) -> Vec<Annotation> {
+    annotations
+        .into_iter()
+        .map(|annotation| match labels.iter().find(|label| label.id == annotation.label) {
+            Some(label) => Annotation { attributes: label.conform_attributes(&annotation.attributes), ..annotation },
+            None => annotation,
+        })
+        .collect()
 }

@@ -5,6 +5,7 @@ mod draw;
 mod masks;
 mod pages;
 mod pie;
+mod side_panel;
 mod tool_options;
 mod viewer;
 

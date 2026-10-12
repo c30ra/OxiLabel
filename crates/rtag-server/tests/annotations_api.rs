@@ -228,3 +228,75 @@ async fn masks_are_stored_as_rle_and_reload_identically() {
     let (status, _) = save(&app, project, image, 1, json!([{"label": 1, "shape": mask["shape"]}])).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "\"defect\" does not allow masks");
 }
+
+#[tokio::test]
+async fn attribute_values_are_checked_against_the_label_and_tags_need_a_label_that_allows_them() {
+    let app = test_app().await;
+    let (project, image) = setup(&app).await;
+    let labels = format!("/api/projects/{project}/labels");
+    let attributes = json!([
+        {"name": "severity", "type": "select", "options": ["low", "high"], "default": "low"},
+        {"name": "occluded", "type": "checkbox", "default": false}
+    ]);
+    call(&app, Method::POST, &labels, Some(json!({"name": "faulty", "color": "#9b59b6", "shape_types": ["rectangle", "tag"], "attributes": attributes}))).await;
+    let with = |values: Value| {
+        let mut annotation = rectangle(3, (1.0, 1.0), (5.0, 5.0));
+        annotation["attributes"] = values;
+        annotation
+    };
+    let tag = json!({"label": 3, "shape": {"type": "tag"}, "attributes": {"occluded": true}});
+    let good = json!([with(json!({"severity": "high", "occluded": true})), tag]);
+    let (status, body) = save(&app, project, image, 0, good.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(load(&app, project, image).await["annotations"], good);
+
+    for (values, why) in [
+        (json!({"colour": "red"}), "not an attribute of the label"),
+        (json!({"severity": "medium"}), "not an option"),
+        (json!({"occluded": "yes"}), "not a checkbox value"),
+    ] {
+        let (status, body) = save(&app, project, image, 1, json!([with(values)])).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{why}: {body}");
+    }
+    let (status, _) = save(&app, project, image, 1, json!([{"label": 1, "shape": {"type": "tag"}}])).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "\"defect\" does not allow tags");
+}
+
+#[tokio::test]
+async fn editing_a_labels_attributes_conforms_the_stored_values_and_bumps_the_version() {
+    let app = test_app().await;
+    let (project, image) = setup(&app).await;
+    let labels = format!("/api/projects/{project}/labels");
+    let definition = |attributes: Value| json!({"name": "faulty", "color": "#9b59b6", "shape_types": ["rectangle", "tag"], "attributes": attributes});
+    let before = json!([
+        {"name": "severity", "type": "select", "options": ["low", "medium", "high"], "default": "low"},
+        {"name": "occluded", "type": "checkbox", "default": false}
+    ]);
+    call(&app, Method::POST, &labels, Some(definition(before))).await;
+    let mut annotation = rectangle(3, (1.0, 1.0), (5.0, 5.0));
+    annotation["attributes"] = json!({"severity": "medium", "occluded": true});
+    save(&app, project, image, 0, json!([annotation])).await;
+
+    // "occluded" goes, "medium" is no longer an option, and "note" is new.
+    let after = json!([
+        {"name": "severity", "type": "select", "options": ["low", "high"], "default": "high"},
+        {"name": "note", "type": "text", "default": "-"}
+    ]);
+    let (status, _) = call(&app, Method::PUT, &format!("{labels}/3"), Some(definition(after))).await;
+    assert_eq!(status, StatusCode::OK);
+    let loaded = load(&app, project, image).await;
+    assert_eq!(loaded["version"], 2, "editors holding version 1 must reload");
+    assert_eq!(loaded["annotations"][0]["attributes"], json!({"severity": "high", "note": "-"}));
+    let (status, body) = save(&app, project, image, 2, loaded["annotations"].clone()).await;
+    assert_eq!(status, StatusCode::OK, "what was loaded saves again: {body}");
+}
+
+#[tokio::test]
+async fn an_image_has_each_tag_once() {
+    let app = test_app().await;
+    let (project, image) = setup(&app).await;
+    call(&app, Method::POST, &format!("/api/projects/{project}/labels"), Some(json!({"name": "ok", "color": "#4fb286", "shape_types": ["tag"]}))).await;
+    let tag = json!({"label": 3, "shape": {"type": "tag"}});
+    let (status, body) = save(&app, project, image, 0, json!([tag, tag])).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}

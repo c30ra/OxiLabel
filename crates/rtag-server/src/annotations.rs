@@ -34,7 +34,7 @@ async fn load_annotations(
 ) -> Result<Json<ImageAnnotations>, ApiError> {
     let mut conn = pool.acquire().await?;
     let (_, _, version) = image_in_project(&mut conn, project, image).await?;
-    let rows = sqlx::query("SELECT label_id, shape, source, confidence FROM annotations WHERE image_id = ? ORDER BY position")
+    let rows = sqlx::query("SELECT label_id, shape, source, confidence, attributes FROM annotations WHERE image_id = ? ORDER BY position")
         .bind(image)
         .fetch_all(&mut *conn)
         .await?;
@@ -42,11 +42,13 @@ async fn load_annotations(
     Ok(Json(ImageAnnotations { version, annotations }))
 }
 
-/// Reads an annotation from a row with `label_id`, `shape`, `source` and `confidence`.
+/// Reads an annotation from a row with `label_id`, `shape`, `source`, `confidence` and
+/// `attributes`.
 pub(crate) fn annotation_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Annotation, ApiError> {
-    let shape = serde_json::from_str(row.get("shape"))
-        .map_err(|err| ApiError::Internal(format!("a stored shape is unreadable: {err}")))?;
-    Ok(Annotation { label: row.get("label_id"), shape, source: row.get("source"), confidence: row.get("confidence") })
+    let unreadable = |what: &str, err: serde_json::Error| ApiError::Internal(format!("stored {what} are unreadable: {err}"));
+    let shape = serde_json::from_str(row.get("shape")).map_err(|err| unreadable("shapes", err))?;
+    let attributes = serde_json::from_str(row.get("attributes")).map_err(|err| unreadable("attributes", err))?;
+    Ok(Annotation { label: row.get("label_id"), shape, source: row.get("source"), confidence: row.get("confidence"), attributes })
 }
 
 async fn save_annotations(
@@ -73,6 +75,12 @@ async fn save_annotations(
             return Err(invalid(format!("label \"{}\" does not allow {name} shapes", label.name)));
         }
         annotation.shape.validate(width, height).map_err(invalid)?;
+        label.check_attributes(&annotation.attributes).map_err(invalid)?;
+        let repeated = annotation.shape.is_tag()
+            && request.annotations[..index].iter().any(|earlier| earlier.shape.is_tag() && earlier.label == annotation.label);
+        if repeated {
+            return Err(invalid(format!("the image already has the tag \"{}\"", label.name)));
+        }
     }
 
     // Checking and bumping the version in one statement keeps concurrent saves safe.
@@ -89,8 +97,8 @@ async fn save_annotations(
     for (position, annotation) in request.annotations.iter().enumerate() {
         let shape = serde_json::to_string(&annotation.shape).expect("shapes serialize");
         sqlx::query(
-            "INSERT INTO annotations (image_id, project_id, label_id, position, shape, source, confidence) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO annotations (image_id, project_id, label_id, position, shape, source, confidence, attributes) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(image)
         .bind(project)
@@ -99,6 +107,7 @@ async fn save_annotations(
         .bind(shape)
         .bind(&annotation.source)
         .bind(annotation.confidence)
+        .bind(serde_json::to_string(&annotation.attributes).expect("attributes serialize"))
         .execute(&mut *tx)
         .await?;
     }

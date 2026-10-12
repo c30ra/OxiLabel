@@ -11,7 +11,8 @@ pub fn ToolOptions(editor: Editor) -> impl IntoView {
         <div class="tool-options" role="toolbar" aria-label="Tool settings">
             <span class="tool-name">{move || editor.tool.get().name()}</span>
             {move || match editor.tool.get() {
-                Tool::Select => view! {
+                // Tag is never the active tool.
+                Tool::Select | Tool::Tag => view! {
                     <span class="muted hint">"Click or drag a box to select · Shift adds · Ctrl removes · A all · Q menu"</span>
                 }.into_any(),
                 Tool::Rectangle => view! {

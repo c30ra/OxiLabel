@@ -35,7 +35,8 @@ async fn created_label_appears_in_the_project_label_set() {
         "color": "#e74c3c",
         "hotkey": "1",
         "shape_types": ["polyline", "polygon"],
-        "ignore": false
+        "ignore": false,
+        "attributes": []
     });
     assert_eq!(label, expected);
     let (status, labels) = call(&app, Method::GET, &format!("/api/projects/{project}/labels"), None).await;
@@ -80,7 +81,8 @@ async fn editing_a_label_keeps_its_id() {
     assert_eq!(status, StatusCode::OK);
 
     let expected = json!({
-        "id": 1, "name": "micro_crack", "color": "#00ff00", "hotkey": "c", "shape_types": ["polyline"], "ignore": false
+        "id": 1, "name": "micro_crack", "color": "#00ff00", "hotkey": "c", "shape_types": ["polyline"], "ignore": false,
+        "attributes": []
     });
     assert_eq!(edited, expected);
     let (_, labels) = call(&app, Method::GET, &format!("/api/projects/{project}/labels"), None).await;
@@ -164,4 +166,26 @@ async fn a_label_can_keep_its_own_name_and_hotkey_when_edited() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn labels_keep_their_attribute_definitions_and_reject_bad_ones() {
+    let app = test_app().await;
+    let (_, project) = call(&app, Method::POST, "/api/projects", Some(json!({"name": "Attrs"}))).await;
+    let labels = format!("/api/projects/{}/labels", project["id"]);
+    let attributes = json!([
+        {"name": "severity", "type": "select", "options": ["low", "high"], "default": "low"},
+        {"name": "occluded", "type": "checkbox", "default": false},
+        {"name": "width", "type": "number", "min": 0.0, "max": null, "default": 1.5},
+        {"name": "note", "type": "text", "default": ""}
+    ]);
+    let (status, label) = call(&app, Method::POST, &labels, Some(json!({"name": "crack", "color": "#e74c3c", "attributes": attributes}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(label["attributes"], attributes);
+    let (_, listed) = call(&app, Method::GET, &labels, None).await;
+    assert_eq!(listed[0]["attributes"], attributes);
+
+    let bad = json!([{"name": "severity", "type": "select", "options": ["low"], "default": "high"}]);
+    let (status, body) = call(&app, Method::POST, &labels, Some(json!({"name": "chip", "color": "#e67e22", "attributes": bad}))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 }

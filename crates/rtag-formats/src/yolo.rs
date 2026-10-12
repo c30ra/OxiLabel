@@ -4,7 +4,7 @@
 //!
 //! Class numbers are the permanent label ids minus one, so they never shift: a deleted label
 //! leaves a placeholder name in `data.yaml`. Boxes of the ignore label are left out, as detection
-//! has no ignore regions. Every shape is exported as its bounding box.
+//! has no ignore regions. Every shape is exported as its bounding box; tags are left out.
 
 use std::{collections::BTreeMap, fmt::Write as _, io};
 
@@ -32,7 +32,9 @@ impl Exporter for YoloDetect {
         for image in &input.images {
             let (width, height) = (f64::from(image.width), f64::from(image.height));
             let mut lines = String::new();
-            for annotation in image.annotations.iter().filter(|annotation| !ignored.contains(&annotation.label)) {
+            // Tags have no box; ignore-label regions are not training targets.
+            let boxes = image.annotations.iter().filter(|annotation| !annotation.shape.is_tag() && !ignored.contains(&annotation.label));
+            for annotation in boxes {
                 let bounds = annotation.shape.bounds();
                 let class = annotation.label - 1;
                 let (cx, cy) = ((bounds.min.x + bounds.max.x) / 2.0 / width, (bounds.min.y + bounds.max.y) / 2.0 / height);

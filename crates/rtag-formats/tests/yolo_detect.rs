@@ -17,6 +17,7 @@ fn label(id: i64, name: &str, ignore: bool) -> Label {
         hotkey: None,
         shape_types: vec![ShapeType::Rectangle],
         ignore,
+        attributes: vec![],
     }
 }
 
@@ -35,7 +36,8 @@ fn image(path: &str, hash: &str, annotations: Vec<Annotation>) -> ExportImage {
     }
 }
 
-/// Labels 1 and 2, label 3 deleted, label 4 the ignore label; one image with boxes, one without.
+/// Labels 1 and 2, label 3 deleted, label 4 the ignore label; one image with boxes (and a tag,
+/// which has no box), one without.
 fn cells(split: Split) -> ExportInput {
     ExportInput {
         project: "Cells".into(),
@@ -44,7 +46,7 @@ fn cells(split: Split) -> ExportInput {
             image(
                 "set/a.png",
                 "hash-a",
-                vec![boxed(1, (20.0, 10.0), (60.0, 50.0)), boxed(2, (100.0, 0.0), (200.0, 100.0)), boxed(4, (0.0, 0.0), (10.0, 10.0))],
+                vec![boxed(1, (20.0, 10.0), (60.0, 50.0)), boxed(2, (100.0, 0.0), (200.0, 100.0)), boxed(4, (0.0, 0.0), (10.0, 10.0)), Annotation::manual(2, Shape::Tag)],
             ),
             image("other/b.png", "hash-b", vec![]),
         ],
@@ -100,7 +102,7 @@ fn the_manifest_records_what_was_exported() {
     assert_eq!(json["created"], "2026-10-11T12:00:00Z");
     assert_eq!(json["project"], "Cells");
     assert_eq!(json["image_count"], 2);
-    assert_eq!(json["annotation_count"], 3);
+    assert_eq!(json["annotation_count"], 4, "every annotation of the exported images, tags included");
     assert_eq!(json["images"], "copy");
     assert_eq!(json["split"], serde_json::json!({"train": 100, "val": 0, "test": 0}));
     assert_eq!(json["subsets"], serde_json::json!({"train": 2, "val": 0, "test": 0}));

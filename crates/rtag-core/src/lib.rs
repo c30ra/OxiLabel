@@ -1,6 +1,7 @@
 //! Domain types shared by the server and the browser UI. Compiles to native and WASM.
 
 pub mod annotation;
+pub mod attribute;
 pub mod edges;
 pub mod export;
 pub mod fill;
@@ -13,6 +14,8 @@ pub mod pyramid;
 pub mod view;
 
 use serde::{Deserialize, Serialize};
+
+use crate::attribute::AttributeDefinition;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Project {
@@ -50,10 +53,24 @@ impl ShapeType {
         ShapeType::Mask,
         ShapeType::Tag,
     ];
+
+    /// The name people see, e.g. "Oriented rectangle".
+    pub fn name(self) -> &'static str {
+        match self {
+            ShapeType::Rectangle => "Rectangle",
+            ShapeType::OrientedRectangle => "Oriented rectangle",
+            ShapeType::Polygon => "Polygon",
+            ShapeType::Polyline => "Polyline",
+            ShapeType::Points => "Points",
+            ShapeType::Circle => "Circle",
+            ShapeType::Mask => "Mask",
+            ShapeType::Tag => "Tag",
+        }
+    }
 }
 
 /// A label as stored in a project. `id` is permanent within the project and never reused.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Label {
     pub id: i64,
     pub name: String,
@@ -61,10 +78,12 @@ pub struct Label {
     pub hotkey: Option<String>,
     pub shape_types: Vec<ShapeType>,
     pub ignore: bool,
+    #[serde(default)]
+    pub attributes: Vec<AttributeDefinition>,
 }
 
 /// Everything about a label except its id: what clients send to create or edit one.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LabelDefinition {
     pub name: String,
     pub color: String,
@@ -74,6 +93,8 @@ pub struct LabelDefinition {
     pub shape_types: Vec<ShapeType>,
     #[serde(default)]
     pub ignore: bool,
+    #[serde(default)]
+    pub attributes: Vec<AttributeDefinition>,
 }
 
 impl LabelDefinition {
@@ -110,6 +131,7 @@ impl LabelDefinition {
         if self.shape_types.is_empty() {
             return Err("a label must allow at least one shape type".into());
         }
+        self.attributes = attribute::validated(self.attributes)?;
         Ok(self)
     }
 }
@@ -124,8 +146,14 @@ fn all_shape_types() -> Vec<ShapeType> {
 
 impl Label {
     pub fn new(id: i64, definition: LabelDefinition) -> Self {
-        let LabelDefinition { name, color, hotkey, shape_types, ignore } = definition;
-        Label { id, name, color, hotkey, shape_types, ignore }
+        let LabelDefinition { name, color, hotkey, shape_types, ignore, attributes } = definition;
+        Label { id, name, color, hotkey, shape_types, ignore, attributes }
+    }
+
+    /// Everything but the id.
+    pub fn definition(&self) -> LabelDefinition {
+        let Label { name, color, hotkey, shape_types, ignore, attributes, .. } = self.clone();
+        LabelDefinition { name, color, hotkey, shape_types, ignore, attributes }
     }
 }
 

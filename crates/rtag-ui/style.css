@@ -216,3 +216,27 @@ a.button.primary { background: var(--accent); border-color: var(--accent); color
 .segmented button.active { position: relative; z-index: 1; }
 .option-number { display: inline-flex; align-items: center; gap: 6px; }
 .option-number input { width: 4.5rem; height: 28px; text-align: right; }
+
+/* Tags over the image, and the side panel (tags, attribute editor) */
+.tag-chips { position: absolute; top: 10px; left: 10px; display: flex; flex-wrap: wrap; gap: 6px; max-width: calc(100% - 20px); pointer-events: none; }
+.tag-chip { pointer-events: auto; display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 4px 0 8px; background: #17181BE6; border: 1px solid var(--border-strong); border-radius: 13px; }
+.tag-chip.selected { background: #F0A43A26; }
+.tag-chip .name, .tag-chip .remove, .side-panel .tags .name, .side-panel .tags .remove { background: none; border: 0; padding: 0 2px; color: var(--text); font: inherit; cursor: pointer; }
+.tag-chip .remove, .side-panel .tags .remove { color: var(--muted); }
+.tag-chip .swatch, .side-panel .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.side-panel { flex: none; width: 280px; overflow-y: auto; border-left: 1px solid var(--border); background: var(--panel); display: flex; flex-direction: column; }
+.side-panel section { padding: 12px; display: flex; flex-direction: column; gap: 10px; border-bottom: 1px solid var(--border); }
+.side-panel h4 { margin: 0; font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.side-panel .tags ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.side-panel .tags li { display: flex; align-items: center; gap: 8px; min-height: 30px; padding: 0 6px; border-radius: 5px; }
+.side-panel .tags li.selected { background: #F0A43A1F; }
+.side-panel .tags .name { flex: 1; text-align: left; }
+.attribute-editor label:not(.check) { display: grid; grid-template-columns: 90px 1fr; align-items: center; gap: 8px; color: var(--muted); }
+.attribute-editor select, .attribute-editor input:not([type=checkbox]) { height: 30px; min-width: 0; }
+
+/* Attribute definitions in the label form */
+.attributes .attribute-rows { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.attributes .attribute { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.attributes .attribute .attribute-name { width: 140px; }
+.attributes .attribute .options { flex: 1; min-width: 140px; }
+.attributes .attribute .min, .attributes .attribute .max, .attributes .attribute input.default[type=number] { width: 80px; }

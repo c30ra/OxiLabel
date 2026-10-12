@@ -1,22 +1,13 @@
 use leptos::{prelude::*, task::spawn_local};
-use rtag_core::{Label, LabelDefinition, ShapeType, annotation::LabelUsage};
+use rtag_core::{
+    Label, LabelDefinition, ShapeType,
+    annotation::LabelUsage,
+    attribute::{AttributeDefinition, AttributeKind},
+};
 
 use crate::api;
 
 const DEFAULT_COLOR: &str = "#e74c3c";
-
-fn shape_name(shape: ShapeType) -> &'static str {
-    match shape {
-        ShapeType::Rectangle => "Rectangle",
-        ShapeType::OrientedRectangle => "Oriented rectangle",
-        ShapeType::Polygon => "Polygon",
-        ShapeType::Polyline => "Polyline",
-        ShapeType::Points => "Points",
-        ShapeType::Circle => "Circle",
-        ShapeType::Mask => "Mask",
-        ShapeType::Tag => "Tag",
-    }
-}
 
 /// The label set of one project: a table of labels and a form to add or edit one.
 #[component]
@@ -37,6 +28,7 @@ pub fn LabelSet(project: i64) -> impl IntoView {
     let hotkey = RwSignal::new(String::new());
     let shapes = RwSignal::new(ShapeType::ALL.to_vec());
     let ignore = RwSignal::new(false);
+    let attributes: AttributeRows = RwSignal::new(Vec::new());
     let error = RwSignal::new(None::<String>);
 
     let reset = move || {
@@ -46,6 +38,7 @@ pub fn LabelSet(project: i64) -> impl IntoView {
         hotkey.set(String::new());
         shapes.set(ShapeType::ALL.to_vec());
         ignore.set(false);
+        attributes.set(Vec::new());
         error.set(None);
     };
 
@@ -56,6 +49,7 @@ pub fn LabelSet(project: i64) -> impl IntoView {
         hotkey.set(label.hotkey.unwrap_or_default());
         shapes.set(label.shape_types);
         ignore.set(label.ignore);
+        attributes.set(attribute_rows(label.attributes));
         error.set(None);
     };
 
@@ -72,6 +66,7 @@ pub fn LabelSet(project: i64) -> impl IntoView {
                     .filter(|shape| shapes.read().contains(shape))
                     .collect(),
                 ignore: ignore.get(),
+                attributes: attributes.get().iter().map(|(_, row)| row.get()).collect(),
             };
             let url = url.clone();
             spawn_local(async move {
@@ -149,7 +144,7 @@ pub fn LabelSet(project: i64) -> impl IntoView {
                                 let to_edit = label.clone();
                                 let to_delete = label.clone();
                                 let on_delete = on_delete.clone();
-                                let shapes = label.shape_types.iter().map(|shape| shape_name(*shape)).collect::<Vec<_>>().join(", ");
+                                let shapes = label.shape_types.iter().map(|shape| shape.name()).collect::<Vec<_>>().join(", ");
                                 view! {
                                     <tr>
                                         <td>{label.id}</td>
@@ -196,10 +191,11 @@ pub fn LabelSet(project: i64) -> impl IntoView {
                                     }
                                 });
                             } />
-                        {shape_name(shape)}
+                        {shape.name()}
                     </label>
                 }).collect_view()}
             </fieldset>
+            <AttributeList rows=attributes />
             <label class="check">
                 <input type="checkbox" prop:checked=ignore on:change:target=move |ev| ignore.set(ev.target().checked()) />
                 "Ignore label (uncertain regions, skipped in training)"
@@ -215,4 +211,137 @@ pub fn LabelSet(project: i64) -> impl IntoView {
             </div>
         </form>
     }
+}
+
+/// The rows of the attribute list: a stable id (for the keyed list) and the definition, each in
+/// its own signal so typing in one field does not rebuild the others.
+type AttributeRows = RwSignal<Vec<(u64, RwSignal<AttributeDefinition>)>>;
+
+fn attribute_rows(definitions: Vec<AttributeDefinition>) -> Vec<(u64, RwSignal<AttributeDefinition>)> {
+    static NEXT_ROW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    definitions
+        .into_iter()
+        .map(|definition| (NEXT_ROW.fetch_add(1, std::sync::atomic::Ordering::Relaxed), RwSignal::new(definition)))
+        .collect()
+}
+
+/// The attributes of the label being edited: a row per attribute with its name, type and the
+/// type's settings (options, range, default).
+#[component]
+fn AttributeList(rows: AttributeRows) -> impl IntoView {
+    let number = |text: String| text.trim().parse::<f64>().ok();
+    let settings = move |row: RwSignal<AttributeDefinition>, kind: &'static str| match kind {
+        "checkbox" => view! {
+            <label class="check">
+                <input class="default" type="checkbox"
+                    prop:checked=move || row.with(|a| matches!(a.kind, AttributeKind::Checkbox { default: true }))
+                    on:change:target=move |ev| row.update(|a| a.kind = AttributeKind::Checkbox { default: ev.target().checked() }) />
+                "on by default"
+            </label>
+        }.into_any(),
+        "select" => {
+            let options = move || row.with(|a| match &a.kind {
+                AttributeKind::Select { options, default } => (options.clone(), default.clone()),
+                _ => (Vec::new(), String::new()),
+            });
+            view! {
+                <input class="options" placeholder="Options, comma separated" prop:value=untrack(options).0.join(", ")
+                    on:input:target=move |ev| {
+                        let options: Vec<String> = ev.target().value().split(',').map(|o| o.trim().to_owned()).filter(|o| !o.is_empty()).collect();
+                        row.update(|a| {
+                            let AttributeKind::Select { default, .. } = &a.kind else { return };
+                            let default = if options.contains(default) { default.clone() } else { options.first().cloned().unwrap_or_default() };
+                            a.kind = AttributeKind::Select { options, default };
+                        });
+                    } />
+                <select class="default" title="Default" on:change:target=move |ev| row.update(|a| {
+                    if let AttributeKind::Select { default, .. } = &mut a.kind {
+                        *default = ev.target().value();
+                    }
+                })>
+                    {move || {
+                        let (choices, default) = options();
+                        choices.into_iter().map(|option| {
+                            let selected = option == default;
+                            view! { <option value=option.clone() selected=selected>{option.clone()}</option> }
+                        }).collect_view()
+                    }}
+                </select>
+            }.into_any()
+        }
+        "number" => {
+            let (min, max, default) = row.with_untracked(|a| match a.kind {
+                AttributeKind::Number { min, max, default } => (min, max, default),
+                _ => (None, None, 0.0),
+            });
+            let shown = |value: Option<f64>| value.map(|v| v.to_string()).unwrap_or_default();
+            view! {
+                <input class="min" type="number" step="any" placeholder="min" prop:value=shown(min)
+                    on:input:target=move |ev| {
+                        let value = number(ev.target().value());
+                        row.update(|a| if let AttributeKind::Number { min, .. } = &mut a.kind { *min = value });
+                    } />
+                <input class="max" type="number" step="any" placeholder="max" prop:value=shown(max)
+                    on:input:target=move |ev| {
+                        let value = number(ev.target().value());
+                        row.update(|a| if let AttributeKind::Number { max, .. } = &mut a.kind { *max = value });
+                    } />
+                <input class="default" type="number" step="any" title="Default" prop:value=default.to_string()
+                    on:input:target=move |ev| {
+                        // A half-typed number (e.g. "-") keeps the last default.
+                        if let Some(value) = number(ev.target().value()) {
+                            row.update(|a| if let AttributeKind::Number { default, .. } = &mut a.kind { *default = value });
+                        }
+                    } />
+            }.into_any()
+        }
+        _ => {
+            let default = row.with_untracked(|a| match &a.kind {
+                AttributeKind::Text { default } => default.clone(),
+                _ => String::new(),
+            });
+            view! {
+                <input class="default" placeholder="Default text" prop:value=default
+                    on:input:target=move |ev| row.update(|a| a.kind = AttributeKind::Text { default: ev.target().value() }) />
+            }.into_any()
+        }
+    };
+    let row_view = move |(id, row): (u64, RwSignal<AttributeDefinition>)| {
+        // The settings are rebuilt only when the type changes, not on every keystroke.
+        let kind = Memo::new(move |_| row.with(|a| a.kind.type_name()));
+        view! {
+            <div class="attribute">
+                <input class="attribute-name" placeholder="Attribute name" prop:value=row.with_untracked(|a| a.name.clone())
+                    on:input:target=move |ev| row.update(|a| a.name = ev.target().value()) />
+                <select class="attribute-type" title="Type" on:change:target=move |ev| {
+                    if let Some(blank) = AttributeKind::blank(&ev.target().value()) {
+                        row.update(|a| a.kind = blank);
+                    }
+                }>
+                    {AttributeKind::TYPES.into_iter().map(|value| view! {
+                        <option value=value selected=move || kind.get() == value>{capitalised(value)}</option>
+                    }).collect_view()}
+                </select>
+                {move || settings(row, kind.get())}
+                <button type="button" class="remove" title="Remove this attribute" aria-label="Remove attribute"
+                    on:click=move |_| rows.update(|list| list.retain(|(row_id, _)| *row_id != id))>"×"</button>
+            </div>
+        }
+    };
+    view! {
+        <fieldset class="attributes">
+            <legend>"Attributes"</legend>
+            <div class="attribute-rows">
+                <For each=move || rows.get() key=|(id, _)| *id children=row_view />
+            </div>
+            <button type="button" on:click=move |_| rows.update(|list| {
+                list.extend(attribute_rows(vec![AttributeDefinition { name: String::new(), kind: AttributeKind::Text { default: String::new() } }]))
+            })>"Add attribute"</button>
+        </fieldset>
+    }
+}
+
+fn capitalised(word: &str) -> String {
+    let mut chars = word.chars();
+    chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }
