@@ -182,11 +182,49 @@ pub struct Editor {
     /// threshold), grown or shrunk by `edge_offset` image pixels.
     pub stop_at_edges: RwSignal<bool>,
     pub edge_offset: RwSignal<f64>,
-    /// The last drawing tool and label, repeated by a tap of the pie key.
-    pub last: RwSignal<Option<(Tool, i64)>>,
+    /// The last drawing tool, label and modes, repeated by a tap of the pie key.
+    pub last: RwSignal<Option<(Tool, i64, Modes)>>,
+}
+
+/// The tools' drawing modes, remembered with the last tool.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Modes {
+    oriented: bool,
+    freehand: bool,
+    single_point: bool,
+    diameter: bool,
+    fill: bool,
+    eraser: bool,
 }
 
 impl Editor {
+    fn mode_signals(&self) -> [RwSignal<bool>; 6] {
+        [self.oriented, self.freehand, self.single_point, self.diameter, self.fill, self.eraser]
+    }
+
+    /// The current modes (tracked).
+    pub fn modes(&self) -> Modes {
+        let [oriented, freehand, single_point, diameter, fill, eraser] = self.mode_signals().map(|mode| mode.get());
+        Modes { oriented, freehand, single_point, diameter, fill, eraser }
+    }
+
+    /// Switches to `tool`, `label` and `modes`, touching only what differs, so a shape being
+    /// drawn with them is kept.
+    fn restore(&self, tool: Tool, label: i64, modes: Modes) {
+        let Modes { oriented, freehand, single_point, diameter, fill, eraser } = modes;
+        for (signal, value) in self.mode_signals().into_iter().zip([oriented, freehand, single_point, diameter, fill, eraser]) {
+            if signal.get_untracked() != value {
+                signal.set(value);
+            }
+        }
+        if self.tool.get_untracked() != tool {
+            self.tool.set(tool);
+        }
+        if self.label.get_untracked() != Some(label) {
+            self.label.set(Some(label));
+        }
+    }
+
     pub fn new(annotations: Vec<Annotation>, label: Option<i64>) -> Self {
         Editor {
             annotations: RwSignal::new(annotations),
@@ -833,14 +871,15 @@ pub fn AnnotationLayer(
             Tool::Polyline => {
                 let freehand = editor.freehand.get_untracked();
                 let snap = if freehand {
-                    item(Compass::N, "Snap to edges", Some("Shift"), true, editor.edge_snap.get_untracked(), PieAction::ToggleEdgeSnap)
+                    item(Compass::NE, "Snap to edges", Some("Shift"), true, editor.edge_snap.get_untracked(), PieAction::ToggleEdgeSnap)
                 } else {
-                    item(Compass::N, "Snap 15°", Some("Shift"), true, editor.snap.get_untracked(), PieAction::ToggleSnap)
+                    item(Compass::NE, "Snap 15°", Some("Shift"), true, editor.snap.get_untracked(), PieAction::ToggleSnap)
                 };
                 let items = vec![
+                    item(Compass::N, "Click", None, true, !freehand, PieAction::SetFreehand(false)),
+                    item(Compass::S, "Freehand", None, true, freehand, PieAction::SetFreehand(true)),
                     snap,
                     item(Compass::E, "Finish shape", Some("Enter"), drawing, false, PieAction::FinishShape),
-                    item(Compass::S, "Freehand", None, true, freehand, PieAction::ToggleFreehand),
                     item(Compass::W, "Remove last point", Some("Backspace"), drawing, false, PieAction::UndoPoint),
                 ];
                 ("Polyline options", items)
@@ -848,7 +887,8 @@ pub fn AnnotationLayer(
             Tool::Points => {
                 let single = editor.single_point.get_untracked();
                 let items = vec![
-                    item(Compass::N, "Single point", None, true, single, PieAction::ToggleSinglePoint),
+                    item(Compass::N, "Multiple", None, true, !single, PieAction::SetSinglePoint(false)),
+                    item(Compass::S, "Single point", None, true, single, PieAction::SetSinglePoint(true)),
                     item(Compass::E, "Finish shape", Some("Enter"), drawing, false, PieAction::FinishShape),
                     item(Compass::W, "Remove last point", Some("Backspace"), drawing, false, PieAction::UndoPoint),
                 ];
@@ -864,22 +904,25 @@ pub fn AnnotationLayer(
             }
             Tool::Brush => {
                 let (eraser, fill) = (editor.eraser.get_untracked(), editor.fill.get_untracked());
-                let items = if fill {
-                    vec![
-                        item(Compass::N, "Fuzzy fill", Some("U"), true, true, PieAction::SetFill(false)),
+                // Both modes of each pair, the current one marked; then the mode's own options.
+                let mut items = vec![
+                    item(Compass::N, "Paint", None, true, !fill, PieAction::SetFill(false)),
+                    item(Compass::NE, "Fuzzy fill", Some("U"), true, fill, PieAction::SetFill(true)),
+                    item(Compass::S, "Brush", Some("B"), true, !eraser, PieAction::SetEraser(false)),
+                    item(Compass::SE, "Eraser", Some("E"), true, eraser, PieAction::SetEraser(true)),
+                ];
+                if fill {
+                    items.extend([
                         item(Compass::E, "Higher threshold", Some("]"), true, false, PieAction::Threshold(true)),
-                        item(Compass::S, "Eraser", Some("E"), true, eraser, PieAction::SetEraser(!eraser)),
                         item(Compass::W, "Lower threshold", Some("["), true, false, PieAction::Threshold(false)),
-                    ]
+                    ]);
                 } else {
-                    vec![
-                        item(Compass::N, "Fuzzy fill", Some("U"), true, false, PieAction::SetFill(true)),
-                        item(Compass::NE, "Stop at edges", Some("Shift"), true, editor.stop_at_edges.get_untracked(), PieAction::ToggleStopAtEdges),
+                    items.extend([
                         item(Compass::E, "Larger", Some("]"), true, false, PieAction::BrushSize(true)),
-                        item(Compass::S, "Eraser", Some("E"), true, eraser, PieAction::SetEraser(!eraser)),
                         item(Compass::W, "Smaller", Some("["), true, false, PieAction::BrushSize(false)),
-                    ]
-                };
+                        item(Compass::NW, "Stop at edges", Some("Shift"), true, editor.stop_at_edges.get_untracked(), PieAction::ToggleStopAtEdges),
+                    ]);
+                }
                 ("Brush options", items)
             }
             Tool::Select => ("Options", Vec::new()),
@@ -971,15 +1014,13 @@ pub fn AnnotationLayer(
                 close_pie();
                 editor.snap.update(|on| *on = !*on);
             }
-            PieAction::ToggleFreehand => {
+            PieAction::SetFreehand(on) => {
                 close_pie();
-                gesture.set(Gesture::Idle);
-                editor.freehand.update(|on| *on = !*on);
+                editor.freehand.set(on);
             }
-            PieAction::ToggleSinglePoint => {
+            PieAction::SetSinglePoint(on) => {
                 close_pie();
-                gesture.set(Gesture::Idle);
-                editor.single_point.update(|on| *on = !*on);
+                editor.single_point.set(on);
             }
             PieAction::SetDiameter(on) => {
                 close_pie();
@@ -1020,17 +1061,17 @@ pub fn AnnotationLayer(
             PieAction::Keep => close_pie(),
         }
     };
-    // Releasing the pie key or button: a tap repeats the last tool and label (or leaves the pie
-    // open for clicking), otherwise the highlighted item is picked.
+    // Releasing the pie key or button: a tap repeats the last tool, label and modes, from Select
+    // or a drawing tool (a label pie, or no last tool, stays open for clicking); otherwise the
+    // highlighted item is picked.
     let release = move || {
         let Some(open) = pie.get_untracked().filter(|open| open.held) else { return };
         let at = pointer.get_untracked();
         if is_tap(now() - open.opened_at, at.x - open.centre.x, at.y - open.centre.y) {
             match editor.last.get_untracked() {
-                Some((tool, label)) if open.label == "Tools" => {
+                Some((tool, label, modes)) if open.label != "Labels" => {
                     close_pie();
-                    editor.tool.set(tool);
-                    editor.label.set(Some(label));
+                    editor.restore(tool, label, modes);
                 }
                 _ => pie.update(|open| {
                     if let Some(open) = open {
@@ -1060,11 +1101,11 @@ pub fn AnnotationLayer(
                 .collect::<Vec<_>>()
         })
     };
-    // Remember the last drawing tool and label for a tap of the pie key.
+    // Remember the last drawing tool, label and modes for a tap of the pie key.
     Effect::new(move |_| {
-        let tool = editor.tool.get();
+        let (tool, modes) = (editor.tool.get(), editor.modes());
         if let (true, Some(label)) = (tool != Tool::Select, editor.label.get()) {
-            editor.last.set(Some((tool, label)));
+            editor.last.set(Some((tool, label, modes)));
         }
     });
     // A drawing tool needs a label that allows its shape: switch to the first one that does.

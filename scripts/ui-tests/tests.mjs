@@ -123,6 +123,28 @@ export const tests = [
     },
   },
   {
+    name: 'a tap of Q repeats the last tool with its mode, also from a drawing tool',
+    async run(t) {
+      const w = await openWorkspace(t.b, t.base, t.project);
+      await t.b.move(...w.at(800, 500));
+      await t.b.key('l');
+      await clickOption(t, 'Freehand');
+      // The options pie names both modes and marks the current one.
+      await t.b.keyDown('q');
+      equal((await w.state()).pieItems.map((item) => item.name + (item.current ? '*' : '')),
+        ['Click', 'Freehand*', 'Snap to edges', 'Finish shape', 'Remove last point'], 'polyline options pie');
+      await t.b.key(KEY.escape);
+      await t.b.keyUp('q');
+      await t.b.key('v');
+      await t.b.key('q');
+      let state = await w.state();
+      equal([state.tool, state.pie, await toolOptions(t)], ['Polyline', null, 'Click | Freehand* | Snap to edgesShift'], 'after a tap from Select');
+      await t.b.key('q');
+      state = await w.state();
+      equal([state.tool, state.pie, await toolOptions(t)], ['Polyline', null, 'Click | Freehand* | Snap to edgesShift'], 'after a tap in Polyline');
+    },
+  },
+  {
     name: 'the tool pie keeps later tools in place, disabled',
     async run(t) {
       const w = await openWorkspace(t.b, t.base, t.project);
@@ -143,12 +165,14 @@ export const tests = [
       await t.b.move(x, y);
       await t.b.holdKeyAndMove('q', [[x - 60, y]]);
       await t.b.move(x, y);
-      await t.b.key('q');
+      // Held, Q opens the options pie (a tap would repeat the last tool).
+      await t.b.keyDown('q');
       const state = await w.state();
       equal(state.pie, 'Rectangle options', 'pie');
       equal(state.pieItems.find((item) => item.name.startsWith('Square')).current, true, 'Square after picking it');
       await t.b.key(KEY.escape);
       equal((await w.state()).pie, null, 'pie after Esc');
+      await t.b.keyUp('q');
     },
   },
   {
@@ -551,9 +575,11 @@ tests.push({
     equal(await toolOptions(t), 'Paint | Fuzzy fill* | Brush* | Eraser | Contiguous* | Global', 'fuzzy fill options');
     // The options pie raises the threshold ( ] picks its item); [ lowers it again.
     await t.b.move(...w.at(800, 500));
-    await t.b.key('q');
-    equal((await w.state()).pieItems.map((item) => item.name), ['Fuzzy fill', 'Higher threshold', 'Eraser', 'Lower threshold'], 'fill options pie');
+    await t.b.keyDown('q');
+    equal((await w.state()).pieItems.map((item) => item.name + (item.current ? '*' : '')),
+      ['Paint', 'Fuzzy fill*', 'Brush*', 'Eraser', 'Higher threshold', 'Lower threshold'], 'fill options pie');
     await t.b.key(']');
+    await t.b.keyUp('q');
     equal(await t.b.eval(`document.querySelector('.option-number input').value`), '20', 'threshold after the pie');
     await t.b.key('[');
     // The test image's grid lines (255) bound each 100 px cell, whose gradient stays within 15.

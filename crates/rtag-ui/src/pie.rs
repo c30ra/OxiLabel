@@ -29,10 +29,10 @@ pub enum PieAction {
     SetOriented(bool),
     /// Lines: always snap to 15°.
     ToggleSnap,
-    /// Polyline: drag to draw.
-    ToggleFreehand,
-    /// Points: one point per click.
-    ToggleSinglePoint,
+    /// Polyline: drag to draw (true) or click each vertex (false).
+    SetFreehand(bool),
+    /// Points: one point per click (true) or several per shape (false).
+    SetSinglePoint(bool),
     /// Circle: two points are a diameter (true) or centre and radius (false).
     SetDiameter(bool),
     /// Brush: erase (true) or paint (false).
@@ -145,6 +145,13 @@ pub fn PieMenu(
             .into_iter()
             .map(|item| {
                 let at = item.slot.offset(current.wide);
+                // Buttons are at least `width` wide and grow with their text away from the centre:
+                // rightwards on the right, leftwards on the left, both ways above and below.
+                let (left, shift) = match at.x {
+                    x if x > 0.0 => (x - width / 2.0, "none"),
+                    x if x < 0.0 => (x + width / 2.0, "translateX(-100%)"),
+                    x => (x, "translateX(-50%)"),
+                };
                 let slot = item.slot;
                 let action = item.action.clone();
                 let enabled = item.enabled;
@@ -155,9 +162,10 @@ pub fn PieMenu(
                         class:hot=move || highlighted() == Some(slot)
                         class:current=item.current
                         disabled=!item.enabled
-                        style:left=format!("{}px", at.x - width / 2.0)
+                        style:left=format!("{left}px")
                         style:top=format!("{}px", at.y - BUTTON_HEIGHT / 2.0)
-                        style:width=format!("{width}px")
+                        style:min-width=format!("{width}px")
+                        style:transform=shift
                         on:pointerdown=|ev: ev::PointerEvent| ev.stop_propagation()
                         // Clicks on a disabled button's text still arrive in some browsers.
                         on:click=move |_| if enabled { on_pick(action.clone()) }

@@ -57,6 +57,9 @@ export async function connect(port) {
     },
     actions: (actions) => send('input.performActions', { context, actions }),
     move: (x, y, duration = 0) => browser.actions([pointer([{ type: 'pointerMove', x: round(x), y: round(y), duration }])]),
+    /** Presses a key and keeps it down until `keyUp`. */
+    keyDown: (value) => browser.actions([keyboard([{ type: 'keyDown', value }])]),
+    keyUp: (value) => browser.actions([keyboard([{ type: 'keyUp', value }])]),
     /** Presses and releases one key, optionally with modifiers held. */
     key: (value, modifiers = []) => browser.actions([keyboard([
       ...modifiers.map((m) => ({ type: 'keyDown', value: m })),
