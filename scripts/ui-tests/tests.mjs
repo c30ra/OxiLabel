@@ -373,7 +373,7 @@ tests.push(
         l: 'Click* | Freehand | Snap 15°Shift',
         '.': 'Multiple* | Single point',
         c: 'Centre and radius* | Diameter',
-        b: 'Paint* | Fuzzy fill | Brush* | Eraser',
+        b: 'Paint* | Fuzzy fill | Brush* | Eraser | Stop at edgesShift',
       }, 'options per tool');
     },
   },
@@ -484,7 +484,7 @@ tests.push({
 
     // E erases across every mask; ] makes the eraser bigger, so the second mask goes entirely.
     await t.b.key('e');
-    equal(await toolOptions(t), 'Paint* | Fuzzy fill | Brush | Eraser*', 'eraser mode');
+    equal(await toolOptions(t), 'Paint* | Fuzzy fill | Brush | Eraser* | Stop at edgesShift', 'eraser mode');
     await t.b.drag(w.at(300, 250), w.at(300, 350));
     list = await saved(t, (list) => !maskHas(list[0].shape, 300, 300), 'the erased gap');
     equal(maskHas(list[0].shape, 250, 300), true, 'pixels beside the gap stay');
@@ -589,6 +589,49 @@ tests.push({
     await t.b.click(...w.at(550, 350));
     await t.b.waitFor(async () => ((await w.state()).notice ?? '').startsWith('Not added'), 'the runaway notice');
     equal((await t.api.annotations(t.project)).annotations.length, 1, 'annotations after a runaway fill');
+  },
+}, {
+  name: 'freehand lines snap to edges, and Shift draws them freely',
+  async run(t) {
+    const w = await openWorkspace(t.b, t.base, t.project);
+    await t.b.key('l');
+    await clickOption(t, 'Freehand');
+    await clickOption(t, 'Snap to edges');
+    await t.b.sleep(1000); // the analysis tiles of the view load
+    // Along the grid line y = 300, 5 px below it: the vertices land on the line.
+    const along = (y) => Array.from({ length: 13 }, (_, i) => w.at(120 + i * 25, y));
+    const draw = (path, modifiers = []) => t.b.actions([
+      { type: 'key', id: 'kb', actions: [...modifiers.map((m) => ({ type: 'keyDown', value: m })), ...path.map(() => ({ type: 'pause' })), { type: 'pause' }, { type: 'pause' }, ...modifiers.map((m) => ({ type: 'keyUp', value: m }))] },
+      { type: 'pointer', id: 'mouse', actions: [{ type: 'pause' },
+        { type: 'pointerMove', x: Math.round(path[0][0]), y: Math.round(path[0][1]) }, { type: 'pointerDown', button: 0 },
+        ...path.slice(1).map(([x, y]) => ({ type: 'pointerMove', x: Math.round(x), y: Math.round(y), duration: 30 })),
+        { type: 'pointerUp', button: 0 }] },
+    ]);
+    await draw(along(305));
+    let list = await saved(t, (list) => list.length === 1, 'the snapped line');
+    const ys = list[0].shape.points.map((p) => p.y);
+    if (ys.length < 5 || ys.some((y) => Math.abs(y - 300) > 2.5)) throw new Error(`snapped ys ${JSON.stringify(ys.map(Math.round))}`);
+    await draw(along(705), [KEY.shift]);
+    list = await saved(t, (list) => list.length === 2, 'the free line');
+    const free = list[1].shape.points.map((p) => p.y);
+    if (free.some((y) => Math.abs(y - 705) > 2)) throw new Error(`free ys ${JSON.stringify(free.map(Math.round))}`);
+  },
+}, {
+  name: 'the brush stops at edges, with Shift painting past them',
+  async run(t) {
+    const w = await openWorkspace(t.b, t.base, t.project);
+    await t.b.key('b');
+    await clickOption(t, 'Stop at edges');
+    await t.b.sleep(1000);
+    // From inside the cell x 501–599 across its right-hand grid line.
+    await t.b.drag(w.at(550, 350), w.at(650, 350));
+    let list = await saved(t, (list) => list.length === 1, 'the limited stroke');
+    let mask = list[0].shape;
+    if (mask.left + mask.width > 600 || mask.left < 501) throw new Error(`the stroke left the cell: ${mask.left}..${mask.left + mask.width}`);
+    await t.b.drag(w.at(250, 650), w.at(350, 650), { modifiers: [KEY.shift] });
+    list = await saved(t, (list) => list.length === 2, 'the free stroke');
+    mask = list[1].shape;
+    if (mask.left + mask.width < 355) throw new Error(`the Shift stroke stopped at ${mask.left + mask.width}`);
   },
 }, {
   name: 'a mask is selected by its pixels and moves by whole pixels',

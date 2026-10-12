@@ -3,7 +3,7 @@
 
 use leptos::prelude::*;
 
-use crate::annotate::{Editor, MAX_BRUSH_SIZE, MAX_SPACING, MIN_BRUSH_SIZE, MIN_SPACING, Tool};
+use crate::annotate::{Editor, MAX_BRUSH_SIZE, MAX_EDGE_OFFSET, MAX_SPACING, MAX_THRESHOLD, MIN_BRUSH_SIZE, MIN_SPACING, Tool};
 
 #[component]
 pub fn ToolOptions(editor: Editor) -> impl IntoView {
@@ -34,6 +34,11 @@ pub fn ToolOptions(editor: Editor) -> impl IntoView {
                     >
                         <NumberOption label="Spacing" title="Distance between vertices while dragging ([ and ] change it)"
                             value=editor.spacing range=(MIN_SPACING, MAX_SPACING) unit="px" keys=true />
+                        <Toggle label="Snap to edges" key="Shift" value=editor.edge_snap disabled=Signal::derive(|| false) />
+                        <Show when=move || editor.edge_snap.get()>
+                            <NumberOption label="Radius" title="How far from the pointer an edge is looked for, in screen pixels"
+                                value=editor.snap_radius range=(1.0, 100.0) unit="px" keys=false />
+                        </Show>
                     </Show>
                 }.into_any(),
                 Tool::Points => view! {
@@ -51,10 +56,17 @@ pub fn ToolOptions(editor: Editor) -> impl IntoView {
                             <NumberOption label="Size" title="Brush diameter in image pixels ([ and ] or F change it)"
                                 value=editor.brush_size range=(MIN_BRUSH_SIZE, MAX_BRUSH_SIZE) unit="px" keys=true />
                             <span class="muted hint">"F resizes · Ctrl inverts"</span>
+                            <Toggle label="Stop at edges" key="Shift" value=editor.stop_at_edges disabled=Signal::derive(|| false) />
+                            <Show when=move || editor.stop_at_edges.get()>
+                                <NumberOption label="Threshold" title="How similar to where the stroke starts a pixel must be to be painted (0–255)"
+                                    value=editor.threshold range=(0.0, MAX_THRESHOLD) unit="" keys=false />
+                                <NumberOption label="Offset" title="Grows (positive) or shrinks (negative) the region the brush may paint, in image pixels"
+                                    value=editor.edge_offset range=(-MAX_EDGE_OFFSET, MAX_EDGE_OFFSET) unit="px" keys=false />
+                            </Show>
                         }
                     >
                         <NumberOption label="Threshold" title="Largest colour difference from the clicked pixel (0–255); [ and ] or dragging after the click change it"
-                            value=editor.threshold range=(0.0, 255.0) unit="" keys=true />
+                            value=editor.threshold range=(0.0, MAX_THRESHOLD) unit="" keys=true />
                         <Segmented choices=vec![("Contiguous", true), ("Global", false)] value=editor.contiguous />
                         <NumberOption label="Clean up" title="Patches and holes smaller than this many image pixels are dropped or filled"
                             value=editor.clean_up range=(0.0, 1_000_000.0) unit="px²" keys=false />

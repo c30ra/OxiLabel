@@ -39,6 +39,10 @@ pub enum PieAction {
     SetEraser(bool),
     /// Brush: fuzzy fill (true) or painting (false).
     SetFill(bool),
+    /// Freehand polylines: follow edges.
+    ToggleEdgeSnap,
+    /// Brush: paint only the region similar to the stroke's start.
+    ToggleStopAtEdges,
     /// Fuzzy fill: a higher (true) or lower (false) threshold.
     Threshold(bool),
     /// Brush: a larger (true) or smaller (false) size.

@@ -20,7 +20,7 @@ pub struct Raster {
 
 impl Raster {
     /// The colour at (`x`, `y`) of the tile; alpha is ignored.
-    fn colour(&self, x: u32, y: u32) -> [u8; 3] {
+    pub(crate) fn colour(&self, x: u32, y: u32) -> [u8; 3] {
         let channels = usize::from(self.channels);
         let at = (y as usize * self.width as usize + x as usize) * channels;
         match channels {

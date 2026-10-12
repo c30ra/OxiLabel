@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use leptos::prelude::*;
 use rtag_core::{
     annotation::{Annotation, Shape},
-    geometry::{Point, Rect},
+    geometry::Point,
     history::Edit,
     mask::{Bitmap, Mask, PixelRect},
     view::View,
@@ -176,14 +176,16 @@ pub struct Stroke {
     candidates: BTreeMap<usize, Bitmap>,
     /// Eraser: working copies of the masks it has touched, by annotation index.
     erased: BTreeMap<usize, (Bitmap, Option<Sprite>, String)>,
+    /// "Stop at edges": the brush only reaches these pixels while `limited` (Shift inverts it
+    /// mid-stroke).
+    limit: Option<Bitmap>,
+    limited: bool,
 }
 
 impl Stroke {
-    /// Starts a stroke at `at` and applies its first dab.
-    pub fn start(erase: bool, label: i64, size: f64, image: (u32, u32), at: Point, annotations: &[Annotation], colors: &dyn Fn(i64) -> String) -> Stroke {
-        let mut stroke = Stroke { radius: size / 2.0, last: at, color: colors(label), ..Stroke::empty(erase, label, image) };
-        stroke.extend(at, annotations, colors);
-        stroke
+    /// A stroke at `at`; its first dab comes with `extend(at, …)`.
+    pub fn start(erase: bool, label: i64, size: f64, image: (u32, u32), at: Point, color: String) -> Stroke {
+        Stroke { radius: size / 2.0, last: at, color, ..Stroke::empty(erase, label, image) }
     }
 
     fn empty(erase: bool, label: i64, image: (u32, u32)) -> Stroke {
@@ -199,7 +201,19 @@ impl Stroke {
             merged: Vec::new(),
             candidates: BTreeMap::new(),
             erased: BTreeMap::new(),
+            limit: None,
+            limited: false,
         }
+    }
+
+    /// Keeps the rest of the stroke inside `limit` (image pixels) while limited; what is
+    /// painted stays.
+    pub fn set_limit(&mut self, limit: Bitmap) {
+        self.limit = Some(limit);
+    }
+
+    pub fn limit(&mut self, on: bool) {
+        self.limited = on;
     }
 
     /// A finished stroke covering `region` (image pixels), e.g. a fuzzy fill.
@@ -235,15 +249,24 @@ impl Stroke {
         }
     }
 
+    /// The pixels the brush covers from `from` to `to`, inside the limit if there is one.
+    fn dab(&self, from: Point, to: Point) -> (Bitmap, PixelRect) {
+        let mut dab = Bitmap::default();
+        let covered = dab.paint(from, to, self.radius, self.image);
+        if let (true, Some(limit)) = (self.limited, &self.limit) {
+            dab.keep_only(limit);
+        }
+        (dab, covered)
+    }
+
     fn paint_along(&mut self, from: Point, to: Point, annotations: &[Annotation]) {
-        let covered = self.painted.paint(from, to, self.radius, self.image);
+        // Only the brush's own pixels join masks, not those of masks merged before.
+        let (dab, covered) = self.dab(from, to);
         if covered.is_empty() {
             return;
         }
-        // Only the brush's own pixels join masks, not those of masks merged before.
-        let mut dab = Bitmap::default();
-        dab.paint(from, to, self.radius, self.image);
         let area_before = self.painted.area;
+        self.painted.merge(&dab, self.image);
         for (index, annotation) in annotations.iter().enumerate() {
             let Shape::Mask(mask) = &annotation.shape else { continue };
             if annotation.label != self.label || self.merged.contains(&index) || mask.area().intersection(&covered).is_empty() {
@@ -263,11 +286,10 @@ impl Stroke {
     }
 
     fn erase_along(&mut self, from: Point, to: Point, annotations: &[Annotation], colors: &dyn Fn(i64) -> String) {
-        let reach = Rect::from_corners(from, to);
-        let reach = Rect::new(reach.min.x - self.radius, reach.min.y - self.radius, reach.max.x + self.radius, reach.max.y + self.radius);
+        let (dab, covered) = self.dab(from, to);
         for (index, annotation) in annotations.iter().enumerate() {
             let Shape::Mask(mask) = &annotation.shape else { continue };
-            if !annotation.shape.bounds().intersects(&reach) {
+            if mask.area().intersection(&covered).is_empty() {
                 continue;
             }
             let (bitmap, sprite, color) = self.erased.entry(index).or_insert_with(|| {
@@ -276,7 +298,7 @@ impl Stroke {
                 let sprite = Sprite::new(&bitmap, &color);
                 (bitmap, sprite, color)
             });
-            let touched = bitmap.erase(from, to, self.radius);
+            let touched = bitmap.subtract(&dab);
             Sprite::refresh(sprite, bitmap, touched, color);
         }
     }

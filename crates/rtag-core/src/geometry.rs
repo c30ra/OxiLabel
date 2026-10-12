@@ -57,6 +57,28 @@ pub fn steps_towards(last: Point, to: Point, spacing: f64) -> Vec<Point> {
     (1..=count).map(|i| Point::new(last.x + ux * spacing * i as f64, last.y + uy * spacing * i as f64)).collect()
 }
 
+/// Points every `spacing` along the polyline `path`, measured along it from its first point (not
+/// included), stopping once less than `spacing` remains (freehand lines that follow edges).
+pub fn steps_along(path: &[Point], spacing: f64) -> Vec<Point> {
+    let mut steps = Vec::new();
+    if spacing.is_nan() || spacing <= 0.0 {
+        return steps;
+    }
+    // How far along the current segment the next step lies.
+    let mut next = spacing;
+    for pair in path.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        let length = a.distance(b);
+        while next <= length + 1e-9 {
+            let t = next / length;
+            steps.push(Point::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t));
+            next += spacing;
+        }
+        next -= length;
+    }
+    steps
+}
+
 /// Shortest distance from `point` to the segment from `a` to `b`.
 pub fn distance_to_segment(point: Point, a: Point, b: Point) -> f64 {
     let (dx, dy) = (b.x - a.x, b.y - a.y);
@@ -415,5 +437,27 @@ mod tests {
         let rect = Rect::new(10.0, 10.0, 30.0, 20.0);
         assert_eq!(rect.moved_within(5.0, -3.0, 100.0, 100.0), Rect::new(15.0, 7.0, 35.0, 17.0));
         assert_eq!(rect.moved_within(-50.0, 500.0, 100.0, 100.0), Rect::new(0.0, 90.0, 20.0, 100.0));
+    }
+    #[test]
+    fn steps_along_a_path_are_evenly_spaced_round_its_corners() {
+        let path = [
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(10.0, 10.0),
+        ];
+        assert_eq!(
+            steps_along(&path, 5.0),
+            [
+                Point::new(5.0, 0.0),
+                Point::new(10.0, 0.0),
+                Point::new(10.0, 5.0),
+                Point::new(10.0, 10.0)
+            ]
+        );
+        assert_eq!(
+            steps_along(&path, 7.0),
+            [Point::new(7.0, 0.0), Point::new(10.0, 4.0)]
+        );
+        assert_eq!(steps_along(&path[..1], 7.0), []);
     }
 }

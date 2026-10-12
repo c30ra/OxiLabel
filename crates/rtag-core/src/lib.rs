@@ -1,6 +1,7 @@
 //! Domain types shared by the server and the browser UI. Compiles to native and WASM.
 
 pub mod annotation;
+pub mod edges;
 pub mod export;
 pub mod fill;
 pub mod geometry;

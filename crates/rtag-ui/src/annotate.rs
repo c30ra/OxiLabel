@@ -12,7 +12,9 @@
 //! Circle (C) draws centre and radius (or a diameter) by a drag or two clicks. Brush (B) paints
 //! masks and its eraser mode (E) erases them (see `masks`); Ctrl inverts a stroke, and `[` and
 //! `]` or F (then move the pointer and click; Esc cancels) change the size. Its fuzzy fill mode
-//! (U) fills the similar region around a click (`fill`), a drag changing the threshold. Esc
+//! (U) fills the similar region around a click (`fill`), a drag changing the threshold. Freehand
+//! polylines can snap to edges (live-wire, `edges`) and the brush can stop at edges (painting
+//! only the similar region around the stroke's start); Shift inverts either while drawing. Esc
 //! first cancels the shape being drawn, then clears the selection, then returns to Select. Ctrl+Z
 //! and Ctrl+Y undo and redo.
 //!
@@ -27,9 +29,10 @@ use leptos::{ev, html, prelude::*};
 use rtag_core::{
     Label, ShapeType,
     annotation::{Annotation, Shape, overlapping, topmost_at},
+    edges::EdgeMap,
     fill::{FillSettings, grow},
-    geometry::{Handle, Point, Rect, snap_angle, steps_towards},
-    mask::PixelRect,
+    geometry::{Handle, Point, Rect, snap_angle, steps_along, steps_towards},
+    mask::{Bitmap, PixelRect},
     pyramid::Pyramid,
     history::{Edit, History},
     oriented::OrientedRect,
@@ -70,8 +73,12 @@ pub const DEFAULT_THRESHOLD: f64 = 15.0;
 const THRESHOLD_PER_PIXEL: f64 = 0.5;
 /// `[` and `]` change the threshold by this much.
 const THRESHOLD_STEP: f64 = 5.0;
-const MAX_THRESHOLD: f64 = 255.0;
+pub const MAX_THRESHOLD: f64 = 255.0;
 pub const DEFAULT_MAX_FILL_PERCENT: f64 = 25.0;
+/// Edge snapping looks this far around the pointer, in screen pixels, by default.
+pub const DEFAULT_SNAP_RADIUS: f64 = 12.0;
+/// The largest "Stop at edges" offset either way, in image pixels.
+pub const MAX_EDGE_OFFSET: f64 = 200.0;
 /// `[` and `]` change the spacing and the brush size by this factor.
 const SIZE_STEP: f64 = 1.25;
 
@@ -168,6 +175,13 @@ pub struct Editor {
     pub contiguous: RwSignal<bool>,
     pub clean_up: RwSignal<f64>,
     pub max_fill: RwSignal<f64>,
+    /// Freehand polylines follow edges within `snap_radius` screen pixels of the pointer.
+    pub edge_snap: RwSignal<bool>,
+    pub snap_radius: RwSignal<f64>,
+    /// The brush paints only the region similar to where the stroke starts (the fill's
+    /// threshold), grown or shrunk by `edge_offset` image pixels.
+    pub stop_at_edges: RwSignal<bool>,
+    pub edge_offset: RwSignal<f64>,
     /// The last drawing tool and label, repeated by a tap of the pie key.
     pub last: RwSignal<Option<(Tool, i64)>>,
 }
@@ -197,6 +211,10 @@ impl Editor {
             contiguous: RwSignal::new(true),
             clean_up: RwSignal::new(0.0),
             max_fill: RwSignal::new(DEFAULT_MAX_FILL_PERCENT),
+            edge_snap: RwSignal::new(false),
+            snap_radius: RwSignal::new(DEFAULT_SNAP_RADIUS),
+            stop_at_edges: RwSignal::new(false),
+            edge_offset: RwSignal::new(0.0),
             last: RwSignal::new(None),
         }
     }
@@ -524,6 +542,17 @@ pub fn AnnotationLayer(
     let fill_capped = StoredValue::new(false);
     // Bumped when the preview changes, to redraw it.
     let fill_drawn = RwSignal::new(0_u32);
+    // The fill's threshold and maximum size (in pixels of a level whose pixels cover `factor` ×
+    // `factor` image pixels).
+    let fill_settings = move |within: Option<PixelRect>, factor: u32| {
+        let image_area = f64::from(image_size.0) * f64::from(image_size.1);
+        let level_area = f64::from(factor) * f64::from(factor);
+        FillSettings {
+            threshold: editor.threshold.get_untracked().clamp(0.0, MAX_THRESHOLD) as u8,
+            within,
+            max_pixels: (editor.max_fill.get_untracked() / 100.0 * image_area / level_area).max(1.0) as u64,
+        }
+    };
     let regrow = move || {
         let Gesture::Filling { seed, erase, .. } = gesture.get_untracked() else { return };
         let Some(current) = view.get_untracked() else { return };
@@ -542,9 +571,7 @@ pub fn AnnotationLayer(
             let (left, top) = (level_pixel(min.x), level_pixel(min.y));
             PixelRect { left, top, width: level_pixel(max.x).saturating_sub(left) + 1, height: level_pixel(max.y).saturating_sub(top) + 1 }
         });
-        let image_area = f64::from(image_size.0) * f64::from(image_size.1);
-        let max_pixels = (editor.max_fill.get_untracked() / 100.0 * image_area / level_area).max(1.0) as u64;
-        let settings = FillSettings { threshold: editor.threshold.get_untracked().clamp(0.0, MAX_THRESHOLD) as u8, within, max_pixels };
+        let settings = fill_settings(within, factor);
         let growth = analysis.with_level(level, |tiles| grow(pyramid, level, tiles, seed, settings));
         analysis.request(level, &growth.missing);
         fill_incomplete.set_value(!growth.missing.is_empty());
@@ -598,6 +625,103 @@ pub fn AnnotationLayer(
             commit_fill();
         }
     });
+    // ---- Edge snapping and the edge-limited brush, on the analysis tiles of the viewed level.
+    let level_of = move |current: View| {
+        let level = pyramid.level_for_scale(current.scale);
+        (level, f64::from(1u32 << level))
+    };
+    // The live-wire path (image coordinates) from `from` to the strongest edge near `to`, or just
+    // that edge point without `from`; `None` while tiles it needs are loading.
+    let edge_path = move |from: Option<Point>, to: Point, current: View| -> Option<Vec<Point>> {
+        let (level, factor) = level_of(current);
+        let to_level = |p: Point| ((p.x / factor).max(0.0) as u32, (p.y / factor).max(0.0) as u32);
+        let radius = (editor.snap_radius.get_untracked() / (current.scale * factor)).ceil().max(1.0) as u32;
+        let target = to_level(to);
+        let anchor = from.map(to_level).unwrap_or(target);
+        let margin = radius + 8;
+        let (left, top) = (anchor.0.min(target.0).saturating_sub(margin), anchor.1.min(target.1).saturating_sub(margin));
+        let window = PixelRect {
+            left,
+            top,
+            width: anchor.0.max(target.0) + margin + 1 - left,
+            height: anchor.1.max(target.1) + margin + 1 - top,
+        };
+        let map = match analysis.with_level(level, |tiles| EdgeMap::new(pyramid, level, tiles, window)) {
+            Ok(map) => map,
+            Err(missing) => {
+                analysis.request(level, &missing);
+                return None;
+            }
+        };
+        let snapped = map.strongest_near(target, radius);
+        let pixels = if from.is_some() { map.live_wire(anchor, snapped) } else { vec![snapped] };
+        let centre = |v: u32| (f64::from(v) + 0.5) * factor;
+        let mut path: Vec<Point> = pixels.into_iter().map(|(x, y)| Point::new(centre(x), centre(y))).collect();
+        if let (Some(from), Some(first)) = (from, path.first_mut()) {
+            *first = from;
+        }
+        Some(path)
+    };
+    // "Stop at edges": the pixels similar to `seed` (the fill's threshold, on the tiles loaded so
+    // far), grown or shrunk by the offset, in image pixels.
+    let edge_limit = move |seed: Point, level: u32| -> Bitmap {
+        let factor = 1u32 << level;
+        let (width, height) = pyramid.level_size(level);
+        let seed = ((seed.x as u32 / factor).min(width - 1), (seed.y as u32 / factor).min(height - 1));
+        let growth = analysis.with_level(level, |tiles| grow(pyramid, level, tiles, seed, fill_settings(None, factor)));
+        analysis.request(level, &growth.missing);
+        let region = growth.region.cropped().scaled_up(factor, image_size);
+        // The offset is in image pixels, so it applies at full resolution.
+        match editor.edge_offset.get_untracked().round() as i32 {
+            0 => region,
+            offset => region.expanded(offset, image_size),
+        }
+    };
+    // Where the stroke started and the level its limit was grown on: it is grown again when the
+    // view's level changes or tiles arrive.
+    let limit_seed = StoredValue::new(None::<Point>);
+    let limit_level = StoredValue::new(None::<u32>);
+    let shift_held = StoredValue::new(false);
+    // Applies "Stop at edges" (inverted by Shift) to the stroke, growing its limit if needed.
+    let update_limit = move |shift: bool, current: View, refresh: bool| {
+        let Some(seed) = limit_seed.get_value() else { return };
+        shift_held.set_value(shift);
+        let limited = editor.stop_at_edges.get_untracked() != shift;
+        let (level, _) = level_of(current);
+        let limit = (limited && (refresh || limit_level.get_value() != Some(level))).then(|| {
+            limit_level.set_value(Some(level));
+            edge_limit(seed, level)
+        });
+        stroke.update_value(|s| {
+            if let Some(s) = s {
+                if let Some(limit) = limit {
+                    s.set_limit(limit);
+                }
+                s.limit(limited);
+            }
+        });
+    };
+    Effect::new(move |_| {
+        analysis.loaded.track();
+        if let (Gesture::Painting, Some(current)) = (gesture.get_untracked(), view.get_untracked()) {
+            update_limit(shift_held.get_value(), current, true);
+        }
+    });
+    // Brush and freehand lines load the view's analysis tiles ahead of the first stroke.
+    Effect::new(move |_| {
+        let wanted = match editor.tool.get() {
+            Tool::Brush => true,
+            Tool::Polyline => editor.freehand.get(),
+            _ => false,
+        };
+        let (Some(current), (w, h)) = (view.get(), size.get()) else { return };
+        if wanted {
+            let (level, _) = level_of(current);
+            let visible = Rect::from_corners(current.to_image(Point::new(0.0, 0.0)), current.to_image(Point::new(w, h)));
+            analysis.request(level, &pyramid.tiles_in(level, visible));
+        }
+    });
+
     Effect::new(move |_| {
         if analysis.failed.get() {
             editor.notice.set(Some("Could not load the image's pixels for the fill.".into()));
@@ -708,8 +832,13 @@ pub fn AnnotationLayer(
             }
             Tool::Polyline => {
                 let freehand = editor.freehand.get_untracked();
+                let snap = if freehand {
+                    item(Compass::N, "Snap to edges", Some("Shift"), true, editor.edge_snap.get_untracked(), PieAction::ToggleEdgeSnap)
+                } else {
+                    item(Compass::N, "Snap 15°", Some("Shift"), true, editor.snap.get_untracked(), PieAction::ToggleSnap)
+                };
                 let items = vec![
-                    item(Compass::N, "Snap 15°", Some("Shift"), !freehand, editor.snap.get_untracked(), PieAction::ToggleSnap),
+                    snap,
                     item(Compass::E, "Finish shape", Some("Enter"), drawing, false, PieAction::FinishShape),
                     item(Compass::S, "Freehand", None, true, freehand, PieAction::ToggleFreehand),
                     item(Compass::W, "Remove last point", Some("Backspace"), drawing, false, PieAction::UndoPoint),
@@ -745,6 +874,7 @@ pub fn AnnotationLayer(
                 } else {
                     vec![
                         item(Compass::N, "Fuzzy fill", Some("U"), true, false, PieAction::SetFill(true)),
+                        item(Compass::NE, "Stop at edges", Some("Shift"), true, editor.stop_at_edges.get_untracked(), PieAction::ToggleStopAtEdges),
                         item(Compass::E, "Larger", Some("]"), true, false, PieAction::BrushSize(true)),
                         item(Compass::S, "Eraser", Some("E"), true, eraser, PieAction::SetEraser(!eraser)),
                         item(Compass::W, "Smaller", Some("["), true, false, PieAction::BrushSize(false)),
@@ -754,7 +884,9 @@ pub fn AnnotationLayer(
             }
             Tool::Select => ("Options", Vec::new()),
         };
-        Pie { label, items, centre, wide: true, held, opened_at: now() }
+        // Four wide buttons, unless an option needs a diagonal slot.
+        let wide = items.iter().all(|item| matches!(item.slot, Compass::N | Compass::E | Compass::S | Compass::W));
+        Pie { label, items, centre, wide, held, opened_at: now() }
     };
 
     let close_pie = move || {
@@ -860,6 +992,14 @@ pub fn AnnotationLayer(
             PieAction::SetFill(on) => {
                 close_pie();
                 editor.fill.set(on);
+            }
+            PieAction::ToggleEdgeSnap => {
+                close_pie();
+                editor.edge_snap.update(|on| *on = !*on);
+            }
+            PieAction::ToggleStopAtEdges => {
+                close_pie();
+                editor.stop_at_edges.update(|on| *on = !*on);
             }
             PieAction::Threshold(higher) => {
                 close_pie();
@@ -1090,14 +1230,21 @@ pub fn AnnotationLayer(
             (Tool::Brush, _) => {
                 let label = editor.label.get_untracked().unwrap_or_default();
                 let size = editor.brush_size.get_untracked();
-                let started = editor.annotations.with_untracked(|list| {
-                    Stroke::start(erasing, label, size, image_size, point, list, &color_of)
+                stroke.set_value(Some(Stroke::start(erasing, label, size, image_size, point, color_of(label))));
+                limit_seed.set_value(Some(point));
+                limit_level.set_value(None);
+                update_limit(ev.shift_key(), current, false);
+                stroke.update_value(|s| {
+                    if let Some(s) = s {
+                        editor.annotations.with_untracked(|list| s.extend(point, list, &color_of));
+                    }
                 });
-                stroke.set_value(Some(started));
                 gesture.set(Gesture::Painting);
             }
             (Tool::Polyline, _) if editor.freehand.get_untracked() => {
-                gesture.set(Gesture::Stroke { points: vec![point], current: point });
+                let snapping = editor.edge_snap.get_untracked() != ev.shift_key();
+                let start = snapping.then(|| edge_path(None, point, current)).flatten().and_then(|path| path.first().copied()).unwrap_or(point);
+                gesture.set(Gesture::Stroke { points: vec![start], current: start });
             }
             (Tool::Points, _) if editor.single_point.get_untracked() => add_shape(Shape::Points { points: vec![point] }),
             (_, Gesture::Path { mut points, .. }) => {
@@ -1171,8 +1318,21 @@ pub fn AnnotationLayer(
             Gesture::Stroke { mut points, .. } => {
                 let to = inside(point);
                 let last = *points.last().expect("a stroke starts with a point");
-                points.extend(steps_towards(last, to, editor.spacing.get_untracked()));
-                gesture.set(Gesture::Stroke { points, current: to });
+                let spacing = editor.spacing.get_untracked();
+                // Snapping follows the edge path from the last vertex; until its tiles are
+                // loaded the line follows the pointer.
+                let snapping = editor.edge_snap.get_untracked() != ev.shift_key();
+                let current = match snapping.then(|| edge_path(Some(last), to, current)).flatten() {
+                    Some(path) => {
+                        points.extend(steps_along(&path, spacing));
+                        *path.last().expect("a path has its ends")
+                    }
+                    None => {
+                        points.extend(steps_towards(last, to, spacing));
+                        to
+                    }
+                };
+                gesture.set(Gesture::Stroke { points, current });
             }
             Gesture::BrushSizing { centre, .. } => {
                 editor.brush_size.set((2.0 * centre.distance(point)).round().clamp(MIN_BRUSH_SIZE, MAX_BRUSH_SIZE));
@@ -1186,6 +1346,7 @@ pub fn AnnotationLayer(
             Gesture::Filling { released: true, .. } => {}
             Gesture::Painting => {
                 let to = inside(point);
+                update_limit(ev.shift_key(), current, false);
                 stroke.update_value(|current| {
                     if let Some(current) = current {
                         editor.annotations.with_untracked(|list| current.extend(to, list, &color_of));

@@ -217,6 +217,106 @@ impl Bitmap {
         scaled
     }
 
+    /// Clears the pixels not set in `other`.
+    pub fn keep_only(&mut self, other: &Bitmap) {
+        let area = self.area;
+        for y in area.top..area.bottom() {
+            for x in area.left..area.right() {
+                if !other.get(x, y) {
+                    let offset = self.offset(x, y);
+                    self.pixels[offset] = 0;
+                }
+            }
+        }
+    }
+
+    /// The region grown by `by` pixels (shrunk if negative): pixels whose centres lie within
+    /// about `by` of it, rounded like a disc. Growing stays inside an `image` of that size. Takes
+    /// time in proportion to the area, whatever `by` is (a chamfer distance transform).
+    pub fn expanded(&self, by: i32, image: (u32, u32)) -> Bitmap {
+        let radius = by.unsigned_abs();
+        if radius == 0 {
+            return self.clone();
+        }
+        let Some(bounds) = self.bounds() else {
+            return Bitmap::default();
+        };
+        let grow = by > 0;
+        // Room for growing, plus one unset pixel all round so shrinking starts at the outline.
+        let pad = if grow { radius.saturating_add(1) } else { 1 };
+        let area = PixelRect::from_edges(
+            bounds.left.saturating_sub(pad),
+            bounds.top.saturating_sub(pad),
+            bounds
+                .right()
+                .saturating_add(pad)
+                .min(image.0.max(bounds.right())),
+            bounds
+                .bottom()
+                .saturating_add(pad)
+                .min(image.1.max(bounds.bottom())),
+        );
+        let mut result = Bitmap {
+            area,
+            pixels: vec![0; area.width as usize * area.height as usize],
+        };
+        result.merge(self, (u32::MAX, u32::MAX));
+        // Distances (3 per straight step, 4 per diagonal one) to the nearest pixel of the other
+        // kind: unset pixels to the region when growing, region pixels to the outside when
+        // shrinking.
+        let (w, h) = (area.width as usize, area.height as usize);
+        let source = u8::from(grow);
+        let mut distance: Vec<u32> = result
+            .pixels
+            .iter()
+            .map(|&p| if p == source { 0 } else { u32::MAX / 2 })
+            .collect();
+        let mut relax = |at: usize, from: usize, step: u32| {
+            distance[at] = distance[at].min(distance[from] + step)
+        };
+        for y in 0..h {
+            for x in 0..w {
+                let at = y * w + x;
+                if x > 0 {
+                    relax(at, at - 1, 3)
+                }
+                if y > 0 {
+                    relax(at, at - w, 3);
+                    if x > 0 {
+                        relax(at, at - w - 1, 4)
+                    }
+                    if x + 1 < w {
+                        relax(at, at - w + 1, 4)
+                    }
+                }
+            }
+        }
+        for y in (0..h).rev() {
+            for x in (0..w).rev() {
+                let at = y * w + x;
+                if x + 1 < w {
+                    relax(at, at + 1, 3)
+                }
+                if y + 1 < h {
+                    relax(at, at + w, 3);
+                    if x + 1 < w {
+                        relax(at, at + w + 1, 4)
+                    }
+                    if x > 0 {
+                        relax(at, at + w - 1, 4)
+                    }
+                }
+            }
+        }
+        let reach = radius.saturating_mul(3).saturating_add(1);
+        for (pixel, &d) in result.pixels.iter_mut().zip(&distance) {
+            if *pixel != source && d <= reach {
+                *pixel = source;
+            }
+        }
+        result
+    }
+
     /// Makes room for `needed`, with some margin so a stroke does not reallocate on every move.
     fn grow_to(&mut self, needed: PixelRect, image: (u32, u32)) {
         if self.area.union(&needed) == self.area {
@@ -498,5 +598,51 @@ mod tests {
         let cut = bitmap.subtract(&from_rows(1, 1, &["##", "##"]));
         assert_eq!(rows(&bitmap), ["####", "#..#"]);
         assert_eq!(cut, PixelRect { left: 1, top: 1, width: 2, height: 1 });
+        let mut kept = from_rows(0, 0, &["####", "####"]);
+        kept.keep_only(&from_rows(1, 1, &["##", "##"]));
+        assert_eq!(rows(&kept), ["....", ".##."]);
+    }
+    #[test]
+    fn regions_grow_and_shrink_by_whole_pixels() {
+        let dot = from_rows(5, 5, &["#"]);
+        let grown = dot.expanded(2, (100, 100));
+        assert_eq!(
+            rows(&grown.cropped()),
+            [".###.", "#####", "#####", "#####", ".###."],
+            "a rounded square of radius 2"
+        );
+        assert_eq!(
+            grown.cropped().area,
+            PixelRect {
+                left: 3,
+                top: 3,
+                width: 5,
+                height: 5
+            }
+        );
+        assert_eq!(grown.expanded(-2, (100, 100)).cropped(), dot);
+        assert_eq!(dot.expanded(-1, (100, 100)).bounds(), None, "shrunk away");
+        assert_eq!(
+            from_rows(0, 0, &["#"])
+                .expanded(1, (100, 100))
+                .cropped()
+                .area,
+            PixelRect {
+                left: 0,
+                top: 0,
+                width: 2,
+                height: 2
+            },
+            "kept inside the image"
+        );
+        let big = from_rows(500, 500, &["#"])
+            .expanded(200, (1000, 1000))
+            .cropped();
+        assert_eq!(
+            (big.area.left, big.area.width),
+            (300, 401),
+            "radius 200 across"
+        );
+        assert!(!big.get(300, 300) && big.get(400, 400), "rounded corners");
     }
 }
