@@ -511,6 +511,31 @@ tests.push({
     equal([maskHas(list[0].shape, 150, 180), maskHas(list[0].shape, 150, 120)], [false, true], 'crack cut below, kept above');
   },
 }, {
+  name: 'Ctrl inverts the brush, and F resizes it by moving the pointer',
+  async run(t) {
+    await t.api.setAnnotations(t.project, [{ label: 1, shape: { type: 'mask', left: 100, top: 100, width: 200, height: 200, rle: [0, 40000] } }]);
+    const w = await openWorkspace(t.b, t.base, t.project);
+    await t.b.key('b');
+    await t.b.drag(w.at(120, 200), w.at(280, 200), { modifiers: [KEY.ctrl] });
+    let list = await saved(t, (list) => !maskHas(list[0].shape, 200, 200), 'Ctrl+drag with the brush erasing');
+    equal(maskHas(list[0].shape, 200, 120), true, 'pixels away from the stroke stay');
+    await t.b.key('e');
+    await t.b.drag(w.at(500, 500), w.at(600, 500), { modifiers: [KEY.ctrl] });
+    list = await saved(t, (list) => list.length === 2, 'Ctrl+drag with the eraser painting');
+
+    // F: the circle keeps its size under the pointer, then follows it; a click confirms, Esc cancels.
+    await t.b.move(...w.at(800, 500));
+    await t.b.key('f');
+    await t.b.move(...w.at(850, 500));
+    await t.b.click(...w.at(850, 500));
+    near([Number(await sizeField(t))], [120], 3, 'size after F, move and click');
+    equal((await w.state()).count, 2, 'the confirming click paints nothing');
+    await t.b.key('f');
+    await t.b.move(...w.at(900, 500));
+    await t.b.key(KEY.escape);
+    near([Number(await sizeField(t))], [120], 3, 'size after Esc');
+  },
+}, {
   name: 'a mask is selected by its pixels and moves by whole pixels',
   async run(t) {
     const mask = { type: 'mask', left: 100, top: 100, width: 200, height: 100, rle: [0, 200 * 50, 200 * 50] };

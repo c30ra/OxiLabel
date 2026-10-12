@@ -10,7 +10,8 @@
 //! vertex and Shift snaps lines to 15°. Freehand polylines are dragged, with a vertex every
 //! "spacing" pixels (`[` and `]` change it); single-point mode makes each click one point.
 //! Circle (C) draws centre and radius (or a diameter) by a drag or two clicks. Brush (B) paints
-//! masks and its eraser mode (E) erases them, `[` and `]` changing the size (see `masks`). Esc
+//! masks and its eraser mode (E) erases them (see `masks`); Ctrl inverts a stroke, and `[` and
+//! `]` or F (then move the pointer and click; Esc cancels) change the size. Esc
 //! first cancels the shape being drawn, then clears the selection, then returns to Select. Ctrl+Z
 //! and Ctrl+Y undo and redo.
 //!
@@ -283,6 +284,9 @@ enum Gesture {
     Circle { start: Point, current: Point, dragged: bool },
     /// A brush or eraser stroke; its pixels are in the `Stroke` kept beside the gesture.
     Painting,
+    /// F with the brush: the size follows the pointer's distance from `centre`; `before` is
+    /// restored on cancel.
+    BrushSizing { centre: Point, before: f64 },
     /// Dragging a circle's radius handle.
     Radius { index: usize, centre: Point, radius: f64 },
     /// The selection moved together by (`dx`, `dy`), limited so every shape stays in the image.
@@ -893,7 +897,8 @@ pub fn AnnotationLayer(
         }
     };
     let draw_press = move |ev: &ev::PointerEvent, tool: Tool, point: Point, current: View| {
-        let erasing = tool == Tool::Brush && editor.eraser.get_untracked();
+        // Ctrl inverts a brush stroke: the brush erases, the eraser paints.
+        let erasing = tool == Tool::Brush && editor.eraser.get_untracked() != (ev.ctrl_key() || ev.meta_key());
         if editor.label.get_untracked().is_none() && !erasing {
             let shape = tool.name().to_lowercase();
             editor.notice.set(Some(format!("Add a label that allows {shape} shapes on the Labels tab first.")));
@@ -959,6 +964,15 @@ pub fn AnnotationLayer(
         }
     };
     let on_pointer_down = move |ev: ev::PointerEvent| {
+        // While sizing the brush, a click confirms the size and the right button cancels.
+        if let Gesture::BrushSizing { before, .. } = gesture.get_untracked() {
+            ev.prevent_default();
+            if ev.button() == 2 {
+                editor.brush_size.set(before);
+            }
+            gesture.set(Gesture::Idle);
+            return;
+        }
         // The right button opens the pie, like holding Q.
         if ev.button() == 2 {
             ev.prevent_default();
@@ -1006,6 +1020,9 @@ pub fn AnnotationLayer(
                 let last = *points.last().expect("a stroke starts with a point");
                 points.extend(steps_towards(last, to, editor.spacing.get_untracked()));
                 gesture.set(Gesture::Stroke { points, current: to });
+            }
+            Gesture::BrushSizing { centre, .. } => {
+                editor.brush_size.set((2.0 * centre.distance(point)).round().clamp(MIN_BRUSH_SIZE, MAX_BRUSH_SIZE));
             }
             Gesture::Painting => {
                 let to = inside(point);
@@ -1156,6 +1173,18 @@ pub fn AnnotationLayer(
             ev.prevent_default();
             return;
         }
+        if let Gesture::BrushSizing { before, .. } = gesture.get_untracked() {
+            match key.as_str() {
+                "f" | "F" | "Enter" => gesture.set(Gesture::Idle),
+                "Escape" => {
+                    editor.brush_size.set(before);
+                    gesture.set(Gesture::Idle);
+                }
+                _ => {}
+            }
+            ev.prevent_default();
+            return;
+        }
         if key.eq_ignore_ascii_case("q") && !command && !ev.alt_key() {
             if !ev.repeat() {
                 trigger_down.set_value(true);
@@ -1182,6 +1211,13 @@ pub fn AnnotationLayer(
             _ if command || ev.alt_key() => return,
             "Enter" if drawing_path => finish_path(),
             "[" | "]" if editor.tool.get_untracked() == Tool::Brush => resize_brush(key == "]"),
+            // Blender's radial control: the outline keeps its size under the pointer, centred
+            // to its left, and then follows the pointer.
+            "f" | "F" if editor.tool.get_untracked() == Tool::Brush && gesture.get_untracked() == Gesture::Idle => {
+                let Some(at) = hover.get_untracked() else { return };
+                let before = editor.brush_size.get_untracked();
+                gesture.set(Gesture::BrushSizing { centre: at.offset(-before / 2.0, 0.0), before });
+            }
             "[" | "]" if editor.tool.get_untracked() == Tool::Polyline => {
                 let factor = if key == "]" { SIZE_STEP } else { 1.0 / SIZE_STEP };
                 editor.spacing.update(|spacing| *spacing = (*spacing * factor).clamp(MIN_SPACING, MAX_SPACING));
@@ -1299,8 +1335,13 @@ pub fn AnnotationLayer(
         });
         sprites.update_value(SpriteCache::sweep);
         stroke.with_value(|s| s.as_ref().map(|s| s.draw_painted(&context, current)));
-        if let (Tool::Brush, Some(at)) = (editor.tool.get_untracked(), hover.get_untracked()) {
-            draw::brush_outline(&context, current, at, editor.brush_size.get_untracked() / 2.0);
+        let brush_radius = editor.brush_size.get_untracked() / 2.0;
+        if let Gesture::BrushSizing { centre, .. } = gesture {
+            draw::brush_outline(&context, current, centre, brush_radius);
+            let label = format!("{:.0} px", 2.0 * brush_radius);
+            draw::tag(&context, current.to_screen(centre.offset(-brush_radius, -brush_radius)), &label, "#e8e6e1");
+        } else if let (Tool::Brush, Some(at)) = (editor.tool.get_untracked(), hover.get_untracked()) {
+            draw::brush_outline(&context, current, at, brush_radius);
         }
         let pen = editor.label.get_untracked().map(color_of).unwrap_or_else(|| "#ffffff".to_owned());
         match gesture {

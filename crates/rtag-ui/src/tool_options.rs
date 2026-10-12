@@ -44,8 +44,9 @@ pub fn ToolOptions(editor: Editor) -> impl IntoView {
                 }.into_any(),
                 Tool::Brush => view! {
                     <Segmented choices=vec![("Brush", false), ("Eraser", true)] value=editor.eraser />
-                    <NumberOption label="Size" title="Brush diameter in image pixels ([ and ] change it)"
+                    <NumberOption label="Size" title="Brush diameter in image pixels ([ and ] or F change it)"
                         value=editor.brush_size range=(MIN_BRUSH_SIZE, MAX_BRUSH_SIZE) />
+                    <span class="muted hint">"F resizes · Ctrl inverts"</span>
                 }.into_any(),
             }}
         </div>

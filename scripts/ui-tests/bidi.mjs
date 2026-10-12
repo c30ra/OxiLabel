@@ -69,12 +69,17 @@ export async function connect(port) {
         ...modifiers.map((m) => ({ type: 'keyUp', value: m }))]),
       pointer([{ type: 'pause' }, { type: 'pointerMove', x: round(x), y: round(y) }, { type: 'pointerDown', button }, { type: 'pointerUp', button }]),
     ]),
-    /** Press at `from`, move to `to` in two steps, release. */
-    drag: (from, to, { button = 0 } = {}) => browser.actions([pointer([
-      { type: 'pointerMove', x: round(from[0]), y: round(from[1]) }, { type: 'pointerDown', button },
-      { type: 'pointerMove', x: round((from[0] + to[0]) / 2), y: round((from[1] + to[1]) / 2), duration: 80 },
-      { type: 'pointerMove', x: round(to[0]), y: round(to[1]), duration: 80 }, { type: 'pointerUp', button },
-    ])]),
+    /** Press at `from`, move to `to` in two steps, release; modifiers are held throughout. */
+    drag: (from, to, { button = 0, modifiers = [] } = {}) => browser.actions([
+      keyboard([...modifiers.map((m) => ({ type: 'keyDown', value: m })), ...Array(5).fill({ type: 'pause' }),
+        ...modifiers.map((m) => ({ type: 'keyUp', value: m }))]),
+      pointer([
+        { type: 'pause' },
+        { type: 'pointerMove', x: round(from[0]), y: round(from[1]) }, { type: 'pointerDown', button },
+        { type: 'pointerMove', x: round((from[0] + to[0]) / 2), y: round((from[1] + to[1]) / 2), duration: 80 },
+        { type: 'pointerMove', x: round(to[0]), y: round(to[1]), duration: 80 }, { type: 'pointerUp', button },
+      ]),
+    ]),
     /** Holds `key` while the pointer moves through `path`, then releases the key. */
     holdKeyAndMove: (key, path) => browser.actions([
       keyboard([{ type: 'keyDown', value: key }, ...path.map(() => ({ type: 'pause' })), { type: 'pause' }, { type: 'keyUp', value: key }]),
