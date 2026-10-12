@@ -4,11 +4,11 @@
 
 **Blocked by:** 07
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] I can paint and erase a mask with a chosen label, with resizable brush size shown as a cursor outline
+- [x] I can paint and erase a mask with a chosen label, with resizable brush size shown as a cursor outline
 - [x] Masks are stored as RLE in original image coordinates and reload identically
-- [ ] Painting works while zoomed in and at multi-megapixel image sizes without noticeable lag
+- [x] Painting works while zoomed in and at multi-megapixel image sizes without noticeable lag
 - [x] Undo and redo work for brush strokes
 - [x] RLE encode and decode and mask editing operations are unit-tested in the core crate
 
