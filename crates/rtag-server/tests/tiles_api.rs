@@ -140,3 +140,31 @@ async fn a_missing_source_file_is_not_found() {
     let (status, _) = tile(&app, image, 0, 0, 0).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn analysis_tiles_are_lossless_pngs_of_the_same_pyramid() {
+    let app = test_app().await;
+    let (_, project) = call(&app, Method::POST, "/api/projects", Some(json!({"name": "Analysis"}))).await;
+    // Noise-like pixels: lossy encoding could not reproduce them exactly.
+    let source = image::RgbImage::from_fn(600, 300, |x, y| image::Rgb([(x * 7 + y * 13) as u8, (x * x + y) as u8, (x ^ y) as u8]));
+    source.save(app.images.path().join("noise.png")).unwrap();
+    call(&app, Method::POST, &format!("/api/projects/{}/imports", project["id"]), Some(json!({"paths": ["noise.png"]}))).await;
+    let (_, page) = call(&app, Method::GET, &format!("/api/projects/{}/images", project["id"]), None).await;
+    let image = page["images"][0]["id"].as_i64().unwrap();
+
+    let (status, content_type, bytes) = get_bytes(&app, &format!("/api/images/{image}/analysis/0/1/0")).await;
+    assert_eq!((status, content_type.as_str()), (StatusCode::OK, "image/png"));
+    let tile = image::load_from_memory(&bytes).unwrap().to_rgb8();
+    assert_eq!(tile.dimensions(), (88, 300), "the right-hand edge tile");
+    assert!(tile.enumerate_pixels().all(|(x, y, pixel)| pixel == source.get_pixel(512 + x, y)), "exact pixels");
+
+    // Level 1 averages 2 × 2 blocks, as the viewing pyramid does.
+    let (_, _, bytes) = get_bytes(&app, &format!("/api/images/{image}/analysis/1/0/0")).await;
+    let level1 = image::load_from_memory(&bytes).unwrap().to_rgb8();
+    assert_eq!(level1.dimensions(), (300, 150));
+    let average = |c: usize| ((0..4).map(|i| u32::from(source.get_pixel(i % 2, i / 2)[c])).sum::<u32>() + 2) / 4;
+    assert_eq!(level1.get_pixel(0, 0).0, [average(0) as u8, average(1) as u8, average(2) as u8]);
+
+    let (status, _, _) = get_bytes(&app, &format!("/api/images/{image}/analysis/0/2/0")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

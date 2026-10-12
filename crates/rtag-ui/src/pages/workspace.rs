@@ -223,7 +223,7 @@ fn Workspace(
             _ => view.set(None),
         }
     };
-    let image_size = (image.width, image.height);
+    let (image_id, image_size) = (image.id, (image.width, image.height));
 
     view! {
         <div class="workspace">
@@ -247,7 +247,7 @@ fn Workspace(
             <div class="workspace-body">
                 <ToolRail editor=editor />
                 <TileViewer image=image view=view size=size space_held=space_held>
-                    <AnnotationLayer editor=editor labels=labels image_size=image_size view=view size=size space_held=space_held />
+                    <AnnotationLayer editor=editor labels=labels image_id=image_id image_size=image_size view=view size=size space_held=space_held />
                     {move || editor.notice.get().map(|text| view! { <p class="notice" role="status">{text}</p> })}
                 </TileViewer>
             </div>

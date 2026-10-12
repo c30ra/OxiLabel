@@ -37,6 +37,10 @@ pub enum PieAction {
     SetDiameter(bool),
     /// Brush: erase (true) or paint (false).
     SetEraser(bool),
+    /// Brush: fuzzy fill (true) or painting (false).
+    SetFill(bool),
+    /// Fuzzy fill: a higher (true) or lower (false) threshold.
+    Threshold(bool),
     /// Brush: a larger (true) or smaller (false) size.
     BrushSize(bool),
     /// Finish the polygon, polyline or points being drawn.

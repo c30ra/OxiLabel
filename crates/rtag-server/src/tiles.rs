@@ -1,5 +1,7 @@
 //! Tile pyramids for the annotation workspace. The first tile request for an image decodes it once
 //! and writes every tile of every level to the cache; later requests read the cached files.
+//! Viewing tiles are JPEG; analysis tiles (for the fuzzy fill and edge snapping, ADR 0002) are
+//! the same pyramid as lossless PNG, generated the first time one is asked for.
 
 use std::{
     collections::HashMap,
@@ -19,7 +21,7 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
-use image::{DynamicImage, ImageBuffer, Pixel, codecs::jpeg::JpegEncoder, imageops::FilterType};
+use image::{DynamicImage, ImageBuffer, ImageFormat, Pixel, codecs::jpeg::JpegEncoder, imageops::FilterType};
 use rtag_core::pyramid::{Pyramid, TILE_SIZE};
 use sqlx::Row;
 
@@ -30,7 +32,41 @@ const JPEG_QUALITY: u8 = 90;
 const COMPLETE_MARKER: &str = "complete";
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/api/images/{id}/tiles/{level}/{x}/{y}", get(tile))
+    Router::new()
+        .route("/api/images/{id}/tiles/{level}/{x}/{y}", get(|state, url| tile(state, url, Kind::View)))
+        .route("/api/images/{id}/analysis/{level}/{x}/{y}", get(|state, url| tile(state, url, Kind::Analysis)))
+}
+
+/// Which pyramid of an image.
+#[derive(Clone, Copy)]
+enum Kind {
+    /// JPEG tiles for looking at.
+    View,
+    /// Lossless PNG tiles whose pixels are analysed; JPEG block edges would mislead.
+    Analysis,
+}
+
+impl Kind {
+    fn folder(self) -> &'static str {
+        match self {
+            Kind::View => "original",
+            Kind::Analysis => "analysis",
+        }
+    }
+
+    fn extension(self) -> &'static str {
+        match self {
+            Kind::View => "jpg",
+            Kind::Analysis => "png",
+        }
+    }
+
+    fn content_type(self) -> &'static str {
+        match self {
+            Kind::View => "image/jpeg",
+            Kind::Analysis => "image/png",
+        }
+    }
 }
 
 /// One lock per image hash, so concurrent first requests generate a pyramid only once.
@@ -49,6 +85,7 @@ impl GenerationLocks {
 async fn tile(
     State(state): State<AppState>,
     UrlPath((id, level, x, y)): UrlPath<(i64, u32, u32, u32)>,
+    kind: Kind,
 ) -> Result<impl IntoResponse, ApiError> {
     let row = sqlx::query("SELECT path, hash, width, height FROM images WHERE id = ?")
         .bind(id)
@@ -60,32 +97,32 @@ async fn tile(
 
     let hash: String = row.get("hash");
     // Named by content hash, so identical images share one pyramid. Enhancement filters will get
-    // their own folder next to `original`.
-    let dir = state.cache_dir.join("tiles").join(&hash).join("original");
+    // their own folders next to `original` and `analysis`.
+    let dir = state.cache_dir.join("tiles").join(&hash).join(kind.folder());
     if !dir.join(COMPLETE_MARKER).exists() {
-        let lock = state.pyramid_locks.for_key(&hash);
+        let lock = state.pyramid_locks.for_key(&format!("{hash}/{}", kind.folder()));
         let _generating = lock.lock().await;
         if !dir.join(COMPLETE_MARKER).exists() {
             let source = state.images_root.join(row.get::<String, _>("path"));
             let dir = dir.clone();
-            tokio::task::spawn_blocking(move || generate(&source, &dir, pyramid))
+            tokio::task::spawn_blocking(move || generate(&source, &dir, pyramid, kind))
                 .await
                 .expect("tile generation panicked")?;
         }
     }
 
-    let bytes = fs::read(tile_path(&dir, level, x, y))
+    let bytes = fs::read(tile_path(&dir, level, x, y, kind))
         .map_err(|err| ApiError::Internal(format!("cannot read cached tile: {err}")))?;
     // A tile of an image id never changes: its content hash is fixed at import.
-    Ok(([(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, "private, max-age=31536000, immutable")], bytes))
+    Ok(([(header::CONTENT_TYPE, kind.content_type()), (header::CACHE_CONTROL, "private, max-age=31536000, immutable")], bytes))
 }
 
-fn tile_path(dir: &Path, level: u32, x: u32, y: u32) -> PathBuf {
-    dir.join(level.to_string()).join(format!("{x}_{y}.jpg"))
+fn tile_path(dir: &Path, level: u32, x: u32, y: u32, kind: Kind) -> PathBuf {
+    dir.join(level.to_string()).join(format!("{x}_{y}.{}", kind.extension()))
 }
 
 /// Decodes the source and writes all tiles of all levels, each level downscaled from the previous one.
-fn generate(source: &Path, dir: &Path, pyramid: Pyramid) -> Result<(), ApiError> {
+fn generate(source: &Path, dir: &Path, pyramid: Pyramid, kind: Kind) -> Result<(), ApiError> {
     let image = open_image(source)?;
     if (image.width(), image.height()) != (pyramid.width, pyramid.height) {
         return Err(ApiError::Internal(format!("{} has changed size since it was imported", source.display())));
@@ -116,7 +153,7 @@ fn generate(source: &Path, dir: &Path, pyramid: Pyramid) -> Result<(), ApiError>
         while let Some(&(level, x, y)) = tiles.get(next.fetch_add(1, Ordering::Relaxed)) {
             let bounds = pyramid.tile_bounds(level, x, y).expect("tile is inside the grid");
             let tile = levels[level as usize].crop_imm(bounds.x, bounds.y, bounds.width, bounds.height);
-            write_atomically(&tile_path(dir, level, x, y), &encode(&tile)?)
+            write_atomically(&tile_path(dir, level, x, y, kind), &encode(&tile, kind)?)
                 .map_err(|err| ApiError::Internal(format!("cannot cache tile: {err}")))?;
         }
         Ok(())
@@ -159,10 +196,13 @@ fn halve_buffer<P: Pixel<Subpixel = u8>>(source: &ImageBuffer<P, Vec<u8>>, width
     ImageBuffer::from_raw(width, height, halved).expect("buffer matches the halved size")
 }
 
-fn encode(tile: &DynamicImage) -> Result<Vec<u8>, ApiError> {
+fn encode(tile: &DynamicImage, kind: Kind) -> Result<Vec<u8>, ApiError> {
     let mut bytes = Vec::new();
-    JpegEncoder::new_with_quality(&mut Cursor::new(&mut bytes), JPEG_QUALITY)
-        .encode_image(tile)
-        .map_err(|err| ApiError::Internal(format!("cannot encode tile: {err}")))?;
+    let mut out = Cursor::new(&mut bytes);
+    match kind {
+        Kind::View => JpegEncoder::new_with_quality(&mut out, JPEG_QUALITY).encode_image(tile),
+        Kind::Analysis => tile.write_to(&mut out, ImageFormat::Png),
+    }
+    .map_err(|err| ApiError::Internal(format!("cannot encode tile: {err}")))?;
     Ok(bytes)
 }

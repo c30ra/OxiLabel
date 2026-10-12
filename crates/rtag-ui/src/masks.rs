@@ -4,7 +4,7 @@
 //!
 //! A brush stroke with label L extends every L mask it touches (merging them into one) or else
 //! becomes a new mask; the eraser removes pixels from every mask under it, of any label. A stroke
-//! is one undo step.
+//! is one undo step. A fuzzy fill's region is added or erased the same way.
 
 use std::collections::BTreeMap;
 
@@ -49,13 +49,13 @@ impl Sprite {
         }
         let [r, g, b] = rgb(color);
         let mut rgba = vec![0u8; region.width as usize * region.height as usize * 4];
-        let mut i = 0;
-        for y in region.top..region.bottom() {
-            for x in region.left..region.right() {
-                if bitmap.get(x, y) {
-                    rgba[i..i + 4].copy_from_slice(&[r, g, b, 255]);
+        let (width, row_width) = (bitmap.area.width as usize, region.width as usize);
+        for (y, out) in (region.top..region.bottom()).zip(rgba.chunks_exact_mut(row_width * 4)) {
+            let start = (y - bitmap.area.top) as usize * width + (region.left - bitmap.area.left) as usize;
+            for (&pixel, out) in bitmap.pixels[start..start + row_width].iter().zip(out.as_chunks_mut::<4>().0) {
+                if pixel != 0 {
+                    *out = [r, g, b, 255];
                 }
-                i += 4;
             }
         }
         let Ok(data) = ImageData::new_with_u8_clamped_array_and_sh(Clamped(&rgba), region.width, region.height) else { return };
@@ -75,8 +75,14 @@ impl Sprite {
 
     /// Draws the sprite with its top-left pixel at (`left`, `top`) in the image.
     fn draw(&self, context: &CanvasRenderingContext2d, view: View, left: u32, top: u32, selected: bool) {
+        self.draw_scaled(context, view, left, top, 1, selected);
+    }
+
+    /// Draws a sprite whose pixels each cover `factor` × `factor` image pixels.
+    fn draw_scaled(&self, context: &CanvasRenderingContext2d, view: View, left: u32, top: u32, factor: u32, selected: bool) {
         let at = view.to_screen(Point::new(f64::from(left), f64::from(top)));
-        let (width, height) = (f64::from(self.area.width) * view.scale, f64::from(self.area.height) * view.scale);
+        let scale = view.scale * f64::from(factor);
+        let (width, height) = (f64::from(self.area.width) * scale, f64::from(self.area.height) * scale);
         context.set_image_smoothing_enabled(false);
         context.set_global_alpha(if selected { SELECTED_ALPHA } else { ALPHA });
         context.draw_image_with_html_canvas_element_and_dw_and_dh(&self.canvas, at.x, at.y, width, height).ok();
@@ -131,6 +137,28 @@ impl SpriteCache {
     }
 }
 
+/// A fuzzy fill's region before it is committed, at the resolution of the analysed level, whose
+/// pixels each cover `factor` × `factor` image pixels.
+pub struct FillPreview {
+    pub region: Bitmap,
+    pub factor: u32,
+    sprite: Option<Sprite>,
+}
+
+impl FillPreview {
+    pub fn new(region: Bitmap, factor: u32, color: &str) -> FillPreview {
+        let sprite = Sprite::new(&region, color);
+        FillPreview { region, factor, sprite }
+    }
+
+    pub fn draw(&self, context: &CanvasRenderingContext2d, view: View) {
+        if let Some(sprite) = &self.sprite {
+            let (left, top) = (self.region.area.left * self.factor, self.region.area.top * self.factor);
+            sprite.draw_scaled(context, view, left, top, self.factor, true);
+        }
+    }
+}
+
 /// A brush or eraser stroke in progress.
 pub struct Stroke {
     erase: bool,
@@ -153,20 +181,46 @@ pub struct Stroke {
 impl Stroke {
     /// Starts a stroke at `at` and applies its first dab.
     pub fn start(erase: bool, label: i64, size: f64, image: (u32, u32), at: Point, annotations: &[Annotation], colors: &dyn Fn(i64) -> String) -> Stroke {
-        let mut stroke = Stroke {
+        let mut stroke = Stroke { radius: size / 2.0, last: at, color: colors(label), ..Stroke::empty(erase, label, image) };
+        stroke.extend(at, annotations, colors);
+        stroke
+    }
+
+    fn empty(erase: bool, label: i64, image: (u32, u32)) -> Stroke {
+        Stroke {
             erase,
             label,
-            radius: size / 2.0,
+            radius: 0.0,
             image,
-            last: at,
+            last: Point::new(0.0, 0.0),
             painted: Bitmap::default(),
             sprite: None,
-            color: colors(label),
+            color: String::new(),
             merged: Vec::new(),
             candidates: BTreeMap::new(),
             erased: BTreeMap::new(),
-        };
-        stroke.extend(at, annotations, colors);
+        }
+    }
+
+    /// A finished stroke covering `region` (image pixels), e.g. a fuzzy fill.
+    pub fn from_region(erase: bool, label: i64, region: Bitmap, image: (u32, u32), annotations: &[Annotation]) -> Stroke {
+        let mut stroke = Stroke::empty(erase, label, image);
+        let Some(bounds) = region.bounds() else { return stroke };
+        for (index, annotation) in annotations.iter().enumerate() {
+            let Shape::Mask(mask) = &annotation.shape else { continue };
+            if mask.area().intersection(&bounds).is_empty() {
+                continue;
+            }
+            let mut decoded = mask.to_bitmap();
+            if erase {
+                decoded.subtract(&region);
+                stroke.erased.insert(index, (decoded, None, String::new()));
+            } else if annotation.label == label && region.overlaps(&decoded, bounds) {
+                stroke.painted.merge(&decoded, image);
+                stroke.merged.push(index);
+            }
+        }
+        stroke.painted.merge(&region, image);
         stroke
     }
 

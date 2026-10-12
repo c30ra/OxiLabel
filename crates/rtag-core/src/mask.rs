@@ -138,6 +138,85 @@ impl Bitmap {
         }
     }
 
+    /// Clears the pixels set in `other`. Returns the part of the bitmap it looked at.
+    pub fn subtract(&mut self, other: &Bitmap) -> PixelRect {
+        let common = self.area.intersection(&other.area);
+        for y in common.top..common.bottom() {
+            for x in common.left..common.right() {
+                if other.get(x, y) {
+                    let offset = self.offset(x, y);
+                    self.pixels[offset] = 0;
+                }
+            }
+        }
+        common
+    }
+
+    /// A copy without set patches smaller than `min_area` pixels, and with enclosed holes smaller
+    /// than that filled. Pixels touch along edges, not corners.
+    pub fn cleaned(self, min_area: usize) -> Bitmap {
+        if min_area <= 1 {
+            return self;
+        }
+        let mut cleaned = self.clone();
+        let (width, height) = (self.area.width as usize, self.area.height as usize);
+        let mut seen = vec![false; self.pixels.len()];
+        for start in 0..self.pixels.len() {
+            if seen[start] {
+                continue;
+            }
+            // Flood the patch of equal pixels around `start`.
+            let value = self.pixels[start];
+            let (mut patch, mut pending, mut on_border) = (Vec::new(), vec![start], false);
+            seen[start] = true;
+            while let Some(at) = pending.pop() {
+                patch.push(at);
+                let (x, y) = (at % width, at / width);
+                on_border |= x == 0 || y == 0 || x + 1 == width || y + 1 == height;
+                let neighbours = [
+                    (x > 0).then(|| at - 1),
+                    (x + 1 < width).then(|| at + 1),
+                    (y > 0).then(|| at - width),
+                    (y + 1 < height).then(|| at + width),
+                ];
+                for next in neighbours.into_iter().flatten() {
+                    if !seen[next] && self.pixels[next] == value {
+                        seen[next] = true;
+                        pending.push(next);
+                    }
+                }
+            }
+            // A hole is an unset patch the set pixels enclose, so not one at the edge.
+            let small = patch.len() < min_area && (value != 0 || !on_border);
+            if small {
+                patch.into_iter().for_each(|at| cleaned.pixels[at] = u8::from(value == 0));
+            }
+        }
+        cleaned
+    }
+
+    /// The bitmap of a pyramid level whose pixels cover `factor` × `factor` image pixels, in the
+    /// pixels of an `image` of that size.
+    pub fn scaled_up(&self, factor: u32, image: (u32, u32)) -> Bitmap {
+        let Some(bounds) = self.bounds() else { return Bitmap::default() };
+        let area = PixelRect::from_edges(
+            bounds.left * factor,
+            bounds.top * factor,
+            (bounds.right() * factor).min(image.0),
+            (bounds.bottom() * factor).min(image.1),
+        );
+        let mut scaled = Bitmap { area, pixels: vec![0; area.width as usize * area.height as usize] };
+        for y in area.top..area.bottom() {
+            for x in area.left..area.right() {
+                if self.get(x / factor, y / factor) {
+                    let offset = scaled.offset(x, y);
+                    scaled.pixels[offset] = 1;
+                }
+            }
+        }
+        scaled
+    }
+
     /// Makes room for `needed`, with some margin so a stroke does not reallocate on every move.
     fn grow_to(&mut self, needed: PixelRect, image: (u32, u32)) {
         if self.area.union(&needed) == self.area {
@@ -196,15 +275,21 @@ impl Bitmap {
         })
     }
 
-    /// The stored form, cropped to the set pixels; `None` if nothing is set.
-    pub fn to_mask(&self) -> Option<Mask> {
-        let bounds = self.bounds()?;
+    /// A copy without unset margins (empty if nothing is set).
+    pub fn cropped(&self) -> Bitmap {
+        let Some(bounds) = self.bounds() else { return Bitmap::default() };
         let mut pixels = Vec::with_capacity(bounds.width as usize * bounds.height as usize);
         for y in bounds.top..bounds.bottom() {
             let start = self.offset(bounds.left, y);
             pixels.extend_from_slice(&self.pixels[start..start + bounds.width as usize]);
         }
-        Some(Mask { left: bounds.left, top: bounds.top, width: bounds.width, height: bounds.height, rle: encode(&pixels) })
+        Bitmap { area: bounds, pixels }
+    }
+
+    /// The stored form, cropped to the set pixels; `None` if nothing is set.
+    pub fn to_mask(&self) -> Option<Mask> {
+        let Bitmap { area, pixels } = self.cropped();
+        (!area.is_empty()).then(|| Mask { left: area.left, top: area.top, width: area.width, height: area.height, rle: encode(&pixels) })
     }
 }
 
@@ -363,5 +448,55 @@ mod tests {
             painted.paint(at, at, 2.0, IMAGE);
         }
         assert_eq!(merged.to_mask(), painted.to_mask());
+    }
+
+    fn from_rows(left: u32, top: u32, rows: &[&str]) -> Bitmap {
+        let width = rows[0].len() as u32;
+        let pixels = rows.iter().flat_map(|row| row.bytes().map(|b| u8::from(b == b'#'))).collect();
+        Bitmap { area: PixelRect { left, top, width, height: rows.len() as u32 }, pixels }
+    }
+
+    fn rows(bitmap: &Bitmap) -> Vec<String> {
+        bitmap.pixels.chunks(bitmap.area.width as usize).map(|row| row.iter().map(|&p| if p != 0 { '#' } else { '.' }).collect()).collect()
+    }
+
+    #[test]
+    fn cleaning_removes_small_specks_and_fills_small_holes() {
+        let bitmap = from_rows(0, 0, &[
+            "#.......",
+            "..#####.",
+            "..#..##.",
+            "..#..##.",
+            "..#####.",
+            "........",
+        ]);
+        assert_eq!(rows(&bitmap.clone().cleaned(5)), [
+            "........",
+            "..#####.",
+            "..#####.",
+            "..#####.",
+            "..#####.",
+            "........",
+        ]);
+        assert_eq!(rows(&bitmap.clone().cleaned(4))[2], "..#..##.");
+        assert_eq!(bitmap.clone().cleaned(0), bitmap);
+    }
+
+    #[test]
+    fn a_level_region_scales_up_to_image_pixels_inside_the_image() {
+        // Level 1 pixels (1, 1) and (2, 3) on a 5 × 7 image.
+        let level = from_rows(1, 1, &["#.", "..", ".#"]);
+        let image = level.scaled_up(2, (5, 7));
+        assert_eq!(image.bounds(), Some(PixelRect { left: 2, top: 2, width: 3, height: 5 }));
+        assert!(image.get(2, 2) && image.get(3, 3) && image.get(4, 6));
+        assert!(!image.get(4, 2) && !image.get(5, 6), "unset, or outside the image");
+    }
+
+    #[test]
+    fn subtracting_clears_the_pixels_set_in_the_other() {
+        let mut bitmap = from_rows(0, 0, &["####", "####"]);
+        let cut = bitmap.subtract(&from_rows(1, 1, &["##", "##"]));
+        assert_eq!(rows(&bitmap), ["####", "#..#"]);
+        assert_eq!(cut, PixelRect { left: 1, top: 1, width: 2, height: 1 });
     }
 }

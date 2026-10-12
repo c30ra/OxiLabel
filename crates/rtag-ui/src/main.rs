@@ -1,3 +1,4 @@
+mod analysis;
 mod annotate;
 mod api;
 mod draw;

@@ -373,7 +373,7 @@ tests.push(
         l: 'Click* | Freehand | Snap 15°Shift',
         '.': 'Multiple* | Single point',
         c: 'Centre and radius* | Diameter',
-        b: 'Brush* | Eraser',
+        b: 'Paint* | Fuzzy fill | Brush* | Eraser',
       }, 'options per tool');
     },
   },
@@ -452,6 +452,14 @@ const maskHas = (shape, x, y) => {
   }
   return false;
 };
+const setPixels = (shape) => shape.rle.filter((_, i) => i % 2 === 1).reduce((a, b) => a + b, 0);
+const setThreshold = async (t, value) => {
+  const field = await t.b.json(`document.querySelector('.option-number input').getBoundingClientRect()`);
+  await t.b.click(field.x + field.width / 2, field.y + field.height / 2);
+  await t.b.key('a', [KEY.ctrl]);
+  for (const ch of String(value)) await t.b.key(ch);
+  await t.b.key(KEY.enter);
+};
 const sizeField = (t) => t.b.eval(`document.querySelector('.option-number input').value`);
 
 tests.push({
@@ -476,7 +484,7 @@ tests.push({
 
     // E erases across every mask; ] makes the eraser bigger, so the second mask goes entirely.
     await t.b.key('e');
-    equal(await toolOptions(t), 'Brush | Eraser*', 'eraser mode');
+    equal(await toolOptions(t), 'Paint* | Fuzzy fill | Brush | Eraser*', 'eraser mode');
     await t.b.drag(w.at(300, 250), w.at(300, 350));
     list = await saved(t, (list) => !maskHas(list[0].shape, 300, 300), 'the erased gap');
     equal(maskHas(list[0].shape, 250, 300), true, 'pixels beside the gap stay');
@@ -534,6 +542,53 @@ tests.push({
     await t.b.move(...w.at(900, 500));
     await t.b.key(KEY.escape);
     near([Number(await sizeField(t))], [120], 3, 'size after Esc');
+  },
+}, {
+  name: 'the fuzzy fill adds the similar region around a click, across tiles, and a drag sets its threshold',
+  async run(t) {
+    const w = await openWorkspace(t.b, t.base, t.project);
+    await t.b.key('u');
+    equal(await toolOptions(t), 'Paint | Fuzzy fill* | Brush* | Eraser | Contiguous* | Global', 'fuzzy fill options');
+    // The options pie raises the threshold ( ] picks its item); [ lowers it again.
+    await t.b.move(...w.at(800, 500));
+    await t.b.key('q');
+    equal((await w.state()).pieItems.map((item) => item.name), ['Fuzzy fill', 'Higher threshold', 'Eraser', 'Lower threshold'], 'fill options pie');
+    await t.b.key(']');
+    equal(await t.b.eval(`document.querySelector('.option-number input').value`), '20', 'threshold after the pie');
+    await t.b.key('[');
+    // The test image's grid lines (255) bound each 100 px cell, whose gradient stays within 15.
+    await t.b.click(...w.at(550, 350));
+    let list = await saved(t, (list) => list.length === 1, 'the filled cell');
+    let mask = list[0].shape;
+    near([mask.left, mask.top, mask.width, mask.height], [501, 301, 99, 99], 1, 'the cell, across the tile edge at x 512');
+    equal(setPixels(mask), mask.width * mask.height, 'every pixel of the cell');
+
+    // Dragging left lowers the threshold to 0: only pixels of the clicked value.
+    const [x, y] = w.at(250, 350);
+    await t.b.drag([x, y], [x - 40, y]);
+    list = await saved(t, (list) => list.length === 2, 'the narrow fill');
+    equal(await t.b.eval(`document.querySelector('.option-number input').value`), '0', 'threshold after the drag');
+    if (setPixels(list[1].shape) > 3000) throw new Error(`threshold 0 filled ${setPixels(list[1].shape)} pixels`);
+
+    // Global: similar pixels of every cell on screen, not only the clicked one.
+    await clickOption(t, 'Global');
+    await t.b.key('z', [KEY.ctrl]);
+    await setThreshold(t, 15);
+    await t.b.click(...w.at(250, 350));
+    list = await saved(t, (list) => list.length === 2 && list[1].shape.width > 200, 'the global fill');
+
+    // In eraser mode the region is cut from the masks.
+    await clickOption(t, 'Contiguous');
+    await t.b.key('e');
+    await t.b.click(...w.at(550, 350));
+    await saved(t, (list) => list.length === 1, 'the erased cell');
+
+    // A fill running past the maximum size (25% of the image) is not added.
+    await t.b.key('u');
+    await setThreshold(t, 255);
+    await t.b.click(...w.at(550, 350));
+    await t.b.waitFor(async () => ((await w.state()).notice ?? '').startsWith('Not added'), 'the runaway notice');
+    equal((await t.api.annotations(t.project)).annotations.length, 1, 'annotations after a runaway fill');
   },
 }, {
   name: 'a mask is selected by its pixels and moves by whole pixels',

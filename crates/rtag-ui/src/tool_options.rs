@@ -33,7 +33,7 @@ pub fn ToolOptions(editor: Editor) -> impl IntoView {
                         fallback=move || view! { <Toggle label="Snap 15°" key="Shift" value=editor.snap disabled=Signal::derive(|| false) /> }
                     >
                         <NumberOption label="Spacing" title="Distance between vertices while dragging ([ and ] change it)"
-                            value=editor.spacing range=(MIN_SPACING, MAX_SPACING) />
+                            value=editor.spacing range=(MIN_SPACING, MAX_SPACING) unit="px" keys=true />
                     </Show>
                 }.into_any(),
                 Tool::Points => view! {
@@ -43,10 +43,24 @@ pub fn ToolOptions(editor: Editor) -> impl IntoView {
                     <Segmented choices=vec![("Centre and radius", false), ("Diameter", true)] value=editor.diameter />
                 }.into_any(),
                 Tool::Brush => view! {
+                    <Segmented choices=vec![("Paint", false), ("Fuzzy fill", true)] value=editor.fill />
                     <Segmented choices=vec![("Brush", false), ("Eraser", true)] value=editor.eraser />
-                    <NumberOption label="Size" title="Brush diameter in image pixels ([ and ] or F change it)"
-                        value=editor.brush_size range=(MIN_BRUSH_SIZE, MAX_BRUSH_SIZE) />
-                    <span class="muted hint">"F resizes · Ctrl inverts"</span>
+                    <Show
+                        when=move || editor.fill.get()
+                        fallback=move || view! {
+                            <NumberOption label="Size" title="Brush diameter in image pixels ([ and ] or F change it)"
+                                value=editor.brush_size range=(MIN_BRUSH_SIZE, MAX_BRUSH_SIZE) unit="px" keys=true />
+                            <span class="muted hint">"F resizes · Ctrl inverts"</span>
+                        }
+                    >
+                        <NumberOption label="Threshold" title="Largest colour difference from the clicked pixel (0–255); [ and ] or dragging after the click change it"
+                            value=editor.threshold range=(0.0, 255.0) unit="" keys=true />
+                        <Segmented choices=vec![("Contiguous", true), ("Global", false)] value=editor.contiguous />
+                        <NumberOption label="Clean up" title="Patches and holes smaller than this many image pixels are dropped or filled"
+                            value=editor.clean_up range=(0.0, 1_000_000.0) unit="px²" keys=false />
+                        <NumberOption label="Max" title="Largest fill, as a share of the image"
+                            value=editor.max_fill range=(1.0, 100.0) unit="%" keys=false />
+                    </Show>
                 }.into_any(),
             }}
         </div>
@@ -78,13 +92,13 @@ fn Toggle(label: &'static str, key: &'static str, value: RwSignal<bool>, disable
     }
 }
 
-/// A size in image pixels, typed or changed with `[` and `]`.
+/// A number option, typed, or changed with `[` and `]` when `keys` is set.
 #[component]
-fn NumberOption(label: &'static str, title: &'static str, value: RwSignal<f64>, range: (f64, f64)) -> impl IntoView {
+fn NumberOption(label: &'static str, title: &'static str, value: RwSignal<f64>, range: (f64, f64), unit: &'static str, keys: bool) -> impl IntoView {
     view! {
         <label class="option-number" title=title>
             {label}
-            <input type="number" min=range.0 max=range.1 step="1"
+            <input type="number" min=range.0 max=range.1 step="any"
                 prop:value=move || format!("{:.0}", value.get())
                 on:change:target={move |ev| {
                     if let Ok(typed) = ev.target().value().trim().parse::<f64>() {
@@ -93,8 +107,8 @@ fn NumberOption(label: &'static str, title: &'static str, value: RwSignal<f64>, 
                     // Back to the canvas, so tool keys work again.
                     ev.target().blur().ok();
                 }} />
-            "px"
-            <kbd>"["</kbd><kbd>"]"</kbd>
+            {unit}
+            {keys.then(|| view! { <kbd>"["</kbd><kbd>"]"</kbd> })}
         </label>
     }
 }

@@ -2,6 +2,7 @@
 
 pub mod annotation;
 pub mod export;
+pub mod fill;
 pub mod geometry;
 pub mod history;
 pub mod mask;

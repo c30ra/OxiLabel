@@ -11,7 +11,8 @@
 //! "spacing" pixels (`[` and `]` change it); single-point mode makes each click one point.
 //! Circle (C) draws centre and radius (or a diameter) by a drag or two clicks. Brush (B) paints
 //! masks and its eraser mode (E) erases them (see `masks`); Ctrl inverts a stroke, and `[` and
-//! `]` or F (then move the pointer and click; Esc cancels) change the size. Esc
+//! `]` or F (then move the pointer and click; Esc cancels) change the size. Its fuzzy fill mode
+//! (U) fills the similar region around a click (`fill`), a drag changing the threshold. Esc
 //! first cancels the shape being drawn, then clears the selection, then returns to Select. Ctrl+Z
 //! and Ctrl+Y undo and redo.
 //!
@@ -26,7 +27,10 @@ use leptos::{ev, html, prelude::*};
 use rtag_core::{
     Label, ShapeType,
     annotation::{Annotation, Shape, overlapping, topmost_at},
+    fill::{FillSettings, grow},
     geometry::{Handle, Point, Rect, snap_angle, steps_towards},
+    mask::PixelRect,
+    pyramid::Pyramid,
     history::{Edit, History},
     oriented::OrientedRect,
     pie::{Compass, FLICK_DISTANCE, is_tap},
@@ -35,7 +39,8 @@ use rtag_core::{
 
 use crate::{
     draw::{self, Look, ROTATION_HANDLE_DISTANCE},
-    masks::{SpriteCache, Stroke},
+    analysis::Analysis,
+    masks::{FillPreview, SpriteCache, Stroke},
     pie::{LabelSearch, Pie, PieAction, PieItem, PieMenu, SearchEntry, now},
     viewer::{context_2d, typing_in_a_field},
 };
@@ -58,6 +63,15 @@ pub const MAX_SPACING: f64 = 500.0;
 pub const DEFAULT_BRUSH_SIZE: f64 = 20.0;
 pub const MIN_BRUSH_SIZE: f64 = 1.0;
 pub const MAX_BRUSH_SIZE: f64 = 1000.0;
+/// Fuzzy fill defaults: the largest channel difference from the clicked pixel (GIMP's default),
+/// how much a drag (in screen pixels, right and down) raises it, and the largest region as a
+/// share of the image.
+pub const DEFAULT_THRESHOLD: f64 = 15.0;
+const THRESHOLD_PER_PIXEL: f64 = 0.5;
+/// `[` and `]` change the threshold by this much.
+const THRESHOLD_STEP: f64 = 5.0;
+const MAX_THRESHOLD: f64 = 255.0;
+pub const DEFAULT_MAX_FILL_PERCENT: f64 = 25.0;
 /// `[` and `]` change the spacing and the brush size by this factor.
 const SIZE_STEP: f64 = 1.25;
 
@@ -146,6 +160,14 @@ pub struct Editor {
     /// Brush: diameter in image pixels, and whether it erases.
     pub brush_size: RwSignal<f64>,
     pub eraser: RwSignal<bool>,
+    /// Brush: fuzzy fill instead of painting, with its threshold (0–255), contiguous or global
+    /// reach, clean-up size (patches and holes smaller than this many image pixels go) and
+    /// largest region (percent of the image).
+    pub fill: RwSignal<bool>,
+    pub threshold: RwSignal<f64>,
+    pub contiguous: RwSignal<bool>,
+    pub clean_up: RwSignal<f64>,
+    pub max_fill: RwSignal<f64>,
     /// The last drawing tool and label, repeated by a tap of the pie key.
     pub last: RwSignal<Option<(Tool, i64)>>,
 }
@@ -170,6 +192,11 @@ impl Editor {
             diameter: RwSignal::new(false),
             brush_size: RwSignal::new(DEFAULT_BRUSH_SIZE),
             eraser: RwSignal::new(false),
+            fill: RwSignal::new(false),
+            threshold: RwSignal::new(DEFAULT_THRESHOLD),
+            contiguous: RwSignal::new(true),
+            clean_up: RwSignal::new(0.0),
+            max_fill: RwSignal::new(DEFAULT_MAX_FILL_PERCENT),
             last: RwSignal::new(None),
         }
     }
@@ -287,6 +314,9 @@ enum Gesture {
     /// F with the brush: the size follows the pointer's distance from `centre`; `before` is
     /// restored on cancel.
     BrushSizing { centre: Point, before: f64 },
+    /// A fuzzy fill from `seed`, on the tiles of the viewed level; dragging from `anchor` changes
+    /// the threshold from `base`. Once `released`, it is committed as soon as growing is complete.
+    Filling { seed: Point, anchor: Point, base: f64, erase: bool, released: bool },
     /// Dragging a circle's radius handle.
     Radius { index: usize, centre: Point, radius: f64 },
     /// The selection moved together by (`dx`, `dy`), limited so every shape stays in the image.
@@ -312,6 +342,7 @@ enum Grip {
 pub fn AnnotationLayer(
     editor: Editor,
     labels: Vec<Label>,
+    image_id: i64,
     image_size: (u32, u32),
     view: RwSignal<Option<View>>,
     size: RwSignal<(f64, f64)>,
@@ -454,14 +485,21 @@ pub fn AnnotationLayer(
             *size = next.round().clamp(MIN_BRUSH_SIZE, MAX_BRUSH_SIZE);
         });
     };
+    let change_threshold = move |higher: bool| {
+        let step = if higher { THRESHOLD_STEP } else { -THRESHOLD_STEP };
+        editor.threshold.update(|threshold| *threshold = (*threshold + step).clamp(0.0, MAX_THRESHOLD));
+    };
     // The brush or eraser stroke in progress, sprites of the stored masks, and where the brush
     // outline is drawn.
     let stroke = StoredValue::new_local(None::<Stroke>);
     let sprites = StoredValue::new_local(SpriteCache::default());
     let hover = RwSignal::new(None::<Point>);
+    // The fuzzy fill's region before it is committed.
+    let fill_preview = StoredValue::new_local(None::<FillPreview>);
     // Drops whatever is being drawn, a stroke included.
     let cancel_gesture = move || {
         stroke.set_value(None);
+        fill_preview.set_value(None);
         gesture.set(Gesture::Idle);
     };
     let finish_stroke = move || {
@@ -476,6 +514,98 @@ pub fn AnnotationLayer(
             editor.selection.set(BTreeSet::new());
         }
     };
+
+    // ---- Fuzzy fill: grow on the analysis tiles loaded so far, ask for those the region reached,
+    // and grow again as they arrive.
+    let analysis = Analysis::new(image_id);
+    let pyramid = Pyramid::new(image_size.0, image_size.1);
+    // Whether the last growth reached unloaded tiles, or stopped at the maximum size.
+    let fill_incomplete = StoredValue::new(false);
+    let fill_capped = StoredValue::new(false);
+    // Bumped when the preview changes, to redraw it.
+    let fill_drawn = RwSignal::new(0_u32);
+    let regrow = move || {
+        let Gesture::Filling { seed, erase, .. } = gesture.get_untracked() else { return };
+        let Some(current) = view.get_untracked() else { return };
+        // The level being viewed now: a zoom during a fill applies from then on (ADR 0002).
+        let level = pyramid.level_for_scale(current.scale);
+        let factor = 1u32 << level;
+        let level_area = f64::from(factor) * f64::from(factor);
+        let (level_width, level_height) = pyramid.level_size(level);
+        let seed = ((seed.x / f64::from(factor)) as u32, (seed.y / f64::from(factor)) as u32);
+        let seed = (seed.0.min(level_width - 1), seed.1.min(level_height - 1));
+        // Global fills take the visible part of the image.
+        let within = (!editor.contiguous.get_untracked()).then(|| {
+            let (w, h) = size.get_untracked();
+            let (min, max) = (current.to_image(Point::new(0.0, 0.0)), current.to_image(Point::new(w, h)));
+            let level_pixel = |v: f64| (v / f64::from(factor)).max(0.0) as u32;
+            let (left, top) = (level_pixel(min.x), level_pixel(min.y));
+            PixelRect { left, top, width: level_pixel(max.x).saturating_sub(left) + 1, height: level_pixel(max.y).saturating_sub(top) + 1 }
+        });
+        let image_area = f64::from(image_size.0) * f64::from(image_size.1);
+        let max_pixels = (editor.max_fill.get_untracked() / 100.0 * image_area / level_area).max(1.0) as u64;
+        let settings = FillSettings { threshold: editor.threshold.get_untracked().clamp(0.0, MAX_THRESHOLD) as u8, within, max_pixels };
+        let growth = analysis.with_level(level, |tiles| grow(pyramid, level, tiles, seed, settings));
+        analysis.request(level, &growth.missing);
+        fill_incomplete.set_value(!growth.missing.is_empty());
+        if growth.capped && !fill_capped.get_value() {
+            let max = editor.max_fill.get_untracked();
+            editor.notice.set(Some(format!("The fill grows past {max:.0}% of the image and will not be added.")));
+        }
+        fill_capped.set_value(growth.capped);
+        let min_area = (editor.clean_up.get_untracked() / level_area).round() as usize;
+        let region = growth.region.cropped();
+        // Clean-up drops small patches, but never the whole fill.
+        let region = match region.clone().cleaned(min_area) {
+            cleaned if cleaned.bounds().is_some() => cleaned,
+            _ => region,
+        };
+        let color = if erase { "#ffffff".to_owned() } else { editor.label.get_untracked().map(color_of).unwrap_or_default() };
+        fill_preview.set_value(Some(FillPreview::new(region, factor, &color)));
+        fill_drawn.update(|n| *n = n.wrapping_add(1));
+    };
+    // Adds the previewed region to the masks (or erases it from them): one undo step.
+    let commit_fill = move || {
+        let Gesture::Filling { erase, .. } = gesture.get_untracked() else { return };
+        gesture.set(Gesture::Idle);
+        let mut preview = None;
+        fill_preview.update_value(|current| preview = current.take());
+        let Some(preview) = preview else { return };
+        // A runaway fill is not added: it would be a cut-off part of a much larger region.
+        if fill_capped.get_value() {
+            let max = editor.max_fill.get_untracked();
+            editor.notice.set(Some(format!("Not added: the fill grew past {max:.0}% of the image. Lower the threshold or raise Max.")));
+            return;
+        }
+        let region = preview.region.scaled_up(preview.factor, image_size);
+        let label = editor.label.get_untracked().unwrap_or_default();
+        let edit = editor.annotations.with_untracked(|list| Stroke::from_region(erase, label, region, image_size, list).finish(list));
+        if let Some(edit) = edit {
+            let count = editor.annotations.with_untracked(Vec::len);
+            editor.apply(edit);
+            if editor.annotations.with_untracked(Vec::len) < count {
+                editor.selection.set(BTreeSet::new());
+            }
+        }
+    };
+    Effect::new(move |_| {
+        analysis.loaded.track();
+        if !matches!(gesture.get_untracked(), Gesture::Filling { .. }) {
+            return;
+        }
+        regrow();
+        if matches!(gesture.get_untracked(), Gesture::Filling { released: true, .. }) && !fill_incomplete.get_value() {
+            commit_fill();
+        }
+    });
+    Effect::new(move |_| {
+        if analysis.failed.get() {
+            editor.notice.set(Some("Could not load the image's pixels for the fill.".into()));
+            fill_preview.set_value(None);
+            gesture.set(Gesture::Idle);
+            *analysis.failed.write_untracked() = false;
+        }
+    });
 
     // ---- Pie menus. `pending_tool` waits for its label after the tool pie; `relabel` means the
     // label pie changes the label of the selected shapes.
@@ -604,13 +734,22 @@ pub fn AnnotationLayer(
                 ("Circle options", items)
             }
             Tool::Brush => {
-                let eraser = editor.eraser.get_untracked();
-                let items = vec![
-                    item(Compass::N, "Brush", Some("B"), true, !eraser, PieAction::SetEraser(false)),
-                    item(Compass::E, "Larger", Some("]"), true, false, PieAction::BrushSize(true)),
-                    item(Compass::S, "Eraser", Some("E"), true, eraser, PieAction::SetEraser(true)),
-                    item(Compass::W, "Smaller", Some("["), true, false, PieAction::BrushSize(false)),
-                ];
+                let (eraser, fill) = (editor.eraser.get_untracked(), editor.fill.get_untracked());
+                let items = if fill {
+                    vec![
+                        item(Compass::N, "Fuzzy fill", Some("U"), true, true, PieAction::SetFill(false)),
+                        item(Compass::E, "Higher threshold", Some("]"), true, false, PieAction::Threshold(true)),
+                        item(Compass::S, "Eraser", Some("E"), true, eraser, PieAction::SetEraser(!eraser)),
+                        item(Compass::W, "Lower threshold", Some("["), true, false, PieAction::Threshold(false)),
+                    ]
+                } else {
+                    vec![
+                        item(Compass::N, "Fuzzy fill", Some("U"), true, false, PieAction::SetFill(true)),
+                        item(Compass::E, "Larger", Some("]"), true, false, PieAction::BrushSize(true)),
+                        item(Compass::S, "Eraser", Some("E"), true, eraser, PieAction::SetEraser(!eraser)),
+                        item(Compass::W, "Smaller", Some("["), true, false, PieAction::BrushSize(false)),
+                    ]
+                };
                 ("Brush options", items)
             }
             Tool::Select => ("Options", Vec::new()),
@@ -717,6 +856,14 @@ pub fn AnnotationLayer(
             PieAction::SetEraser(on) => {
                 close_pie();
                 editor.eraser.set(on);
+            }
+            PieAction::SetFill(on) => {
+                close_pie();
+                editor.fill.set(on);
+            }
+            PieAction::Threshold(higher) => {
+                close_pie();
+                change_threshold(higher);
             }
             PieAction::BrushSize(larger) => {
                 close_pie();
@@ -930,12 +1077,18 @@ pub fn AnnotationLayer(
             }),
             (Tool::Circle, Gesture::Circle { start, .. }) => finish_circle(start, point, current.scale),
             (Tool::Circle, _) => gesture.set(Gesture::Circle { start: point, current: point, dragged: false }),
+            (Tool::Brush, _) if !erasing && !label_allows(editor.label.get_untracked().unwrap_or_default(), ShapeType::Mask) => {
+                let label = label_name(editor.label.get_untracked().unwrap_or_default());
+                editor.notice.set(Some(format!("“{label}” cannot be used for masks.")));
+            }
+            (Tool::Brush, _) if editor.fill.get_untracked() => {
+                let anchor = Point::new(f64::from(ev.client_x()), f64::from(ev.client_y()));
+                let base = editor.threshold.get_untracked();
+                gesture.set(Gesture::Filling { seed: point, anchor, base, erase: erasing, released: false });
+                regrow();
+            }
             (Tool::Brush, _) => {
                 let label = editor.label.get_untracked().unwrap_or_default();
-                if !erasing && !label_allows(label, ShapeType::Mask) {
-                    editor.notice.set(Some(format!("“{}” cannot be used for masks.", label_name(label))));
-                    return;
-                }
                 let size = editor.brush_size.get_untracked();
                 let started = editor.annotations.with_untracked(|list| {
                     Stroke::start(erasing, label, size, image_size, point, list, &color_of)
@@ -1024,6 +1177,13 @@ pub fn AnnotationLayer(
             Gesture::BrushSizing { centre, .. } => {
                 editor.brush_size.set((2.0 * centre.distance(point)).round().clamp(MIN_BRUSH_SIZE, MAX_BRUSH_SIZE));
             }
+            Gesture::Filling { anchor, base, released: false, .. } => {
+                let moved = (f64::from(ev.client_x()) - anchor.x) + (f64::from(ev.client_y()) - anchor.y);
+                editor.threshold.set((base + moved * THRESHOLD_PER_PIXEL).round().clamp(0.0, MAX_THRESHOLD));
+                regrow();
+            }
+            // Released and waiting for tiles: the pointer no longer changes it.
+            Gesture::Filling { released: true, .. } => {}
             Gesture::Painting => {
                 let to = inside(point);
                 stroke.update_value(|current| {
@@ -1101,6 +1261,13 @@ pub fn AnnotationLayer(
                 }
             }
             Gesture::Painting => finish_stroke(),
+            // Committed now, or once the tiles it still needs have arrived.
+            Gesture::Filling { seed, anchor, base, erase, released: false } => {
+                gesture.set(Gesture::Filling { seed, anchor, base, erase, released: true });
+                if !fill_incomplete.get_value() {
+                    commit_fill();
+                }
+            }
             Gesture::Radius { index, centre, radius } => {
                 gesture.set(Gesture::Idle);
                 if radius * current.scale >= MIN_SHAPE_SIZE / 2.0 {
@@ -1210,10 +1377,11 @@ pub fn AnnotationLayer(
             }
             _ if command || ev.alt_key() => return,
             "Enter" if drawing_path => finish_path(),
+            "[" | "]" if editor.tool.get_untracked() == Tool::Brush && editor.fill.get_untracked() => change_threshold(key == "]"),
             "[" | "]" if editor.tool.get_untracked() == Tool::Brush => resize_brush(key == "]"),
             // Blender's radial control: the outline keeps its size under the pointer, centred
             // to its left, and then follows the pointer.
-            "f" | "F" if editor.tool.get_untracked() == Tool::Brush && gesture.get_untracked() == Gesture::Idle => {
+            "f" | "F" if editor.tool.get_untracked() == Tool::Brush && !editor.fill.get_untracked() && gesture.get_untracked() == Gesture::Idle => {
                 let Some(at) = hover.get_untracked() else { return };
                 let before = editor.brush_size.get_untracked();
                 gesture.set(Gesture::BrushSizing { centre: at.offset(-before / 2.0, 0.0), before });
@@ -1240,12 +1408,20 @@ pub fn AnnotationLayer(
                 editor.tool.set(Tool::Brush);
                 editor.eraser.set(true);
             }
+            // U: the brush's fuzzy fill (GIMP's fuzzy select key).
+            "u" | "U" => {
+                cancel_gesture();
+                editor.tool.set(Tool::Brush);
+                editor.fill.set(true);
+                editor.eraser.set(false);
+            }
             _ => {
                 if let Some(tool) = Tool::for_key(&key) {
                     cancel_gesture();
                     editor.tool.set(tool);
                     if tool == Tool::Brush {
                         editor.eraser.set(false);
+                        editor.fill.set(false);
                     }
                 } else if let Some((_, id)) = hotkeys.iter().find(|(hotkey, _)| hotkey.eq_ignore_ascii_case(&key)) {
                     match editor.tool.get_untracked().shape_type() {
@@ -1335,12 +1511,13 @@ pub fn AnnotationLayer(
         });
         sprites.update_value(SpriteCache::sweep);
         stroke.with_value(|s| s.as_ref().map(|s| s.draw_painted(&context, current)));
+        fill_preview.with_value(|preview| preview.as_ref().map(|preview| preview.draw(&context, current)));
         let brush_radius = editor.brush_size.get_untracked() / 2.0;
         if let Gesture::BrushSizing { centre, .. } = gesture {
             draw::brush_outline(&context, current, centre, brush_radius);
             let label = format!("{:.0} px", 2.0 * brush_radius);
             draw::tag(&context, current.to_screen(centre.offset(-brush_radius, -brush_radius)), &label, "#e8e6e1");
-        } else if let (Tool::Brush, Some(at)) = (editor.tool.get_untracked(), hover.get_untracked()) {
+        } else if let (Tool::Brush, false, Some(at)) = (editor.tool.get_untracked(), editor.fill.get_untracked(), hover.get_untracked()) {
             draw::brush_outline(&context, current, at, brush_radius);
         }
         let pen = editor.label.get_untracked().map(color_of).unwrap_or_else(|| "#ffffff".to_owned());
@@ -1380,6 +1557,8 @@ pub fn AnnotationLayer(
         editor.label.track();
         editor.tool.track();
         editor.brush_size.track();
+        editor.fill.track();
+        fill_drawn.track();
         hover.track();
         draw();
     });
@@ -1390,6 +1569,7 @@ pub fn AnnotationLayer(
         editor.freehand.track();
         editor.single_point.track();
         editor.eraser.track();
+        editor.fill.track();
         cancel_gesture();
     });
 
@@ -1411,7 +1591,7 @@ pub fn AnnotationLayer(
             data-revision=move || editor.revision.get()
             data-drawing={move || match gesture.get() {
                 Gesture::Path { points, .. } | Gesture::Oriented { points, .. } | Gesture::Stroke { points, .. } => points.len(),
-                Gesture::Painting => 1,
+                Gesture::Painting | Gesture::Filling { .. } => 1,
                 _ => 0,
             }}
             style:cursor=canvas_cursor
