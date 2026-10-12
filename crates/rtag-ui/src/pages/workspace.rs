@@ -364,6 +364,7 @@ fn ToolRail(editor: Editor) -> impl IntoView {
             {tool_button(Tool::Polygon, "Polygon", "P", "M12 3l8 6-3 11H7L4 9z")}
             {tool_button(Tool::Polyline, "Polyline", "L", "M3 18l5-9 5 6 8-11")}
             {tool_button(Tool::Circle, "Circle", "C", "M12 4a8 8 0 1 0 .01 0")}
+            {tool_button(Tool::Brush, "Brush", "B", "M4 20c3 0 5-1.5 5-4a3 3 0 0 0-3-3c-2 0-3 1.5-3 3.5 0 1.5-.5 2.5-1 3.5z M9 13l10-10 2 2-10 10")}
             {tool_button(Tool::Points, "Points", ".", "M4.4 7a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0 M15.4 6a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0 M9.9 12.5a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0 M5.4 18a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0 M16.4 17a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0")}
         </nav>
     }

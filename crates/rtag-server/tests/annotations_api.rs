@@ -206,3 +206,25 @@ async fn labels_reject_shapes_they_do_not_allow_and_bad_new_shapes() {
     let (_, body) = save(&app, project, image, 0, json!([short])).await;
     assert_eq!(body["error"], "annotation 1: a polyline needs at least two different points");
 }
+
+#[tokio::test]
+async fn masks_are_stored_as_rle_and_reload_identically() {
+    let app = test_app().await;
+    let (project, image) = setup(&app).await;
+    let labels = format!("/api/projects/{project}/labels");
+    call(&app, Method::POST, &labels, Some(json!({"name": "stain", "color": "#9b59b6", "shape_types": ["mask"]}))).await;
+    // A 4 × 3 box at the bottom-right corner of the 400 × 300 image.
+    let mask = json!({"label": 3, "shape": {"type": "mask", "left": 396, "top": 297, "width": 4, "height": 3, "rle": [1, 3, 2, 2, 4]}});
+    let (status, _) = save(&app, project, image, 0, json!([mask])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(load(&app, project, image).await["annotations"], json!([mask]));
+
+    let outside = json!({"label": 3, "shape": {"type": "mask", "left": 397, "top": 297, "width": 4, "height": 3, "rle": [1, 3, 2, 2, 4]}});
+    let (status, body) = save(&app, project, image, 1, json!([outside])).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let short = json!({"label": 3, "shape": {"type": "mask", "left": 0, "top": 0, "width": 4, "height": 3, "rle": [1, 3]}});
+    let (status, _) = save(&app, project, image, 1, json!([short])).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = save(&app, project, image, 1, json!([{"label": 1, "shape": mask["shape"]}])).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "\"defect\" does not allow masks");
+}

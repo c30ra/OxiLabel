@@ -9,8 +9,10 @@
 //! or a double-click (a polygon also by clicking its first vertex); Backspace drops the last
 //! vertex and Shift snaps lines to 15°. Freehand polylines are dragged, with a vertex every
 //! "spacing" pixels (`[` and `]` change it); single-point mode makes each click one point.
-//! Circle (C) draws centre and radius (or a diameter) by a drag or two clicks. Esc first cancels the shape being drawn, then clears the
-//! selection, then returns to Select. Ctrl+Z and Ctrl+Y undo and redo.
+//! Circle (C) draws centre and radius (or a diameter) by a drag or two clicks. Brush (B) paints
+//! masks and its eraser mode (E) erases them, `[` and `]` changing the size (see `masks`). Esc
+//! first cancels the shape being drawn, then clears the selection, then returns to Select. Ctrl+Z
+//! and Ctrl+Y undo and redo.
 //!
 //! Holding Q or the right mouse button opens a pie at the cursor: with Select active the tool pie
 //! (then the label pie), with a drawing tool its options pie, with a shape selected the label pie
@@ -32,6 +34,7 @@ use rtag_core::{
 
 use crate::{
     draw::{self, Look, ROTATION_HANDLE_DISTANCE},
+    masks::{SpriteCache, Stroke},
     pie::{LabelSearch, Pie, PieAction, PieItem, PieMenu, SearchEntry, now},
     viewer::{context_2d, typing_in_a_field},
 };
@@ -50,7 +53,12 @@ const SNAP_DEGREES: f64 = 15.0;
 pub const DEFAULT_SPACING: f64 = 20.0;
 pub const MIN_SPACING: f64 = 1.0;
 pub const MAX_SPACING: f64 = 500.0;
-const SPACING_STEP: f64 = 1.25;
+/// Brush diameter in image pixels, and its limits.
+pub const DEFAULT_BRUSH_SIZE: f64 = 20.0;
+pub const MIN_BRUSH_SIZE: f64 = 1.0;
+pub const MAX_BRUSH_SIZE: f64 = 1000.0;
+/// `[` and `]` change the spacing and the brush size by this factor.
+const SIZE_STEP: f64 = 1.25;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
@@ -60,6 +68,8 @@ pub enum Tool {
     Polyline,
     Points,
     Circle,
+    /// Paints masks; its eraser mode erases them.
+    Brush,
 }
 
 impl Tool {
@@ -72,6 +82,7 @@ impl Tool {
             Tool::Polyline => Some(ShapeType::Polyline),
             Tool::Points => Some(ShapeType::Points),
             Tool::Circle => Some(ShapeType::Circle),
+            Tool::Brush => Some(ShapeType::Mask),
         }
     }
 
@@ -83,6 +94,7 @@ impl Tool {
             Tool::Polyline => "Polyline",
             Tool::Points => "Points",
             Tool::Circle => "Circle",
+            Tool::Brush => "Brush",
         }
     }
 
@@ -95,6 +107,7 @@ impl Tool {
             "l" | "L" => Some(Tool::Polyline),
             "." => Some(Tool::Points),
             "c" | "C" => Some(Tool::Circle),
+            "b" | "B" => Some(Tool::Brush),
             _ => None,
         }
     }
@@ -129,6 +142,9 @@ pub struct Editor {
     pub single_point: RwSignal<bool>,
     /// Circle: the two points are the ends of a diameter instead of centre and radius.
     pub diameter: RwSignal<bool>,
+    /// Brush: diameter in image pixels, and whether it erases.
+    pub brush_size: RwSignal<f64>,
+    pub eraser: RwSignal<bool>,
     /// The last drawing tool and label, repeated by a tap of the pie key.
     pub last: RwSignal<Option<(Tool, i64)>>,
 }
@@ -151,6 +167,8 @@ impl Editor {
             spacing: RwSignal::new(DEFAULT_SPACING),
             single_point: RwSignal::new(false),
             diameter: RwSignal::new(false),
+            brush_size: RwSignal::new(DEFAULT_BRUSH_SIZE),
+            eraser: RwSignal::new(false),
             last: RwSignal::new(None),
         }
     }
@@ -263,6 +281,8 @@ enum Gesture {
     /// A circle from `start` (centre, or one end of the diameter); like a rectangle, it is
     /// finished by releasing a drag or by a second click.
     Circle { start: Point, current: Point, dragged: bool },
+    /// A brush or eraser stroke; its pixels are in the `Stroke` kept beside the gesture.
+    Painting,
     /// Dragging a circle's radius handle.
     Radius { index: usize, centre: Point, radius: f64 },
     /// The selection moved together by (`dx`, `dy`), limited so every shape stays in the image.
@@ -296,7 +316,9 @@ pub fn AnnotationLayer(
     let canvas_ref = NodeRef::<html::Canvas>::new();
     let gesture = RwSignal::new(Gesture::Idle);
     let cursor = RwSignal::new("default");
-    let colors: HashMap<i64, String> = labels.iter().map(|label| (label.id, label.color.clone())).collect();
+    let colors: StoredValue<HashMap<i64, String>> =
+        StoredValue::new(labels.iter().map(|label| (label.id, label.color.clone())).collect());
+    let color_of = move |label: i64| colors.with_value(|colors| colors.get(&label).cloned()).unwrap_or_else(|| "#ffffff".to_owned());
     let names: HashMap<i64, String> = labels.iter().map(|label| (label.id, label.name.clone())).collect();
     let hotkeys: Vec<(String, i64)> =
         labels.iter().filter_map(|label| label.hotkey.clone().map(|key| (key, label.id))).collect();
@@ -348,6 +370,7 @@ pub fn AnnotationLayer(
                     nearest(&shape.vertices(), point, reach).map(Grip::Vertex)
                 }
             }
+            Shape::Mask(_) => None,
             Shape::Polygon { .. } | Shape::Polyline { .. } | Shape::Points { .. } => {
                 nearest(&shape.vertices(), point, reach).map(Grip::Vertex).or_else(|| {
                     let midpoints: Vec<Point> = match shape {
@@ -420,6 +443,36 @@ pub fn AnnotationLayer(
         _ => to,
     };
 
+    // `[` and `]`: the brush size in steps of 25%, but at least one pixel.
+    let resize_brush = move |larger: bool| {
+        editor.brush_size.update(|size| {
+            let next = if larger { (*size * SIZE_STEP).max(*size + 1.0) } else { (*size / SIZE_STEP).min(*size - 1.0) };
+            *size = next.round().clamp(MIN_BRUSH_SIZE, MAX_BRUSH_SIZE);
+        });
+    };
+    // The brush or eraser stroke in progress, sprites of the stored masks, and where the brush
+    // outline is drawn.
+    let stroke = StoredValue::new_local(None::<Stroke>);
+    let sprites = StoredValue::new_local(SpriteCache::default());
+    let hover = RwSignal::new(None::<Point>);
+    // Drops whatever is being drawn, a stroke included.
+    let cancel_gesture = move || {
+        stroke.set_value(None);
+        gesture.set(Gesture::Idle);
+    };
+    let finish_stroke = move || {
+        gesture.set(Gesture::Idle);
+        let mut done = None;
+        stroke.update_value(|current| done = current.take());
+        let Some(edit) = done.and_then(|done| editor.annotations.with_untracked(|list| done.finish(list))) else { return };
+        let count = editor.annotations.with_untracked(Vec::len);
+        editor.apply(edit);
+        // Joined or emptied masks were removed, so the selected indices no longer fit.
+        if editor.annotations.with_untracked(Vec::len) < count {
+            editor.selection.set(BTreeSet::new());
+        }
+    };
+
     // ---- Pie menus. `pending_tool` waits for its label after the tool pie; `relabel` means the
     // label pie changes the label of the selected shapes.
     let pie = RwSignal::new(None::<Pie>);
@@ -466,7 +519,7 @@ pub fn AnnotationLayer(
             tool(Compass::E, Tool::Polygon, "P"),
             tool(Compass::SE, Tool::Points, "."),
             tool(Compass::S, Tool::Polyline, "L"),
-            later(Compass::SW, "Brush", "B"),
+            tool(Compass::SW, Tool::Brush, "B"),
             tool(Compass::W, Tool::Circle, "C"),
             later(Compass::NW, "Tag", "T"),
         ];
@@ -545,6 +598,16 @@ pub fn AnnotationLayer(
                     item(Compass::S, "Diameter", None, true, diameter, PieAction::SetDiameter(true)),
                 ];
                 ("Circle options", items)
+            }
+            Tool::Brush => {
+                let eraser = editor.eraser.get_untracked();
+                let items = vec![
+                    item(Compass::N, "Brush", Some("B"), true, !eraser, PieAction::SetEraser(false)),
+                    item(Compass::E, "Larger", Some("]"), true, false, PieAction::BrushSize(true)),
+                    item(Compass::S, "Eraser", Some("E"), true, eraser, PieAction::SetEraser(true)),
+                    item(Compass::W, "Smaller", Some("["), true, false, PieAction::BrushSize(false)),
+                ];
+                ("Brush options", items)
             }
             Tool::Select => ("Options", Vec::new()),
         };
@@ -646,6 +709,14 @@ pub fn AnnotationLayer(
             PieAction::SetDiameter(on) => {
                 close_pie();
                 editor.diameter.set(on);
+            }
+            PieAction::SetEraser(on) => {
+                close_pie();
+                editor.eraser.set(on);
+            }
+            PieAction::BrushSize(larger) => {
+                close_pie();
+                resize_brush(larger);
             }
             PieAction::FinishShape => {
                 close_pie();
@@ -822,7 +893,8 @@ pub fn AnnotationLayer(
         }
     };
     let draw_press = move |ev: &ev::PointerEvent, tool: Tool, point: Point, current: View| {
-        if editor.label.get_untracked().is_none() {
+        let erasing = tool == Tool::Brush && editor.eraser.get_untracked();
+        if editor.label.get_untracked().is_none() && !erasing {
             let shape = tool.name().to_lowercase();
             editor.notice.set(Some(format!("Add a label that allows {shape} shapes on the Labels tab first.")));
             return;
@@ -853,6 +925,19 @@ pub fn AnnotationLayer(
             }),
             (Tool::Circle, Gesture::Circle { start, .. }) => finish_circle(start, point, current.scale),
             (Tool::Circle, _) => gesture.set(Gesture::Circle { start: point, current: point, dragged: false }),
+            (Tool::Brush, _) => {
+                let label = editor.label.get_untracked().unwrap_or_default();
+                if !erasing && !label_allows(label, ShapeType::Mask) {
+                    editor.notice.set(Some(format!("“{}” cannot be used for masks.", label_name(label))));
+                    return;
+                }
+                let size = editor.brush_size.get_untracked();
+                let started = editor.annotations.with_untracked(|list| {
+                    Stroke::start(erasing, label, size, image_size, point, list, &color_of)
+                });
+                stroke.set_value(Some(started));
+                gesture.set(Gesture::Painting);
+            }
             (Tool::Polyline, _) if editor.freehand.get_untracked() => {
                 gesture.set(Gesture::Stroke { points: vec![point], current: point });
             }
@@ -898,6 +983,9 @@ pub fn AnnotationLayer(
 
     let on_pointer_move = move |ev: ev::PointerEvent| {
         let Some((screen, point, current)) = locate(&ev) else { return };
+        if editor.tool.get_untracked() == Tool::Brush {
+            hover.set(Some(point));
+        }
         match gesture.get_untracked() {
             Gesture::Drawing { start, dragged, .. } => {
                 let moved = current.to_screen(start).distance(screen) > DRAG_THRESHOLD;
@@ -918,6 +1006,15 @@ pub fn AnnotationLayer(
                 let last = *points.last().expect("a stroke starts with a point");
                 points.extend(steps_towards(last, to, editor.spacing.get_untracked()));
                 gesture.set(Gesture::Stroke { points, current: to });
+            }
+            Gesture::Painting => {
+                let to = inside(point);
+                stroke.update_value(|current| {
+                    if let Some(current) = current {
+                        editor.annotations.with_untracked(|list| current.extend(to, list, &color_of));
+                    }
+                });
+                gesture.set(Gesture::Painting);
             }
             Gesture::Radius { index, centre, .. } => {
                 let room = centre.x.min(centre.y).min(width - centre.x).min(height - centre.y);
@@ -986,6 +1083,7 @@ pub fn AnnotationLayer(
                     finish_path();
                 }
             }
+            Gesture::Painting => finish_stroke(),
             Gesture::Radius { index, centre, radius } => {
                 gesture.set(Gesture::Idle);
                 if radius * current.scale >= MIN_SHAPE_SIZE / 2.0 {
@@ -1068,7 +1166,10 @@ pub fn AnnotationLayer(
             return;
         }
         let drawing_path = matches!(gesture.get_untracked(), Gesture::Path { .. });
+        // A stroke keeps the indices of the masks it changes: no undo or redo under it.
+        let painting = gesture.get_untracked() == Gesture::Painting;
         match key.as_str() {
+            "z" | "Z" | "y" | "Y" if command && painting => {}
             "z" | "Z" if command && ev.shift_key() => editor.redo(),
             "z" | "Z" if command => editor.undo(),
             "y" | "Y" if command => editor.redo(),
@@ -1080,15 +1181,16 @@ pub fn AnnotationLayer(
             }
             _ if command || ev.alt_key() => return,
             "Enter" if drawing_path => finish_path(),
+            "[" | "]" if editor.tool.get_untracked() == Tool::Brush => resize_brush(key == "]"),
             "[" | "]" if editor.tool.get_untracked() == Tool::Polyline => {
-                let factor = if key == "]" { SPACING_STEP } else { 1.0 / SPACING_STEP };
+                let factor = if key == "]" { SIZE_STEP } else { 1.0 / SIZE_STEP };
                 editor.spacing.update(|spacing| *spacing = (*spacing * factor).clamp(MIN_SPACING, MAX_SPACING));
                 editor.notice.set(Some(format!("Freehand spacing {:.0} px", editor.spacing.get_untracked())));
             }
             "Backspace" if drawing_path => undo_point(),
             "Escape" => {
                 if gesture.get_untracked() != Gesture::Idle {
-                    gesture.set(Gesture::Idle);
+                    cancel_gesture();
                 } else if !editor.selection.with_untracked(BTreeSet::is_empty) {
                     editor.selection.set(BTreeSet::new());
                 } else {
@@ -1096,10 +1198,19 @@ pub fn AnnotationLayer(
                 }
             }
             "Delete" | "Backspace" | "x" | "X" => editor.delete_selected(),
+            // E is the brush in eraser mode, B in paint mode (Blender has no eraser tool either).
+            "e" | "E" => {
+                cancel_gesture();
+                editor.tool.set(Tool::Brush);
+                editor.eraser.set(true);
+            }
             _ => {
                 if let Some(tool) = Tool::for_key(&key) {
-                    gesture.set(Gesture::Idle);
+                    cancel_gesture();
                     editor.tool.set(tool);
+                    if tool == Tool::Brush {
+                        editor.eraser.set(false);
+                    }
                 } else if let Some((_, id)) = hotkeys.iter().find(|(hotkey, _)| hotkey.eq_ignore_ascii_case(&key)) {
                     match editor.tool.get_untracked().shape_type() {
                         Some(shape) if !label_allows(*id, shape) => editor.notice.set(Some(format!(
@@ -1134,7 +1245,6 @@ pub fn AnnotationLayer(
         let gesture = gesture.get_untracked();
         let selection = editor.selection.get_untracked();
         let single = editor.single_selection();
-        let color_of = |label: i64| colors.get(&label).cloned().unwrap_or_else(|| "#ffffff".to_owned());
         editor.annotations.with_untracked(|list| {
             for (index, annotation) in list.iter().enumerate() {
                 let selected = selection.contains(&index);
@@ -1148,6 +1258,19 @@ pub fn AnnotationLayer(
                     _ => annotation.shape.clone(),
                 };
                 let color = color_of(annotation.label);
+                if let Shape::Mask(mask) = &shape {
+                    // Masks the stroke changes are drawn by the stroke.
+                    let shown = stroke.with_value(|s| s.as_ref().is_some_and(|s| s.draw_changed(&context, current, index, selected)));
+                    if !shown {
+                        sprites.update_value(|cache| cache.draw(&context, current, mask, &color, selected));
+                    }
+                    if selected {
+                        draw::mask_frame(&context, current, shape.bounds(), &color);
+                        let name = names.get(&annotation.label).cloned().unwrap_or_default();
+                        draw::tag(&context, current.to_screen(shape.bounds().min), &name, &color);
+                    }
+                    continue;
+                }
                 draw::shape(&context, current, &shape, Look { color: &color, selected, dashed: false });
                 if selected {
                     let name = names.get(&annotation.label).cloned().unwrap_or_default();
@@ -1169,10 +1292,16 @@ pub fn AnnotationLayer(
                         Shape::Polygon { .. } | Shape::Polyline { .. } => {
                             draw::vertex_handles(&context, current, &shape, &color, true)
                         }
+                        Shape::Mask(_) => {}
                     }
                 }
             }
         });
+        sprites.update_value(SpriteCache::sweep);
+        stroke.with_value(|s| s.as_ref().map(|s| s.draw_painted(&context, current)));
+        if let (Tool::Brush, Some(at)) = (editor.tool.get_untracked(), hover.get_untracked()) {
+            draw::brush_outline(&context, current, at, editor.brush_size.get_untracked() / 2.0);
+        }
         let pen = editor.label.get_untracked().map(color_of).unwrap_or_else(|| "#ffffff".to_owned());
         match gesture {
             Gesture::Selecting { start, current: end, .. } => draw::selection_box(&context, current, Rect::from_corners(start, end)),
@@ -1208,6 +1337,9 @@ pub fn AnnotationLayer(
         editor.annotations.track();
         editor.selection.track();
         editor.label.track();
+        editor.tool.track();
+        editor.brush_size.track();
+        hover.track();
         draw();
     });
     // Drop a half-drawn shape when the tool or a drawing mode changes.
@@ -1216,7 +1348,8 @@ pub fn AnnotationLayer(
         editor.oriented.track();
         editor.freehand.track();
         editor.single_point.track();
-        gesture.set(Gesture::Idle);
+        editor.eraser.track();
+        cancel_gesture();
     });
 
     let canvas_cursor = move || match editor.tool.get() {
@@ -1237,12 +1370,14 @@ pub fn AnnotationLayer(
             data-revision=move || editor.revision.get()
             data-drawing={move || match gesture.get() {
                 Gesture::Path { points, .. } | Gesture::Oriented { points, .. } | Gesture::Stroke { points, .. } => points.len(),
+                Gesture::Painting => 1,
                 _ => 0,
             }}
             style:cursor=canvas_cursor
             on:pointerdown=on_pointer_down
             on:pointermove=on_pointer_move
             on:pointerup=on_pointer_up
+            on:pointerleave=move |_| hover.set(None)
             on:dblclick=move |_| finish_path()
             on:contextmenu=|ev: ev::MouseEvent| ev.prevent_default()
         ></canvas>

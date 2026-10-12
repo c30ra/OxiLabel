@@ -35,6 +35,10 @@ pub enum PieAction {
     ToggleSinglePoint,
     /// Circle: two points are a diameter (true) or centre and radius (false).
     SetDiameter(bool),
+    /// Brush: erase (true) or paint (false).
+    SetEraser(bool),
+    /// Brush: a larger (true) or smaller (false) size.
+    BrushSize(bool),
     /// Finish the polygon, polyline or points being drawn.
     FinishShape,
     /// Remove the last placed vertex.

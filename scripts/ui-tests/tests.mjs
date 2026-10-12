@@ -130,7 +130,7 @@ export const tests = [
       await t.b.click(...w.at(800, 500), { button: 2 });
       const state = await w.state();
       equal(state.pie, 'Tools', 'pie after a right-button tap without a last tool');
-      equal(state.pieItems.filter((item) => item.enabled).map((item) => item.name), ['Select', 'Rectangle', 'Polygon', 'Points', 'Polyline', 'Circle'], 'enabled tools');
+      equal(state.pieItems.filter((item) => item.enabled).map((item) => item.name), ['Select', 'Rectangle', 'Polygon', 'Points', 'Polyline', 'Brush', 'Circle'], 'enabled tools');
       equal(state.pieItems.length, 8, 'tool slots');
     },
   },
@@ -363,7 +363,7 @@ tests.push(
     async run(t) {
       await openWorkspace(t.b, t.base, t.project);
       const seen = {};
-      for (const key of ['r', 'p', 'l', '.', 'c']) {
+      for (const key of ['r', 'p', 'l', '.', 'c', 'b']) {
         await t.b.key(key);
         seen[key] = await toolOptions(t);
       }
@@ -373,6 +373,7 @@ tests.push(
         l: 'Click* | Freehand | Snap 15°Shift',
         '.': 'Multiple* | Single point',
         c: 'Centre and radius* | Diameter',
+        b: 'Brush* | Eraser',
       }, 'options per tool');
     },
   },
@@ -437,6 +438,94 @@ tests.push(
     },
   },
 );
+
+// Masks (ticket 09).
+
+/** Whether image pixel (x, y) is set in a stored mask (row-major runs, starting unset). */
+const maskHas = (shape, x, y) => {
+  if (x < shape.left || y < shape.top || x >= shape.left + shape.width || y >= shape.top + shape.height) return false;
+  const index = (y - shape.top) * shape.width + (x - shape.left);
+  let end = 0;
+  for (let k = 0; k < shape.rle.length; k++) {
+    end += shape.rle[k];
+    if (index < end) return k % 2 === 1;
+  }
+  return false;
+};
+const sizeField = (t) => t.b.eval(`document.querySelector('.option-number input').value`);
+
+tests.push({
+  name: 'the brush paints masks, strokes that touch a mask extend it, and the eraser removes pixels',
+  async run(t) {
+    const w = await openWorkspace(t.b, t.base, t.project);
+    await t.b.key('b');
+    equal(await sizeField(t), '20', 'default brush size');
+    await t.b.drag(w.at(200, 300), w.at(400, 300));
+    let list = await saved(t, (list) => list.length === 1, 'the first stroke');
+    let [mask] = list.map((a) => a.shape);
+    equal([mask.type, list[0].label], ['mask', 1], 'type and label');
+    near([mask.left, mask.top, mask.left + mask.width, mask.top + mask.height], [190, 290, 410, 310], 1 + 2 / w.scale, 'stroke bounds');
+    equal([maskHas(mask, 300, 300), maskHas(mask, 300, 330)], [true, false], 'pixels on and beside the stroke');
+
+    // A stroke starting on the mask extends it; one elsewhere is a new mask.
+    await t.b.drag(w.at(400, 300), w.at(400, 500));
+    list = await saved(t, (list) => list[0].shape.height > 100, 'the extending stroke');
+    equal(list.length, 1, 'still one mask');
+    await t.b.drag(w.at(1000, 300), w.at(1100, 300));
+    list = await saved(t, (list) => list.length === 2, 'a separate mask');
+
+    // E erases across every mask; ] makes the eraser bigger, so the second mask goes entirely.
+    await t.b.key('e');
+    equal(await toolOptions(t), 'Brush | Eraser*', 'eraser mode');
+    await t.b.drag(w.at(300, 250), w.at(300, 350));
+    list = await saved(t, (list) => !maskHas(list[0].shape, 300, 300), 'the erased gap');
+    equal(maskHas(list[0].shape, 250, 300), true, 'pixels beside the gap stay');
+    for (let i = 0; i < 3; i++) await t.b.key(']');
+    equal(await sizeField(t), '39', 'size after three ]');
+    await t.b.drag(w.at(990, 300), w.at(1110, 300));
+    await saved(t, (list) => list.length === 1, 'the emptied mask removed');
+
+    // Each stroke is one undo step.
+    await t.b.key('z', [KEY.ctrl]);
+    await saved(t, (list) => list.length === 2, 'the removal undone');
+    await t.b.key('z', [KEY.ctrl]);
+    await saved(t, (list) => maskHas(list[0].shape, 300, 300), 'the gap undone');
+    await t.b.key('y', [KEY.ctrl]);
+    await saved(t, (list) => !maskHas(list[0].shape, 300, 300), 'the gap redone');
+  },
+}, {
+  name: 'a stroke joining two masks merges them, other labels overlap, and the eraser cuts every label',
+  async run(t) {
+    const square = (label, left) => ({ label, shape: { type: 'mask', left, top: 100, width: 100, height: 100, rle: [0, 10000] } });
+    // crack (1) at x 100–200 and 400–500, finger (2) between them.
+    await t.api.setAnnotations(t.project, [square(1, 100), square(1, 400), square(2, 250)]);
+    const w = await openWorkspace(t.b, t.base, t.project);
+    await t.b.key('b');
+    await t.b.drag(w.at(150, 150), w.at(450, 150));
+    let list = await saved(t, (list) => list.length === 2, 'the two crack masks merged');
+    equal(list.map((a) => [a.label, a.shape.left, a.shape.width]), [[1, 100, 400], [2, 250, 100]], 'merged crack and untouched finger');
+    equal(list[1].shape.rle, [0, 10000], 'the finger mask keeps every pixel');
+    await t.b.key('e');
+    await t.b.drag(w.at(120, 180), w.at(480, 180));
+    list = await saved(t, (list) => !maskHas(list[1].shape, 300, 180), 'the erased line');
+    equal([maskHas(list[0].shape, 150, 180), maskHas(list[0].shape, 150, 120)], [false, true], 'crack cut below, kept above');
+  },
+}, {
+  name: 'a mask is selected by its pixels and moves by whole pixels',
+  async run(t) {
+    const mask = { type: 'mask', left: 100, top: 100, width: 200, height: 100, rle: [0, 200 * 50, 200 * 50] };
+    await t.api.setAnnotations(t.project, [{ label: 1, shape: mask }]);
+    const w = await openWorkspace(t.b, t.base, t.project);
+    await t.b.click(...w.at(200, 175));
+    equal((await w.state()).selected, [], 'a click on the unset half');
+    await t.b.click(...w.at(200, 125));
+    equal((await w.state()).selected, [0], 'a click on the set half');
+    await t.b.drag(w.at(200, 125), w.at(300, 175));
+    const [moved] = await saved(t, (list) => list[0].shape.left !== 100, 'the move');
+    near([moved.shape.left, moved.shape.top], [200, 150], 1 + 2 / w.scale, 'new position');
+    equal([moved.shape.width, moved.shape.height, moved.shape.rle], [200, 100, mask.rle], 'same pixels');
+  },
+});
 
 // Export (ticket 06).
 tests.push({

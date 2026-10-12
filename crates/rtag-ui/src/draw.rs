@@ -131,6 +131,28 @@ pub fn radius_handle(context: &CanvasRenderingContext2d, view: View, centre: Poi
     context.stroke();
 }
 
+/// The brush outline at the pointer: its size in the image, light with a dark edge so it shows
+/// on any background.
+pub fn brush_outline(context: &CanvasRenderingContext2d, view: View, centre: Point, radius: f64) {
+    let at = view.to_screen(centre);
+    context.begin_path();
+    context.arc(at.x, at.y, (radius * view.scale).max(1.0), 0.0, std::f64::consts::TAU).ok();
+    context.set_line_width(3.0);
+    context.set_stroke_style_str("#141517");
+    context.stroke();
+    context.set_line_width(1.5);
+    context.set_stroke_style_str("#e8e6e1");
+    context.stroke();
+}
+
+/// The dashed box around a selected mask.
+pub fn mask_frame(context: &CanvasRenderingContext2d, view: View, bounds: Rect, color: &str) {
+    let (min, max) = (view.to_screen(bounds.min), view.to_screen(bounds.max));
+    context.begin_path();
+    context.rect(min.x, min.y, max.x - min.x, max.y - min.y);
+    stroke(context, Look { color, selected: true, dashed: true }, 1.5);
+}
+
 /// A small filled tag with `text` just above `at` (screen coordinates).
 pub fn tag(context: &CanvasRenderingContext2d, at: Point, text: &str, color: &str) {
     if text.is_empty() {

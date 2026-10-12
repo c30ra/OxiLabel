@@ -3,7 +3,7 @@
 
 use leptos::prelude::*;
 
-use crate::annotate::{Editor, MAX_SPACING, MIN_SPACING, Tool};
+use crate::annotate::{Editor, MAX_BRUSH_SIZE, MAX_SPACING, MIN_BRUSH_SIZE, MIN_SPACING, Tool};
 
 #[component]
 pub fn ToolOptions(editor: Editor) -> impl IntoView {
@@ -32,20 +32,8 @@ pub fn ToolOptions(editor: Editor) -> impl IntoView {
                         when=move || editor.freehand.get()
                         fallback=move || view! { <Toggle label="Snap 15°" key="Shift" value=editor.snap disabled=Signal::derive(|| false) /> }
                     >
-                        <label class="option-number" title="Distance between vertices while dragging ([ and ] change it)">
-                            "Spacing"
-                            <input type="number" min=MIN_SPACING max=MAX_SPACING step="1"
-                                prop:value=move || format!("{:.0}", editor.spacing.get())
-                                on:change:target=move |ev| {
-                                    if let Ok(value) = ev.target().value().trim().parse::<f64>() {
-                                        editor.spacing.set(value.clamp(MIN_SPACING, MAX_SPACING));
-                                    }
-                                    // Back to the canvas, so tool keys work again.
-                                    ev.target().blur().ok();
-                                } />
-                            "px"
-                            <kbd>"["</kbd><kbd>"]"</kbd>
-                        </label>
+                        <NumberOption label="Spacing" title="Distance between vertices while dragging ([ and ] change it)"
+                            value=editor.spacing range=(MIN_SPACING, MAX_SPACING) />
                     </Show>
                 }.into_any(),
                 Tool::Points => view! {
@@ -53,6 +41,11 @@ pub fn ToolOptions(editor: Editor) -> impl IntoView {
                 }.into_any(),
                 Tool::Circle => view! {
                     <Segmented choices=vec![("Centre and radius", false), ("Diameter", true)] value=editor.diameter />
+                }.into_any(),
+                Tool::Brush => view! {
+                    <Segmented choices=vec![("Brush", false), ("Eraser", true)] value=editor.eraser />
+                    <NumberOption label="Size" title="Brush diameter in image pixels ([ and ] change it)"
+                        value=editor.brush_size range=(MIN_BRUSH_SIZE, MAX_BRUSH_SIZE) />
                 }.into_any(),
             }}
         </div>
@@ -81,5 +74,26 @@ fn Toggle(label: &'static str, key: &'static str, value: RwSignal<bool>, disable
             on:click=move |_| value.update(|on| *on = !*on)>
             {label}<kbd>{key}</kbd>
         </button>
+    }
+}
+
+/// A size in image pixels, typed or changed with `[` and `]`.
+#[component]
+fn NumberOption(label: &'static str, title: &'static str, value: RwSignal<f64>, range: (f64, f64)) -> impl IntoView {
+    view! {
+        <label class="option-number" title=title>
+            {label}
+            <input type="number" min=range.0 max=range.1 step="1"
+                prop:value=move || format!("{:.0}", value.get())
+                on:change:target={move |ev| {
+                    if let Ok(typed) = ev.target().value().trim().parse::<f64>() {
+                        value.set(typed.clamp(range.0, range.1));
+                    }
+                    // Back to the canvas, so tool keys work again.
+                    ev.target().blur().ok();
+                }} />
+            "px"
+            <kbd>"["</kbd><kbd>"]"</kbd>
+        </label>
     }
 }

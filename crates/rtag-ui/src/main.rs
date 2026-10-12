@@ -1,6 +1,7 @@
 mod annotate;
 mod api;
 mod draw;
+mod masks;
 mod pages;
 mod pie;
 mod tool_options;

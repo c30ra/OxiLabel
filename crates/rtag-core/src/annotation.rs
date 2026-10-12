@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ShapeType,
     geometry::{Point, Rect, bounds_of, distance_to_segment, inside_polygon, polygon_area},
+    mask::Mask,
     oriented::OrientedRect,
 };
 
@@ -23,6 +24,8 @@ pub enum Shape {
     Points { points: Vec<Point> },
     /// A circle (the outline of a sphere or a round defect).
     Circle { centre: Point, radius: f64 },
+    /// Painted pixels (brush and eraser), run-length encoded.
+    Mask(Mask),
 }
 
 /// Coordinates may stick out of the image by this much (float rounding) and still count as inside.
@@ -37,10 +40,12 @@ impl Shape {
             Shape::Polyline { .. } => ShapeType::Polyline,
             Shape::Points { .. } => ShapeType::Points,
             Shape::Circle { .. } => ShapeType::Circle,
+            Shape::Mask(_) => ShapeType::Mask,
         }
     }
 
-    /// The editable vertices: polygon, polyline and point positions, or rectangle corners.
+    /// The editable vertices: polygon, polyline and point positions, or rectangle corners. Masks
+    /// have none.
     pub fn vertices(&self) -> Vec<Point> {
         match self {
             Shape::Rectangle(rect) => {
@@ -49,6 +54,7 @@ impl Shape {
             Shape::OrientedRectangle(rect) => rect.corners().to_vec(),
             Shape::Polygon { points } | Shape::Polyline { points } | Shape::Points { points } => points.clone(),
             Shape::Circle { centre, .. } => vec![*centre],
+            Shape::Mask(_) => Vec::new(),
         }
     }
 
@@ -59,6 +65,7 @@ impl Shape {
             Shape::Polygon { .. } => 3,
             Shape::Polyline { .. } => 2,
             Shape::Points { .. } | Shape::Circle { .. } => 1,
+            Shape::Mask(_) => 0,
         }
     }
 
@@ -73,7 +80,7 @@ impl Shape {
                 let corners = self.vertices();
                 (0..4).map(|i| (corners[i], corners[(i + 1) % 4])).collect()
             }
-            Shape::Points { .. } | Shape::Circle { .. } => Vec::new(),
+            Shape::Points { .. } | Shape::Circle { .. } | Shape::Mask(_) => Vec::new(),
         }
     }
 
@@ -86,10 +93,14 @@ impl Shape {
             Shape::Circle { centre, radius } => {
                 Rect::new(centre.x - radius, centre.y - radius, centre.x + radius, centre.y + radius)
             }
+            Shape::Mask(mask) => {
+                let area = mask.area();
+                Rect::new(f64::from(area.left), f64::from(area.top), f64::from(area.right()), f64::from(area.bottom()))
+            }
         }
     }
 
-    /// The shape moved by (`dx`, `dy`) image pixels.
+    /// The shape moved by (`dx`, `dy`) image pixels; masks move by whole pixels.
     pub fn translated(&self, dx: f64, dy: f64) -> Shape {
         let shift = |points: &Vec<Point>| points.iter().map(|p| p.offset(dx, dy)).collect();
         match self {
@@ -101,11 +112,15 @@ impl Shape {
             Shape::Polyline { points } => Shape::Polyline { points: shift(points) },
             Shape::Points { points } => Shape::Points { points: shift(points) },
             Shape::Circle { centre, radius } => Shape::Circle { centre: centre.offset(dx, dy), radius: *radius },
+            Shape::Mask(mask) => {
+                let shift = |at: u32, by: f64| (f64::from(at) + by).round().max(0.0) as u32;
+                Shape::Mask(Mask { left: shift(mask.left, dx), top: shift(mask.top, dy), ..mask.clone() })
+            }
         }
     }
 
     /// Whether `point` is on the shape, allowing `margin` image pixels around it: inside areas,
-    /// near lines and near points.
+    /// near lines and near points. Masks only count their set pixels.
     pub fn contains(&self, point: Point, margin: f64) -> bool {
         let near_edge = || self.edges().iter().any(|(a, b)| distance_to_segment(point, *a, *b) <= margin);
         match self {
@@ -115,6 +130,7 @@ impl Shape {
             Shape::Polyline { .. } => near_edge(),
             Shape::Points { points } => points.iter().any(|p| p.distance(point) <= margin),
             Shape::Circle { centre, radius } => centre.distance(point) <= radius + margin,
+            Shape::Mask(mask) => mask.contains(point),
         }
     }
 
@@ -131,6 +147,7 @@ impl Shape {
                 }
             }
             Shape::Circle { centre, .. } => *centre = to,
+            Shape::Mask(_) => {}
         }
         moved
     }
@@ -163,6 +180,9 @@ impl Shape {
 
     /// Checks that the shape is well formed and lies inside a `width` × `height` image.
     pub fn validate(&self, width: u32, height: u32) -> Result<(), String> {
+        if let Shape::Mask(mask) = self {
+            return mask.validate(width, height);
+        }
         let mut vertices = self.vertices();
         if let Shape::Circle { radius, .. } = self {
             if !(radius.is_finite() && *radius > 0.0) {
@@ -372,6 +392,27 @@ mod tests {
         assert_eq!(ok(Shape::OrientedRectangle(tilted)), Ok(()));
         assert!(ok(Shape::OrientedRectangle(OrientedRect { centre: Point::new(2.0, 2.0), ..tilted })).is_err(), "corners outside");
         assert!(ok(Shape::OrientedRectangle(OrientedRect { height: 0.0, ..tilted })).is_err());
+    }
+
+    #[test]
+    fn masks_are_shapes_with_pixel_bounds_hit_testing_and_validation() {
+        // A 3 × 2 box at (10, 20) whose top row is set.
+        let mask = Shape::Mask(Mask { left: 10, top: 20, width: 3, height: 2, rle: vec![0, 3, 3] });
+        assert_eq!(mask.shape_type(), ShapeType::Mask);
+        assert_eq!(mask.bounds(), Rect::new(10.0, 20.0, 13.0, 22.0));
+        assert!(mask.contains(Point::new(12.5, 20.5), 0.0));
+        assert!(!mask.contains(Point::new(12.5, 21.5), 0.0));
+        assert_eq!(mask.vertices(), Vec::<Point>::new(), "nothing to drag");
+        assert_eq!(mask.translated(4.4, -2.6).bounds(), Rect::new(14.0, 17.0, 17.0, 19.0), "moves by whole pixels");
+        assert_eq!(mask.validate(13, 22), Ok(()));
+        assert!(mask.validate(12, 22).is_err(), "sticks out");
+        let blank = Shape::Mask(Mask { left: 0, top: 0, width: 3, height: 2, rle: vec![6] });
+        assert!(blank.validate(100, 100).is_err(), "nothing set");
+        let short = Shape::Mask(Mask { left: 0, top: 0, width: 3, height: 2, rle: vec![0, 5] });
+        assert!(short.validate(100, 100).is_err(), "runs do not fill the box");
+        let json = serde_json::to_value(&mask).unwrap();
+        assert_eq!(json, serde_json::json!({"type": "mask", "left": 10, "top": 20, "width": 3, "height": 2, "rle": [0, 3, 3]}));
+        assert_eq!(serde_json::from_value::<Shape>(json).unwrap(), mask);
     }
 
     #[test]
