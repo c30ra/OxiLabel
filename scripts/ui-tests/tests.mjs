@@ -148,6 +148,28 @@ export const tests = [
     },
   },
   {
+    name: 'without labels the drawing tools are disabled and a notice says to create labels',
+    async run(t) {
+      const bare = await t.api.project('No labels', []);
+      const w = await openWorkspace(t.b, t.base, bare);
+      let state = await w.state();
+      if (!/no labels/i.test(state.notice ?? '')) throw new Error(`notice on opening: ${state.notice}`);
+      const [x, y] = w.at(800, 500);
+      await t.b.move(x, y);
+      await t.b.click(x, y, { button: 2 });
+      state = await w.state();
+      equal(state.pieItems.filter((item) => item.enabled).map((item) => item.name), ['Select'], 'enabled in the tool pie');
+      await t.b.key(KEY.escape);
+      equal(await t.b.json(`[...document.querySelectorAll('.tool-rail .tool')].filter((b) => !b.disabled).map((b) => b.getAttribute('aria-label'))`), ['Select'], 'enabled in the rail');
+      await t.b.key('r');
+      state = await w.state();
+      equal(state.tool, 'Select', 'R does nothing');
+      if (!/Labels tab/.test(state.notice ?? '')) throw new Error(`notice after R: ${state.notice}`);
+      await t.b.key('q', [KEY.shift]);
+      equal((await w.state()).pieItems.map((item) => [item.name, item.enabled]), [['No labels yet: add them on the Labels tab', false]], 'label pie');
+    },
+  },
+  {
     name: 'the tool pie opens on a right-button tap and offers all eight tools',
     async run(t) {
       const w = await openWorkspace(t.b, t.base, t.project);

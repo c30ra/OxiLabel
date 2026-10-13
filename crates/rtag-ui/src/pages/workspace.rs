@@ -93,6 +93,7 @@ fn Workspace(
     // Start with the first label; switching to a tool picks one that allows its shape.
     let editor = Editor::new(conformed(&labels, annotations.annotations), labels.iter().map(|label| label.id).min());
     let labels_for_reload = StoredValue::new(labels.clone());
+    editor.usable_shapes.set(labels.iter().flat_map(|label| label.shape_types.iter().copied()).collect());
     let picker_labels = labels.clone();
     let layer_labels = labels.clone();
     let url = StoredValue::new(format!(
@@ -355,7 +356,9 @@ fn ToolRail(editor: Editor) -> impl IntoView {
                             icon: &'static str| {
         view! {
             <button class="tool" class:active=move || editor.tool.get() == tool aria-pressed=move || (editor.tool.get() == tool).to_string()
-                title=format!("{name} ({key})") aria-label=name on:click=move |_| editor.tool.set(tool)>
+                disabled=move || !editor.can_use(tool)
+                title=move || if editor.can_use(tool) { format!("{name} ({key})") } else { format!("{name}: no label allows it") }
+                aria-label=name on:click=move |_| editor.tool.set(tool)>
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d=icon /></svg>
                 <kbd>{key}</kbd>
             </button>

@@ -190,6 +190,8 @@ pub struct Editor {
     pub edge_offset: RwSignal<f64>,
     /// The last drawing tool, label and modes, repeated by a tap of the pie key.
     pub last: RwSignal<Option<(Tool, i64, Modes)>>,
+    /// The shape types some label of the project allows; tools for others are disabled.
+    pub usable_shapes: RwSignal<Vec<ShapeType>>,
 }
 
 /// The tools' drawing modes, remembered with the last tool.
@@ -204,6 +206,16 @@ pub struct Modes {
 }
 
 impl Editor {
+    /// Whether `tool` can be used: Select always, a drawing tool when some label allows its shape.
+    pub fn can_use(&self, tool: Tool) -> bool {
+        tool.shape_type().is_none_or(|shape| self.usable_shapes.with(|shapes| shapes.contains(&shape)))
+    }
+
+    /// Why a tool cannot be used, for a notice.
+    pub fn unusable_notice(tool: Tool) -> String {
+        format!("No label allows {} shapes: create or edit labels on the Labels tab.", tool.name().to_lowercase())
+    }
+
     fn mode_signals(&self) -> [RwSignal<bool>; 6] {
         [self.oriented, self.freehand, self.single_point, self.diameter, self.fill, self.eraser]
     }
@@ -260,6 +272,7 @@ impl Editor {
             stop_at_edges: RwSignal::new(false),
             edge_offset: RwSignal::new(0.0),
             last: RwSignal::new(None),
+            usable_shapes: RwSignal::new(ShapeType::ALL.to_vec()),
         }
     }
 
@@ -830,7 +843,7 @@ pub fn AnnotationLayer(
     };
     let tool_pie = move |centre: Point, held: bool| {
         let current = editor.tool.get_untracked();
-        let tool = |slot, tool: Tool, key: &str| item(slot, tool.name(), Some(key), true, tool == current, PieAction::Tool(tool));
+        let tool = |slot, tool: Tool, key: &str| item(slot, tool.name(), Some(key), editor.can_use(tool), tool == current, PieAction::Tool(tool));
         // The approved layout.
         let items = vec![
             tool(Compass::N, Tool::Select, "V"),
@@ -867,6 +880,10 @@ pub fn AnnotationLayer(
         });
         if all_labels.with_value(|labels| labels.len() > slots.len()) {
             items.push(item(Compass::NW, "More…", Some("/"), true, false, PieAction::MoreLabels));
+        }
+        // Not an empty ring: say why there is nothing to pick.
+        if items.is_empty() {
+            items.push(item(Compass::N, "No labels yet: add them on the Labels tab", None, false, false, PieAction::MoreLabels));
         }
         Pie { label: "Labels", items, centre, wide: false, held, opened_at: now() }
     };
@@ -1155,6 +1172,10 @@ pub fn AnnotationLayer(
             editor.last.set(Some((tool, label, modes)));
         }
     });
+    // Without labels nothing can be drawn: say so when the image opens.
+    if all_labels.with_value(Vec::is_empty) {
+        editor.notice.set(Some("This project has no labels yet: create them on the Labels tab to start annotating.".into()));
+    }
     // A drawing tool needs a label that allows its shape: switch to the first one that does.
     Effect::new(move |_| {
         let Some(shape) = editor.tool.get().shape_type() else { return };
@@ -1652,6 +1673,10 @@ pub fn AnnotationLayer(
             }
             "Delete" | "Backspace" | "x" | "X" => editor.delete_selected(),
             // E is the brush in eraser mode, B in paint mode (Blender has no eraser tool either).
+            "e" | "E" | "u" | "U" | "b" | "B" | "t" | "T" if !editor.can_use(if key.eq_ignore_ascii_case("t") { Tool::Tag } else { Tool::Brush }) => {
+                let tool = if key.eq_ignore_ascii_case("t") { Tool::Tag } else { Tool::Brush };
+                editor.notice.set(Some(Editor::unusable_notice(tool)));
+            }
             "e" | "E" => {
                 cancel_gesture();
                 editor.tool.set(Tool::Brush);
@@ -1673,7 +1698,9 @@ pub fn AnnotationLayer(
                 editor.eraser.set(false);
             }
             _ => {
-                if let Some(tool) = Tool::for_key(&key) {
+                if let Some(tool) = Tool::for_key(&key).filter(|tool| !editor.can_use(*tool)) {
+                    editor.notice.set(Some(Editor::unusable_notice(tool)));
+                } else if let Some(tool) = Tool::for_key(&key) {
                     cancel_gesture();
                     editor.tool.set(tool);
                     if tool == Tool::Brush {
