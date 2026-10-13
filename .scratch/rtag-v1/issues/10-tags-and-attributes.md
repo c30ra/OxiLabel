@@ -4,11 +4,11 @@
 
 **Blocked by:** 05
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] The pie menu offers a tag tool, and tags are listed for the image
-- [ ] Labels can define attributes with types and defaults in the label screen
-- [ ] Selecting an annotation or tag whose label has attributes shows an editor, otherwise none is shown
+- [x] The pie menu offers a tag tool, and tags are listed for the image
+- [x] Labels can define attributes with types and defaults in the label screen
+- [x] Selecting an annotation or tag whose label has attributes shows an editor, otherwise none is shown
 - [x] Attribute values persist with the annotation and reload correctly
 - [x] API tests cover attribute validation against the label definition
 
