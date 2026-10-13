@@ -52,7 +52,8 @@ pub fn SidePanel(editor: Editor, labels: Vec<Label>) -> impl IntoView {
         let selected = move || editor.selection.with(|set| set.contains(&index));
         let (hidden, locked) = (annotation.hidden, annotation.locked);
         view! {
-            <li class:selected=selected class:hidden=hidden class:locked=locked>
+            // Not "hidden"/"locked": the global .hidden class hides elements.
+            <li class:selected=selected class:is-hidden=hidden class:is-locked=locked>
                 <span class="swatch" style:background=color></span>
                 <select class="relabel" aria-label="Label" on:change:target=move |ev| {
                     if let Ok(id) = ev.target().value().parse() { relabel(index, id) }

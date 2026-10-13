@@ -305,12 +305,12 @@ a.button.primary { background: var(--accent); border-color: var(--accent); color
 .side-panel .objects ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 .side-panel .objects li { display: flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 4px 0 8px; border-radius: 5px; border-left: 2px solid transparent; }
 .side-panel .objects li.selected { background: #F0A43A1F; border-left-color: var(--accent); }
-.side-panel .objects li.hidden .detail, .side-panel .objects li.hidden select { opacity: .45; }
+.side-panel .objects li.is-hidden .detail, .side-panel .objects li.is-hidden select { opacity: .45; }
 .side-panel .objects select.relabel { max-width: 110px; height: 26px; padding: 0 4px; font-size: 13px; }
 .side-panel .objects .pick { flex: 1; min-width: 0; padding: 4px 2px; border: 0; background: none; text-align: left; color: var(--muted); font-size: 12px; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .side-panel .objects .hide, .side-panel .objects .lock { width: 28px; height: 28px; padding: 0; border: 0; background: none; color: var(--muted); display: grid; place-items: center; }
 .side-panel .objects .hide svg, .side-panel .objects .lock svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; }
-.side-panel .objects li.locked .lock, .side-panel .objects li.hidden .hide { color: var(--accent); }
+.side-panel .objects li.is-locked .lock, .side-panel .objects li.is-hidden .hide { color: var(--accent); }
 .side-panel .objects .empty { margin: 0; font-size: 13px; }
 
 /* Filmstrip and image status */

@@ -785,7 +785,8 @@ tests.push({
 // Objects list, filmstrip and status (ticket 11).
 const objectRows = (t) => t.b.json(`[...document.querySelectorAll('.objects li')].map((li) => ({
   label: li.querySelector('select.relabel').selectedOptions[0].textContent, detail: li.querySelector('.detail').textContent,
-  hidden: li.classList.contains('hidden'), locked: li.classList.contains('locked'), selected: li.classList.contains('selected') }))`);
+  hidden: li.classList.contains('is-hidden'), locked: li.classList.contains('is-locked'), selected: li.classList.contains('selected'),
+  shown: li.getClientRects().length > 0 }))`);
 const clickIn = (t, selector) => t.b.eval(`document.querySelector(${JSON.stringify(selector)}).click(), 1`);
 
 tests.push({
@@ -819,7 +820,7 @@ tests.push({
     await t.b.eval(`(() => { const s = document.querySelector('.objects li:nth-child(2) select.relabel'); s.value = '4'; s.dispatchEvent(new Event('change', { bubbles: true })); return 1; })()`);
     await saved(t, (list) => list[1].label === 4, 'the relabel');
     rows = await objectRows(t);
-    equal(rows.map((r) => [r.label, r.hidden, r.locked]), [['crack', true, false], ['surface', false, true]], 'rows after');
+    equal(rows.map((r) => [r.label, r.hidden, r.locked, r.shown]), [['crack', true, false, true], ['surface', false, true, true]], 'rows after (a hidden shape stays in the list)');
   },
 }, {
   name: 'the filmstrip and j, k, gg and G move through the images; Ctrl+Enter marks one annotated and opens the next',
