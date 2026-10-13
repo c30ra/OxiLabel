@@ -11,7 +11,7 @@
 //! "spacing" pixels (`[` and `]` change it); single-point mode makes each click one point.
 //! Circle (C) draws centre and radius (or a diameter) by a drag or two clicks. Brush (B) paints
 //! masks and its eraser mode (E) erases them (see `masks`); Ctrl inverts a stroke, and `[` and
-//! `]` or F (then move the pointer and click; Esc cancels) change the size. Its fuzzy fill mode
+//! `]` or F (then move the pointer right or left and click; Esc cancels) change the size. Its fuzzy fill mode
 //! (U) fills the similar region around a click (`fill`), a drag changing the threshold. Freehand
 //! polylines can snap to edges (live-wire, `edges`) and the brush can stop at edges (painting
 //! only the similar region around the stroke's start); Shift inverts either while drawing. Esc
@@ -394,7 +394,8 @@ enum Gesture {
     Circle { start: Point, current: Point, dragged: bool },
     /// A brush or eraser stroke; its pixels are in the `Stroke` kept beside the gesture.
     Painting,
-    /// F with the brush: the size follows the pointer's distance from `centre`; `before` is
+    /// F with the brush: the outline stays at `centre` (where the pointer was) and the size
+    /// changes by twice the pointer's horizontal move: right larger, left smaller. `before` is
     /// restored on cancel.
     BrushSizing { centre: Point, before: f64 },
     /// A fuzzy fill from `seed`, on the tiles of the viewed level; dragging from `anchor` changes
@@ -1443,8 +1444,9 @@ pub fn AnnotationLayer(
                 };
                 gesture.set(Gesture::Stroke { points, current });
             }
-            Gesture::BrushSizing { centre, .. } => {
-                editor.brush_size.set((2.0 * centre.distance(point)).round().clamp(MIN_BRUSH_SIZE, MAX_BRUSH_SIZE));
+            Gesture::BrushSizing { centre, before } => {
+                let size = before + 2.0 * (point.x - centre.x);
+                editor.brush_size.set(size.round().clamp(MIN_BRUSH_SIZE, MAX_BRUSH_SIZE));
             }
             Gesture::Filling { anchor, base, released: false, .. } => {
                 let moved = (f64::from(ev.client_x()) - anchor.x) + (f64::from(ev.client_y()) - anchor.y);
@@ -1649,12 +1651,10 @@ pub fn AnnotationLayer(
             "Enter" if drawing_path => finish_path(),
             "[" | "]" if editor.tool.get_untracked() == Tool::Brush && editor.fill.get_untracked() => change_threshold(key == "]"),
             "[" | "]" if editor.tool.get_untracked() == Tool::Brush => resize_brush(key == "]"),
-            // Blender's radial control: the outline keeps its size under the pointer, centred
-            // to its left, and then follows the pointer.
+            // F: resize the outline where it is, by moving the pointer right or left.
             "f" | "F" if editor.tool.get_untracked() == Tool::Brush && !editor.fill.get_untracked() && gesture.get_untracked() == Gesture::Idle => {
-                let Some(at) = hover.get_untracked() else { return };
-                let before = editor.brush_size.get_untracked();
-                gesture.set(Gesture::BrushSizing { centre: at.offset(-before / 2.0, 0.0), before });
+                let Some(centre) = hover.get_untracked() else { return };
+                gesture.set(Gesture::BrushSizing { centre, before: editor.brush_size.get_untracked() });
             }
             "[" | "]" if editor.tool.get_untracked() == Tool::Polyline => {
                 let factor = if key == "]" { SIZE_STEP } else { 1.0 / SIZE_STEP };

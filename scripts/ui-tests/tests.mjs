@@ -580,7 +580,7 @@ tests.push({
     await t.b.drag(w.at(500, 500), w.at(600, 500), { modifiers: [KEY.ctrl] });
     list = await saved(t, (list) => list.length === 2, 'Ctrl+drag with the eraser painting');
 
-    // F: the circle keeps its size under the pointer, then follows it; a click confirms, Esc cancels.
+    // F: the circle stays where it is; moving right by 50 grows it by 100, a click confirms, Esc cancels.
     await t.b.move(...w.at(800, 500));
     await t.b.key('f');
     await t.b.move(...w.at(850, 500));
