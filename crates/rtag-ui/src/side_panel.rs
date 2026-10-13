@@ -1,5 +1,5 @@
-//! The panel right of the image: the image's tags, and the attribute editor of the selected
-//! annotation or tag. It is shown only when there is something in it: tags, or a selection whose
+//! The panel right of the image: the collapsible objects list (select, hide, lock, relabel),
+//! the image's tags, and the attribute editor of the selected annotation or tag, shown when its
 //! label has attributes.
 
 use std::collections::BTreeSet;
@@ -7,7 +7,9 @@ use std::collections::BTreeSet;
 use leptos::prelude::*;
 use rtag_core::{
     Label,
+    annotation::{Annotation, Shape},
     attribute::{AttributeDefinition, AttributeKind, AttributeValue},
+    history::Edit,
 };
 
 use crate::annotate::Editor;
@@ -29,9 +31,83 @@ pub fn SidePanel(editor: Editor, labels: Vec<Label>) -> impl IntoView {
         label(id).filter(|label| !label.attributes.is_empty()).map(|label| (index, label))
     });
 
+    let collapsed = RwSignal::new(false);
+    // Every annotation but the tags, in drawing order (the topmost last).
+    let objects = move || {
+        editor.annotations.with(|list| list.iter().enumerate().filter(|(_, a)| !a.shape.is_tag()).map(|(i, a)| (i, a.clone())).collect::<Vec<_>>())
+    };
+    let relabel = move |index: usize, id: i64| {
+        let Some(before) = editor.annotations.with_untracked(|list| list.get(index).cloned()) else { return };
+        let Some(target) = label(id) else { return };
+        let after = Annotation { label: id, attributes: target.conform_attributes(&before.attributes), ..before.clone() };
+        if after != before {
+            editor.apply(Edit::Replace { index, before, after });
+        }
+    };
+    let row = move |index: usize, annotation: Annotation| {
+        let color = label(annotation.label).map(|l| l.color).unwrap_or_default();
+        let shape = annotation.shape.shape_type();
+        let choices = labels.with_value(|labels| labels.iter().filter(|l| l.shape_types.contains(&shape)).cloned().collect::<Vec<_>>());
+        let name = label(annotation.label).map(|l| l.name).unwrap_or_default();
+        let selected = move || editor.selection.with(|set| set.contains(&index));
+        let (hidden, locked) = (annotation.hidden, annotation.locked);
+        view! {
+            <li class:selected=selected class:hidden=hidden class:locked=locked>
+                <span class="swatch" style:background=color></span>
+                <select class="relabel" aria-label="Label" on:change:target=move |ev| {
+                    if let Ok(id) = ev.target().value().parse() { relabel(index, id) }
+                }>
+                    {choices.into_iter().map(|l| {
+                        let current = l.id == annotation.label;
+                        view! { <option value=l.id.to_string() selected=current>{l.name}</option> }
+                    }).collect_view()}
+                </select>
+                <button class="pick" title=if hidden { "Hidden: show it to select it" } else { "Select (Shift adds)" } on:click=move |ev| {
+                    if hidden {
+                        return;
+                    }
+                    if ev.shift_key() {
+                        editor.selection.update(|set| if !set.remove(&index) { set.insert(index); });
+                    } else {
+                        editor.selection.set(BTreeSet::from([index]));
+                    }
+                }>
+                    <span class="detail">{describe(&annotation)}</span>
+                </button>
+                <button class="hide" aria-pressed=hidden.to_string() title=if hidden { "Show" } else { "Hide" }
+                    aria-label=format!("{} {name}", if hidden { "Show" } else { "Hide" })
+                    on:click=move |_| editor.set_flag(index, Some(!hidden), None)>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d=if hidden { EYE_OFF } else { EYE } /></svg>
+                </button>
+                <button class="lock" aria-pressed=locked.to_string() title=if locked { "Unlock" } else { "Lock" }
+                    aria-label=format!("{} {name}", if locked { "Unlock" } else { "Lock" })
+                    on:click=move |_| editor.set_flag(index, None, Some(!locked))>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d=if locked { LOCKED } else { UNLOCKED } /></svg>
+                </button>
+            </li>
+        }
+    };
+
     view! {
-        <Show when=move || !tags().is_empty() || editing.with(Option::is_some)>
-            <aside class="side-panel" aria-label="Tags and attributes">
+        <aside class="side-panel" aria-label="Objects, tags and attributes">
+                <section class="objects" class:collapsed=move || collapsed.get()>
+                    <h4>
+                        <button class="collapse" aria-expanded=move || (!collapsed.get()).to_string()
+                            on:click=move |_| collapsed.update(|c| *c = !*c)>
+                            <span aria-hidden="true">{move || if collapsed.get() { "▸" } else { "▾" }}</span>
+                            "Objects"
+                            <span class="muted mono">{move || objects().len()}</span>
+                        </button>
+                    </h4>
+                    <Show when=move || !collapsed.get()>
+                        <ul>
+                            {move || objects().into_iter().map(|(index, annotation)| row(index, annotation)).collect_view()}
+                        </ul>
+                        <Show when=move || objects().is_empty()>
+                            <p class="muted empty">"Nothing drawn yet."</p>
+                        </Show>
+                    </Show>
+                </section>
                 <Show when=move || !tags().is_empty()>
                     <section class="tags">
                         <h4>"Tags"</h4>
@@ -53,8 +129,33 @@ pub fn SidePanel(editor: Editor, labels: Vec<Label>) -> impl IntoView {
                     </section>
                 </Show>
                 {move || editing.get().map(|(index, label)| view! { <AttributeEditor editor=editor index=index label=label /> })}
-            </aside>
-        </Show>
+        </aside>
+    }
+}
+
+// Stroke icons (paths in a 24 × 24 box), as in the approved workspace design.
+const EYE: &str = "M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z M9 12a3 3 0 1 0 6 0a3 3 0 1 0-6 0";
+const EYE_OFF: &str = "M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z M4 4l16 16";
+const LOCKED: &str = "M5 11h14v10H5z M8 11V8a4 4 0 0 1 8 0v3";
+const UNLOCKED: &str = "M5 11h14v10H5z M8 11V8a4 4 0 0 1 7.5-2";
+
+/// What an object is, briefly: its shape with size or point count, and where it came from.
+fn describe(annotation: &Annotation) -> String {
+    let count = |n: usize, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
+    let shape = match &annotation.shape {
+        Shape::Rectangle(rect) => format!("rectangle {:.0} × {:.0}", rect.width(), rect.height()),
+        Shape::OrientedRectangle(rect) => format!("oriented rectangle {:.0} × {:.0}", rect.width, rect.height),
+        Shape::Polygon { points } => format!("polygon · {}", count(points.len(), "point")),
+        Shape::Polyline { points } => format!("polyline · {}", count(points.len(), "point")),
+        Shape::Points { points } => format!("points · {}", points.len()),
+        Shape::Circle { radius, .. } => format!("circle r {radius:.0}"),
+        Shape::Mask(mask) => format!("mask {} × {}", mask.width, mask.height),
+        Shape::Tag => "tag".to_owned(),
+    };
+    match (&annotation.source, annotation.confidence) {
+        (Some(source), Some(confidence)) => format!("{shape} · {source} {confidence:.2}"),
+        (Some(source), None) => format!("{shape} · {source}"),
+        _ => shape,
     }
 }
 

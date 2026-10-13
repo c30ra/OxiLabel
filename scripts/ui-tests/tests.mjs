@@ -782,6 +782,74 @@ tests.push({
   },
 });
 
+// Objects list, filmstrip and status (ticket 11).
+const objectRows = (t) => t.b.json(`[...document.querySelectorAll('.objects li')].map((li) => ({
+  label: li.querySelector('select.relabel').selectedOptions[0].textContent, detail: li.querySelector('.detail').textContent,
+  hidden: li.classList.contains('hidden'), locked: li.classList.contains('locked'), selected: li.classList.contains('selected') }))`);
+const clickIn = (t, selector) => t.b.eval(`document.querySelector(${JSON.stringify(selector)}).click(), 1`);
+
+tests.push({
+  name: 'the objects list selects, hides, locks and relabels annotations; locked shapes stay put',
+  async run(t) {
+    await t.api.setAnnotations(t.project, [box(1, 100, 100, 300, 300), box(2, 500, 100, 700, 300)]);
+    const w = await openWorkspace(t.b, t.base, t.project);
+    let rows = await objectRows(t);
+    equal(rows.map((r) => [r.label, r.detail]), [['crack', 'rectangle 200 × 200'], ['finger', 'rectangle 200 × 200']], 'rows');
+    await clickIn(t, '.objects li:nth-child(2) .pick');
+    equal((await w.state()).selected, [1], 'selected from the list');
+
+    await clickIn(t, '.objects li:nth-child(1) button.hide');
+    let list = await saved(t, (list) => list[0].hidden === true, 'the hidden flag');
+    await t.b.click(...w.at(200, 200));
+    equal((await w.state()).selected, [], 'a hidden shape is not picked');
+    await t.b.key('a');
+    equal((await w.state()).selected, [1], 'A selects the visible shapes only');
+    await t.b.key(KEY.escape);
+
+    await clickIn(t, '.objects li:nth-child(2) button.lock');
+    await saved(t, (list) => list[1].locked === true, 'the locked flag');
+    await t.b.click(...w.at(600, 200));
+    await t.b.drag(w.at(600, 200), w.at(650, 260));
+    await t.b.key(KEY.delete);
+    await t.b.sleep(1500);
+    list = (await t.api.annotations(t.project)).annotations;
+    equal([list.length, corners(list[1])], [2, [500, 100, 700, 300]], 'the locked shape neither moved nor went');
+    if (!/locked/i.test((await w.state()).notice ?? '')) throw new Error(`notice: ${(await w.state()).notice}`);
+
+    await t.b.eval(`(() => { const s = document.querySelector('.objects li:nth-child(2) select.relabel'); s.value = '4'; s.dispatchEvent(new Event('change', { bubbles: true })); return 1; })()`);
+    await saved(t, (list) => list[1].label === 4, 'the relabel');
+    rows = await objectRows(t);
+    equal(rows.map((r) => [r.label, r.hidden, r.locked]), [['crack', true, false], ['surface', false, true]], 'rows after');
+  },
+}, {
+  name: 'the filmstrip and j, k, gg and G move through the images; Ctrl+Enter marks one annotated and opens the next',
+  async run(t) {
+    // Different sizes, so their contents differ (duplicates are skipped on import).
+    ['a', 'b', 'c', 'd', 'e'].forEach((name, i) => writeTestImage(join(t.work, 'images', 'strip', `${name}.png`), 120 + i, 80));
+    await t.api.call('POST', `/api/projects/${t.project.id}/imports`, { paths: ['strip'] });
+    const ids = await t.api.call('GET', `/api/projects/${t.project.id}/image-ids`);
+    equal(ids.length, 6, 'images (strip/a–e and test.png)');
+    const at = async () => Number(/\/images\/(\d+)$/.exec(await t.b.eval('location.pathname'))?.[1]);
+    const waitAt = (index) => t.b.waitFor(async () => (await at()) === ids[index] && (await t.b.eval(`document.querySelector('.image-position')?.textContent`)) === `${index + 1} / 6`, `image ${index + 1}`);
+    await openWorkspace(t.b, t.base, { ...t.project, image: ids[0] }, [120, 80]);
+    await waitAt(0);
+    await t.b.waitFor(() => t.b.eval(`document.querySelectorAll('.filmstrip a.thumb').length === 6`), 'six thumbnails');
+    await t.b.key('j'); await waitAt(1);
+    await t.b.key('k'); await waitAt(0);
+    await t.b.key('G'); await waitAt(5);
+    await t.b.key('g'); await t.b.key('g'); await waitAt(0);
+    await clickIn(t, `.filmstrip a.thumb[href$="/images/${ids[2]}"]`); await waitAt(2);
+
+    await t.b.key(KEY.enter, [KEY.ctrl]);
+    await waitAt(3);
+    const image = await t.api.call('GET', `/api/projects/${t.project.id}/images/${ids[2]}`);
+    equal(image.annotated, true, 'marked annotated');
+    await t.b.waitFor(() => t.b.eval(`document.querySelector('.filmstrip a.thumb[href$="/images/${ids[2]}"]')?.classList.contains('annotated')`), 'the filmstrip dot');
+    await clickIn(t, 'button.mark-annotated');
+    await t.b.waitFor(async () => (await t.api.call('GET', `/api/projects/${t.project.id}/images/${ids[3]}`)).annotated, 'the button marking the current image');
+  },
+});
+
 // Creating a project (design A: a dialog, then a get-started checklist).
 tests.push({
   name: 'New project opens a dialog that copies labels and imports a folder, then opens the project',

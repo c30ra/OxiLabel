@@ -300,3 +300,15 @@ async fn an_image_has_each_tag_once() {
     let (status, body) = save(&app, project, image, 0, json!([tag, tag])).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 }
+
+#[tokio::test]
+async fn hidden_and_locked_flags_are_saved_with_the_annotations() {
+    let app = test_app().await;
+    let (project, image) = setup(&app).await;
+    let mut annotation = rectangle(1, (1.0, 1.0), (5.0, 5.0));
+    annotation["hidden"] = json!(true);
+    annotation["locked"] = json!(true);
+    let plain = rectangle(1, (6.0, 6.0), (9.0, 9.0));
+    save(&app, project, image, 0, json!([annotation, plain])).await;
+    assert_eq!(load(&app, project, image).await["annotations"], json!([annotation, plain]));
+}

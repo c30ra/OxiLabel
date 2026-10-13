@@ -222,6 +222,10 @@ impl Stroke {
         let Some(bounds) = region.bounds() else { return stroke };
         for (index, annotation) in annotations.iter().enumerate() {
             let Shape::Mask(mask) = &annotation.shape else { continue };
+            // Locked and hidden masks are left alone.
+            if annotation.locked || annotation.hidden {
+                continue;
+            }
             if mask.area().intersection(&bounds).is_empty() {
                 continue;
             }
@@ -269,6 +273,10 @@ impl Stroke {
         self.painted.merge(&dab, self.image);
         for (index, annotation) in annotations.iter().enumerate() {
             let Shape::Mask(mask) = &annotation.shape else { continue };
+            // Locked and hidden masks are left alone.
+            if annotation.locked || annotation.hidden {
+                continue;
+            }
             if annotation.label != self.label || self.merged.contains(&index) || mask.area().intersection(&covered).is_empty() {
                 continue;
             }
@@ -289,6 +297,10 @@ impl Stroke {
         let (dab, covered) = self.dab(from, to);
         for (index, annotation) in annotations.iter().enumerate() {
             let Shape::Mask(mask) = &annotation.shape else { continue };
+            // Locked and hidden masks are left alone.
+            if annotation.locked || annotation.hidden {
+                continue;
+            }
             if mask.area().intersection(&covered).is_empty() {
                 continue;
             }

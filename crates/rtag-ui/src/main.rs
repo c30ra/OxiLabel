@@ -2,6 +2,7 @@ mod analysis;
 mod annotate;
 mod api;
 mod draw;
+mod filmstrip;
 mod masks;
 mod pages;
 mod pie;

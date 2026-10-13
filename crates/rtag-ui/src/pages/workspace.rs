@@ -11,6 +11,7 @@ use rtag_core::{
 
 use crate::{
     annotate::{AnnotationLayer, Editor, Tool},
+    filmstrip::{Filmstrip, ImageNav, ImagePosition},
     api,
     side_panel::SidePanel,
     tool_options::ToolOptions,
@@ -228,6 +229,7 @@ fn Workspace(
         }
     };
     let (image_id, image_size) = (image.id, (image.width, image.height));
+    let nav = ImageNav::new(project.id, &image);
 
     view! {
         <div class="workspace">
@@ -241,6 +243,7 @@ fn Workspace(
                     <span class="current mono" title=image.path.clone()>{name}</span>
                 </nav>
                 <div class="actions">
+                    <ImagePosition nav=nav editor=editor />
                     <SaveIndicator state=state on_retry=save on_reload=reload />
                     <LabelPicker labels=picker_labels editor=editor />
                     <button class="zoom mono" title="Zoom: click for 100% / fit (Home fits, + and − zoom)"
@@ -256,6 +259,7 @@ fn Workspace(
                 </TileViewer>
                 <SidePanel editor=editor labels=labels />
             </div>
+            <Filmstrip nav=nav editor=editor />
         </div>
     }
 }

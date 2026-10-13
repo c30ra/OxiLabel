@@ -246,26 +246,36 @@ pub struct Annotation {
     /// Values of the label's attributes; missing ones count as their defaults.
     #[serde(default, skip_serializing_if = "Attributes::is_empty")]
     pub attributes: Attributes,
+    /// Not drawn and not picked in the editor (a view aid; exports ignore it).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hidden: bool,
+    /// Cannot be moved, reshaped, painted over or deleted until unlocked.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub locked: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 impl Annotation {
     pub fn manual(label: i64, shape: Shape) -> Self {
-        Annotation { label, shape, source: None, confidence: None, attributes: Attributes::new() }
+        Annotation { label, shape, source: None, confidence: None, attributes: Attributes::new(), hidden: false, locked: false }
     }
 }
 
-/// Index of the topmost (last drawn) annotation under `point`, if any.
+/// Index of the topmost (last drawn) visible annotation under `point`, if any.
 pub fn topmost_at(annotations: &[Annotation], point: Point, margin: f64) -> Option<usize> {
-    annotations.iter().rposition(|annotation| annotation.shape.contains(point, margin))
+    annotations.iter().rposition(|annotation| !annotation.hidden && annotation.shape.contains(point, margin))
 }
 
-/// Indices of the annotations whose bounds overlap `region` (box selection); tags are not on
-/// the image, so never.
+/// Indices of the visible annotations whose bounds overlap `region` (box selection); tags are
+/// not on the image, so never.
 pub fn overlapping(annotations: &[Annotation], region: Rect) -> Vec<usize> {
     annotations
         .iter()
         .enumerate()
-        .filter(|(_, annotation)| !annotation.shape.is_tag() && annotation.shape.bounds().intersects(&region))
+        .filter(|(_, annotation)| !annotation.hidden && !annotation.shape.is_tag() && annotation.shape.bounds().intersects(&region))
         .map(|(index, _)| index)
         .collect()
 }
@@ -445,6 +455,20 @@ mod tests {
         let annotations = [Annotation::manual(1, Shape::Tag), boxed(2, (0.0, 0.0), (10.0, 10.0))];
         assert_eq!(overlapping(&annotations, Rect::new(-5.0, -5.0, 5.0, 5.0)), vec![1], "box selection skips tags");
         assert_eq!(topmost_at(&annotations, Point::new(0.0, 0.0), 1.0), Some(1));
+    }
+
+    #[test]
+    fn hidden_annotations_are_not_picked_and_the_flags_serialize_only_when_set() {
+        let mut hidden = boxed(1, (0.0, 0.0), (100.0, 100.0));
+        hidden.hidden = true;
+        let annotations = [boxed(2, (0.0, 0.0), (50.0, 50.0)), hidden];
+        assert_eq!(topmost_at(&annotations, Point::new(10.0, 10.0), 0.0), Some(0), "the hidden one on top is skipped");
+        assert_eq!(overlapping(&annotations, Rect::new(0.0, 0.0, 200.0, 200.0)), vec![0]);
+        let mut locked = boxed(1, (0.0, 0.0), (1.0, 1.0));
+        locked.locked = true;
+        let json = serde_json::to_value(&locked).unwrap();
+        assert_eq!((json["locked"].clone(), json.get("hidden")), (serde_json::json!(true), None));
+        assert_eq!(serde_json::from_value::<Annotation>(json).unwrap(), locked);
     }
 
     #[test]

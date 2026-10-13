@@ -463,3 +463,39 @@ async fn a_folders_images_can_be_counted_before_importing() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+
+#[tokio::test]
+async fn an_images_status_can_be_set_and_shows_in_the_list() {
+    let app = test_app().await;
+    let project = new_project(&app).await;
+    write_png(app.images.path(), "a.png", 4, 4, 1);
+    import(&app, project, "a.png").await;
+    let (_, page) = call(&app, Method::GET, &format!("/api/projects/{project}/images"), None).await;
+    let id = page["images"][0]["id"].as_i64().unwrap();
+    let status = format!("/api/projects/{project}/images/{id}/status");
+    let (code, image) = call(&app, Method::PUT, &status, Some(json!({"annotated": true}))).await;
+    assert_eq!((code, image["annotated"].clone()), (StatusCode::OK, json!(true)));
+    let (_, page) = call(&app, Method::GET, &format!("/api/projects/{project}/images"), None).await;
+    assert_eq!(page["images"][0]["annotated"], true);
+    let (_, image) = call(&app, Method::PUT, &status, Some(json!({"annotated": false}))).await;
+    assert_eq!(image["annotated"], false);
+    let (code, _) = call(&app, Method::PUT, &format!("/api/projects/{project}/images/9999/status"), Some(json!({"annotated": true}))).await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn an_images_neighbours_come_in_path_order_with_its_position() {
+    let app = test_app().await;
+    let project = new_project(&app).await;
+    for (i, name) in ["a", "b", "c", "d", "e"].iter().enumerate() {
+        write_png(app.images.path(), &format!("set/{name}.png"), 4, 4, i as u8);
+    }
+    import(&app, project, "set").await;
+    let (_, page) = call(&app, Method::GET, &format!("/api/projects/{project}/images"), None).await;
+    let ids: Vec<i64> = page["images"].as_array().unwrap().iter().map(|i| i["id"].as_i64().unwrap()).collect();
+    let (code, around) = call(&app, Method::GET, &format!("/api/projects/{project}/images/{}/neighbours?count=2", ids[1]), None).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!((around["position"].clone(), around["total"].clone()), (json!(2), json!(5)), "1-based position");
+    let shown: Vec<i64> = around["images"].as_array().unwrap().iter().map(|i| i["id"].as_i64().unwrap()).collect();
+    assert_eq!(shown, ids[0..4], "up to two before and two after, the image itself in between");
+}

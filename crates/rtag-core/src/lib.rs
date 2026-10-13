@@ -236,6 +236,20 @@ impl ImageFilter {
     }
 }
 
+/// An image's place in its project (1-based, by path) and the images around it, itself included.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageNeighbours {
+    pub position: i64,
+    pub total: i64,
+    pub images: Vec<Image>,
+}
+
+/// Sets whether an image counts as annotated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageStatus {
+    pub annotated: bool,
+}
+
 /// One page of a project's images, ordered by path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImagePage {

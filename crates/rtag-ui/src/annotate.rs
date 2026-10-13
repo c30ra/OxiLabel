@@ -192,6 +192,8 @@ pub struct Editor {
     pub last: RwSignal<Option<(Tool, i64, Modes)>>,
     /// The shape types some label of the project allows; tools for others are disabled.
     pub usable_shapes: RwSignal<Vec<ShapeType>>,
+    /// Whether a shape, stroke or other gesture is in progress (moving to another image waits).
+    pub busy: RwSignal<bool>,
 }
 
 /// The tools' drawing modes, remembered with the last tool.
@@ -273,6 +275,7 @@ impl Editor {
             edge_offset: RwSignal::new(0.0),
             last: RwSignal::new(None),
             usable_shapes: RwSignal::new(ShapeType::ALL.to_vec()),
+            busy: RwSignal::new(false),
         }
     }
 
@@ -332,20 +335,40 @@ impl Editor {
         self.apply(Edit::Remove { index, annotation });
     }
 
-    /// Removes every selected annotation in one undo step.
+    /// Removes every selected annotation that is not locked, in one undo step.
     pub fn delete_selected(&self) {
         let selection = self.selection.get_untracked();
+        let locked = selection.iter().filter(|&&index| self.annotation(index).is_some_and(|a| a.locked)).count();
+        if locked > 0 {
+            let (shapes, verb) = if locked == 1 { ("shape", "stays") } else { ("shapes", "stay") };
+            self.notice.set(Some(format!("{locked} locked {shapes} {verb}: unlock them in the objects list first.")));
+        }
         // Highest index first, so the others keep their positions while removing.
         let removals: Vec<Edit> = self.annotations.with_untracked(|list| {
             selection
                 .iter()
                 .rev()
-                .filter_map(|&index| list.get(index).map(|annotation| Edit::Remove { index, annotation: annotation.clone() }))
+                .filter_map(|&index| list.get(index).filter(|a| !a.locked && !a.hidden).map(|annotation| Edit::Remove { index, annotation: annotation.clone() }))
                 .collect()
         });
+        if removals.is_empty() {
+            return;
+        }
         self.selection.set(BTreeSet::new());
-        if !removals.is_empty() {
-            self.apply(Edit::Batch(removals));
+        self.apply(Edit::Batch(removals));
+    }
+
+    /// Sets annotation `index`'s hidden or locked flag (one undo step); hiding unselects it.
+    pub fn set_flag(&self, index: usize, hidden: Option<bool>, locked: Option<bool>) {
+        let Some(before) = self.annotation(index) else { return };
+        let after = Annotation { hidden: hidden.unwrap_or(before.hidden), locked: locked.unwrap_or(before.locked), ..before.clone() };
+        if after.hidden {
+            self.selection.update(|set| {
+                set.remove(&index);
+            });
+        }
+        if after != before {
+            self.apply(Edit::Replace { index, before, after });
         }
     }
 
@@ -357,7 +380,8 @@ impl Editor {
             selection
                 .iter()
                 .filter_map(|&index| {
-                    let before = list.get(index)?.clone();
+                    // Hidden shapes are left alone (they cannot be selected on purpose).
+                    let before = list.get(index).filter(|a| !a.hidden)?.clone();
                     let after = change(&before);
                     (after != before).then_some(Edit::Replace { index, before, after })
                 })
@@ -472,14 +496,14 @@ pub fn AnnotationLayer(
         editor.annotations.with_untracked(|list| {
             selection
                 .iter()
-                .filter_map(|&index| list.get(index).filter(|a| !a.shape.is_tag()).map(|a| a.shape.bounds()))
+                .filter_map(|&index| list.get(index).filter(|a| !a.shape.is_tag() && !a.locked && !a.hidden).map(|a| a.shape.bounds()))
                 .reduce(|a, b| a.union(&b))
         })
     };
     // The handle of the single selected shape under `point`, if any.
     let grip_at = move |point: Point, scale: f64| -> Option<(usize, Grip)> {
         let index = editor.single_selection()?;
-        let shape = editor.annotation(index)?.shape;
+        let shape = editor.annotation(index).filter(|a| !a.locked && !a.hidden)?.shape;
         let reach = HANDLE_REACH / scale;
         let grip = match &shape {
             Shape::Rectangle(rect) => rect.handle_at(point, reach).map(|handle| Grip::Resize(handle, *rect)),
@@ -1549,7 +1573,16 @@ pub fn AnnotationLayer(
             Gesture::Moving { dx, dy, .. } => {
                 gesture.set(Gesture::Idle);
                 if dx != 0.0 || dy != 0.0 {
-                    editor.change_selected(|annotation| Annotation { shape: annotation.shape.translated(dx, dy), ..annotation.clone() });
+                    let locked = editor.selection.with_untracked(|set| set.iter().any(|&i| editor.annotation(i).is_some_and(|a| a.locked)));
+                    if locked {
+                        editor.notice.set(Some("Locked shapes stay where they are: unlock them in the objects list first.".into()));
+                    }
+                    editor.change_selected(|annotation| {
+                        if annotation.locked {
+                            return annotation.clone();
+                        }
+                        Annotation { shape: annotation.shape.translated(dx, dy), ..annotation.clone() }
+                    });
                 }
             }
             Gesture::Resizing { index, before, current: after, .. } => {
@@ -1643,9 +1676,10 @@ pub fn AnnotationLayer(
             "y" | "Y" if command => editor.redo(),
             // Blender: A selects everything, Alt+A nothing.
             "a" | "A" if ev.alt_key() => editor.selection.set(BTreeSet::new()),
+            // Everything visible: hidden shapes are not picked.
             "a" | "A" if !command => {
-                let count = editor.annotations.with_untracked(Vec::len);
-                editor.selection.set((0..count).collect());
+                let visible = editor.annotations.with_untracked(|list| list.iter().enumerate().filter(|(_, a)| !a.hidden).map(|(i, _)| i).collect());
+                editor.selection.set(visible);
             }
             _ if command || ev.alt_key() => return,
             "Enter" if drawing_path => finish_path(),
@@ -1743,8 +1777,8 @@ pub fn AnnotationLayer(
         let single = editor.single_selection();
         editor.annotations.with_untracked(|list| {
             for (index, annotation) in list.iter().enumerate() {
-                // Tags are chips over the image, not drawn on it.
-                if annotation.shape.is_tag() {
+                // Tags are chips over the image, not drawn on it; hidden shapes are not drawn.
+                if annotation.shape.is_tag() || annotation.hidden {
                     continue;
                 }
                 let selected = selection.contains(&index);
@@ -1754,7 +1788,7 @@ pub fn AnnotationLayer(
                     Gesture::Vertex { index: i, current, .. } if *i == index => current.clone(),
                     Gesture::Rotating { index: i, current, .. } if *i == index => Shape::OrientedRectangle(*current),
                     Gesture::Radius { index: i, centre, radius } if *i == index => Shape::Circle { centre: *centre, radius: *radius },
-                    Gesture::Moving { dx, dy, .. } if selected => annotation.shape.translated(*dx, *dy),
+                    Gesture::Moving { dx, dy, .. } if selected && !annotation.locked => annotation.shape.translated(*dx, *dy),
                     _ => annotation.shape.clone(),
                 };
                 let color = color_of(annotation.label);
@@ -1850,6 +1884,7 @@ pub fn AnnotationLayer(
         hover.track();
         draw();
     });
+    Effect::new(move |_| editor.busy.set(gesture.with(|g| *g != Gesture::Idle)));
     // Drop a half-drawn shape when the tool or a drawing mode changes.
     Effect::new(move |_| {
         editor.tool.track();

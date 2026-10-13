@@ -34,7 +34,7 @@ async fn load_annotations(
 ) -> Result<Json<ImageAnnotations>, ApiError> {
     let mut conn = pool.acquire().await?;
     let (_, _, version) = image_in_project(&mut conn, project, image).await?;
-    let rows = sqlx::query("SELECT label_id, shape, source, confidence, attributes FROM annotations WHERE image_id = ? ORDER BY position")
+    let rows = sqlx::query("SELECT label_id, shape, source, confidence, attributes, hidden, locked FROM annotations WHERE image_id = ? ORDER BY position")
         .bind(image)
         .fetch_all(&mut *conn)
         .await?;
@@ -42,13 +42,21 @@ async fn load_annotations(
     Ok(Json(ImageAnnotations { version, annotations }))
 }
 
-/// Reads an annotation from a row with `label_id`, `shape`, `source`, `confidence` and
-/// `attributes`.
+/// Reads an annotation from a row with `label_id`, `shape`, `source`, `confidence`,
+/// `attributes`, `hidden` and `locked`.
 pub(crate) fn annotation_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Annotation, ApiError> {
     let unreadable = |what: &str, err: serde_json::Error| ApiError::Internal(format!("stored {what} are unreadable: {err}"));
     let shape = serde_json::from_str(row.get("shape")).map_err(|err| unreadable("shapes", err))?;
     let attributes = serde_json::from_str(row.get("attributes")).map_err(|err| unreadable("attributes", err))?;
-    Ok(Annotation { label: row.get("label_id"), shape, source: row.get("source"), confidence: row.get("confidence"), attributes })
+    Ok(Annotation {
+        label: row.get("label_id"),
+        shape,
+        source: row.get("source"),
+        confidence: row.get("confidence"),
+        attributes,
+        hidden: row.get("hidden"),
+        locked: row.get("locked"),
+    })
 }
 
 async fn save_annotations(
@@ -97,8 +105,8 @@ async fn save_annotations(
     for (position, annotation) in request.annotations.iter().enumerate() {
         let shape = serde_json::to_string(&annotation.shape).expect("shapes serialize");
         sqlx::query(
-            "INSERT INTO annotations (image_id, project_id, label_id, position, shape, source, confidence, attributes) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO annotations (image_id, project_id, label_id, position, shape, source, confidence, attributes, hidden, locked) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(image)
         .bind(project)
@@ -108,6 +116,8 @@ async fn save_annotations(
         .bind(&annotation.source)
         .bind(annotation.confidence)
         .bind(serde_json::to_string(&annotation.attributes).expect("attributes serialize"))
+        .bind(annotation.hidden)
+        .bind(annotation.locked)
         .execute(&mut *tx)
         .await?;
     }

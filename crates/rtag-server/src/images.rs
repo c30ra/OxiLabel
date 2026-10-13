@@ -8,10 +8,10 @@ use std::{
 use axum::{
     Json, Router,
     extract::{Path as UrlPath, Query, State},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use rtag_core::{
-    BrowseEntry, BrowseListing, EntryKind, FolderCount, Image, ImageFilter, ImagePage, ImportFailure, ImportReport, ImportRequest,
+    BrowseEntry, BrowseListing, EntryKind, FolderCount, Image, ImageFilter, ImageNeighbours, ImagePage, ImageStatus, ImportFailure, ImportReport, ImportRequest,
     RemovalReport, RemovalRequest,
 };
 use serde::Deserialize;
@@ -33,6 +33,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/projects/{project}/imports", post(import_selection))
         .route("/api/projects/{project}/images", get(list_images))
         .route("/api/projects/{project}/images/{image}", get(get_image))
+        .route("/api/projects/{project}/images/{image}/status", put(set_status))
+        .route("/api/projects/{project}/images/{image}/neighbours", get(neighbours))
         .route("/api/projects/{project}/image-ids", get(list_image_ids))
         .route("/api/projects/{project}/image-removals", post(remove_images))
 }
@@ -521,6 +523,68 @@ async fn get_image(
         .await?
         .ok_or(ApiError::NotFound)?;
     Ok(Json(image_from_row(&row)))
+}
+
+/// Marks an image annotated or not annotated.
+async fn set_status(
+    State(pool): State<SqlitePool>,
+    UrlPath((project, image)): UrlPath<(i64, i64)>,
+    Json(status): Json<ImageStatus>,
+) -> Result<Json<Image>, ApiError> {
+    let updated = sqlx::query("UPDATE images SET annotated = ? WHERE id = ? AND project_id = ?")
+        .bind(status.annotated)
+        .bind(image)
+        .bind(project)
+        .execute(&pool)
+        .await?;
+    if updated.rows_affected() == 0 {
+        return Err(ApiError::NotFound);
+    }
+    get_image(State(pool), UrlPath((project, image))).await
+}
+
+#[derive(Deserialize)]
+struct NeighboursQuery {
+    /// How many images to give on each side.
+    #[serde(default = "default_neighbours")]
+    count: i64,
+}
+
+fn default_neighbours() -> i64 {
+    6
+}
+
+/// An image's place in its project (by path) and up to `count` images on each side, for the
+/// filmstrip.
+async fn neighbours(
+    State(pool): State<SqlitePool>,
+    UrlPath((project, image)): UrlPath<(i64, i64)>,
+    Query(query): Query<NeighboursQuery>,
+) -> Result<Json<ImageNeighbours>, ApiError> {
+    let path: String = sqlx::query("SELECT path FROM images WHERE id = ? AND project_id = ?")
+        .bind(image)
+        .bind(project)
+        .fetch_optional(&pool)
+        .await?
+        .ok_or(ApiError::NotFound)?
+        .get("path");
+    let count = query.count.clamp(0, 50);
+    let before: i64 = sqlx::query("SELECT COUNT(*) AS n FROM images WHERE project_id = ? AND path < ?")
+        .bind(project)
+        .bind(&path)
+        .fetch_one(&pool)
+        .await?
+        .get("n");
+    let total: i64 = sqlx::query("SELECT COUNT(*) AS n FROM images WHERE project_id = ?").bind(project).fetch_one(&pool).await?.get("n");
+    let rows = sqlx::query(&format!("{IMAGE_COLUMNS} WHERE project_id = ? ORDER BY path LIMIT ? OFFSET ?"))
+        .bind(project)
+        .bind(2 * count + 1)
+        .bind((before - count).max(0))
+        .fetch_all(&pool)
+        .await?;
+    // When fewer than `count` images come before, the window starts at the first and is shorter.
+    let images: Vec<Image> = rows.iter().map(image_from_row).take((count + 1 + before.min(count)) as usize).collect();
+    Ok(Json(ImageNeighbours { position: before + 1, total, images }))
 }
 
 /// Ids of every image matching the filter, in path order; used to select all of them at once.
