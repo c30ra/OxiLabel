@@ -3,7 +3,7 @@
 
 use leptos::{prelude::*, task::spawn_local};
 use leptos_router::{components::A, hooks::use_navigate};
-use rtag_core::{FolderCount, ImportReport, ImportRequest, NewProject, Project, ProjectSummary};
+use rtag_core::{FolderCount, ImportReport, ImportRequest, Label, LabelDefinition, NewProject, Project, ProjectSummary, ShapeType};
 
 use crate::api;
 
@@ -110,6 +110,16 @@ fn NewProjectDialog(sources: Vec<ProjectSummary>, on_close: impl Fn() + Copy + S
     let with_labels: Vec<ProjectSummary> = sources.into_iter().filter(|p| !p.label_colors.is_empty()).collect();
     let copy_from = RwSignal::new(with_labels.last().map(|p| p.id));
     let copy = RwSignal::new(copy_from.get_untracked().is_some());
+    // Otherwise the labels typed here (names; colors and keys are given in order).
+    let new_labels = RwSignal::new(Vec::<String>::new());
+    let label_draft = RwSignal::new(String::new());
+    let add_label = move || {
+        let name = label_draft.get_untracked().trim().to_owned();
+        if !name.is_empty() && !new_labels.with_untracked(|list| list.contains(&name)) {
+            new_labels.update(|list| list.push(name));
+        }
+        label_draft.set(String::new());
+    };
     let pick = RwSignal::new_local(None::<Pick>);
     let busy = RwSignal::new(None::<String>);
     let error = RwSignal::new(None::<String>);
@@ -175,6 +185,11 @@ fn NewProjectDialog(sources: Vec<ProjectSummary>, on_close: impl Fn() + Copy + S
             return;
         }
         let picked = pick.get();
+        let labels: Vec<LabelDefinition> = if copy.get() {
+            Vec::new()
+        } else {
+            new_labels.get().into_iter().enumerate().map(|(index, name)| new_label(index, name)).collect()
+        };
         busy.set(Some("Creating…".into()));
         spawn_local(async move {
             let project = match api::post::<_, Project>("/api/projects", &new).await {
@@ -184,6 +199,12 @@ fn NewProjectDialog(sources: Vec<ProjectSummary>, on_close: impl Fn() + Copy + S
                     return error.set(Some(message));
                 }
             };
+            for definition in &labels {
+                if let Err(message) = api::post::<_, Label>(&format!("/api/projects/{}/labels", project.id), definition).await {
+                    busy.set(None);
+                    return error.set(Some(format!("“{}” was created, but not its label “{}”: {message}", project.name, definition.name)));
+                }
+            }
             match picked {
                 Some(Pick::Host(path)) => {
                     busy.set(Some("Importing…".into()));
@@ -255,7 +276,7 @@ fn NewProjectDialog(sources: Vec<ProjectSummary>, on_close: impl Fn() + Copy + S
                     <fieldset class="field">
                         <legend>"Labels"</legend>
                         <label class="choice" class:chosen=move || copy.get() class:disabled=with_labels.is_empty()>
-                            <input type="radio" name="labels" prop:checked=move || copy.get() disabled=with_labels.is_empty()
+                            <input type="radio" name="labels" value="copy" prop:checked=move || copy.get() disabled=with_labels.is_empty()
                                 on:change=move |_| copy.set(true) />
                             <span class="grow">"Copy from a project"</span>
                             <select class="copy-from" disabled=move || !copy.get()
@@ -267,11 +288,38 @@ fn NewProjectDialog(sources: Vec<ProjectSummary>, on_close: impl Fn() + Copy + S
                                 }).collect_view()}
                             </select>
                         </label>
-                        <label class="choice" class:chosen=move || !copy.get()>
-                            <input type="radio" name="labels" prop:checked=move || !copy.get() on:change=move |_| copy.set(false) />
-                            <span>"Start empty"</span>
-                            <span class="muted">"— add labels after"</span>
-                        </label>
+                        <div class="choice new-labels" class:chosen=move || !copy.get()>
+                            <label class="choice-head">
+                                <input type="radio" name="labels" value="new" prop:checked=move || !copy.get() on:change=move |_| copy.set(false) />
+                                <span>"New labels"</span>
+                                <span class="muted">"— or add them later"</span>
+                            </label>
+                            <Show when=move || !copy.get()>
+                                <ul>
+                                    {move || new_labels.get().into_iter().enumerate().map(|(index, name)| {
+                                        let (color, key) = (LABEL_COLORS[index % LABEL_COLORS.len()], hotkey(index));
+                                        let gone = name.clone();
+                                        view! {
+                                            <li>
+                                                <span class="swatch" style:background=color></span>
+                                                <span class="name">{name}</span>
+                                                {key.map(|key| view! { <kbd>{key}</kbd> })}
+                                                <button type="button" aria-label=format!("Remove {gone}")
+                                                    on:click=move |_| new_labels.update(|list| list.retain(|n| *n != gone))>"×"</button>
+                                            </li>
+                                        }
+                                    }).collect_view()}
+                                </ul>
+                                <input class="new-label" placeholder="Label name, Enter adds" prop:value=label_draft
+                                    on:input:target=move |ev| label_draft.set(ev.target().value())
+                                    on:keydown=move |ev| if ev.key() == "Enter" {
+                                        // Enter adds the label rather than submitting the form.
+                                        ev.prevent_default();
+                                        add_label();
+                                    } />
+                                <span class="muted hint">"Every shape is allowed; shapes, attributes and the ignore label are set on the Labels tab."</span>
+                            </Show>
+                        </div>
                     </fieldset>
 
                     <div class="field">
@@ -321,4 +369,27 @@ fn relative_path(file: &web_sys::File) -> String {
     let path = web_sys::js_sys::Reflect::get(file, &"webkitRelativePath".into()).ok().and_then(|path| path.as_string());
     // Empty for files given without their folder.
     path.filter(|path| !path.is_empty()).unwrap_or_else(|| file.name())
+}
+
+/// Colors new labels get in turn.
+const LABEL_COLORS: [&str; 10] = ["#e74c3c", "#3498db", "#f1c40f", "#9b59b6", "#1abc9c", "#e67e22", "#4fb286", "#ff77aa", "#34495e", "#7f8c8d"];
+
+/// The number key of the `index`th new label: 1–9, then 0, then none.
+fn hotkey(index: usize) -> Option<String> {
+    match index {
+        0..=8 => Some((index + 1).to_string()),
+        9 => Some("0".to_owned()),
+        _ => None,
+    }
+}
+
+fn new_label(index: usize, name: String) -> LabelDefinition {
+    LabelDefinition {
+        name,
+        color: LABEL_COLORS[index % LABEL_COLORS.len()].to_owned(),
+        hotkey: hotkey(index),
+        shape_types: ShapeType::ALL.to_vec(),
+        ignore: false,
+        attributes: Vec::new(),
+    }
 }

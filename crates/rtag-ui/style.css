@@ -291,3 +291,10 @@ a.button.primary { background: var(--accent); border-color: var(--accent); color
 .get-started li.done .mark { border-color: #4FB286; background: #4FB286; color: #0B1F15; }
 .get-started .text { flex: 1; display: flex; flex-direction: column; gap: 4px; }
 .get-started .swatches { display: flex; align-items: center; gap: 4px; font-size: 13px; }
+.new-project-dialog .new-labels { flex-direction: column; align-items: stretch; gap: 8px; }
+.new-project-dialog .choice-head { display: flex; align-items: center; gap: 10px; }
+.new-project-dialog .new-labels ul { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.new-project-dialog .new-labels li { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 4px 0 10px; border: 1px solid var(--border); border-radius: 14px; }
+.new-project-dialog .new-labels li .swatch { width: 10px; height: 10px; border-radius: 2px; }
+.new-project-dialog .new-labels li button { border: 0; background: none; padding: 0 6px; color: var(--muted); }
+.new-project-dialog .new-labels .hint { font-size: 12px; }

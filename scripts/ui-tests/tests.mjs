@@ -830,6 +830,38 @@ tests.push({
   },
 });
 
+tests.push({
+  name: 'the New project dialog can create labels: Enter adds one with the next color and key',
+  async run(t) {
+    await t.b.goto(`${t.base}/`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('button.new-project')`), 'the projects page');
+    await t.b.eval(`document.querySelector('button.new-project').click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('[role=dialog] input.project-name')`), 'the dialog');
+    const typeInto = async (selector, text) => {
+      const box = await t.b.json(`document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect()`);
+      await t.b.click(box.x + 20, box.y + box.height / 2);
+      for (const ch of text) await t.b.key(ch);
+    };
+    await typeInto('[role=dialog] input.project-name', 'Fresh');
+    await t.b.eval(`document.querySelector('[role=dialog] input[value=new]').click(), 1`);
+    for (const name of ['crack', 'chip', 'spare']) {
+      await typeInto('[role=dialog] input.new-label', name);
+      await t.b.key(KEY.enter);
+    }
+    await t.b.eval(`[...document.querySelectorAll('[role=dialog] .new-labels li')].find((li) => li.textContent.includes('spare')).querySelector('button').click(), 1`);
+    equal(await t.b.json(`[...document.querySelectorAll('[role=dialog] .new-labels li .name')].map((n) => n.textContent)`), ['crack', 'chip'], 'labels in the dialog');
+    equal(await t.b.eval(`location.pathname`), '/', 'Enter added labels, it did not create the project');
+    await t.b.eval(`document.querySelector('[role=dialog] button.primary').click(), 1`);
+    const id = await t.b.waitFor(async () => {
+      const match = /^\/projects\/(\d+)$/.exec(await t.b.eval('location.pathname'));
+      return match && Number(match[1]);
+    }, 'the new project to open');
+    const labels = await t.api.call('GET', `/api/projects/${id}/labels`);
+    equal(labels.map((l) => [l.name, l.hotkey]), [['crack', '1'], ['chip', '2']], 'created labels');
+    if (labels[0].color === labels[1].color) throw new Error('the labels got the same color');
+  },
+});
+
 // Images from any host folder, or uploaded (ADR 0003).
 const answerFolderDialog = (t, answer) => writeFileSync(join(t.work, 'folder-dialog.txt'), answer);
 const newProjectNamed = async (t, name) => {
