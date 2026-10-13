@@ -124,7 +124,7 @@ Architecture
 - The server is the single source of truth and serves the web UI. The browser is the only client in v1; no Tauri.
 - Python GPU worker runs next to the server in the same image and is called over local HTTP/JSON; recorded in ADR 0001. Worker contract: list models, run a model on image ids with parameters, report progress, return Pre-annotations (shape, label mapping, confidence, source) in original image coordinates.
 - SQLite is the database, with queries kept portable. Mask annotations are stored as RLE in original image coordinates.
-- Images are referenced from mounted paths (not copied); the server records dimensions and content hash on import.
+- Images are referenced where they are: under the mounted image root, or (when the browser runs on the server's machine) any host folder picked in the desktop's own dialog; from a browser on another machine they are uploaded and the server keeps copies (ADR 0003). The server records dimensions and content hash on import.
 - Auth: local accounts, argon2-hashed passwords, session cookie. Roles: admin, annotator. First created user is admin.
 - Per-user settings (keymap, pie sensitivity, label-switch style, theme) are stored on the server.
 

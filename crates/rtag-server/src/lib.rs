@@ -1,6 +1,7 @@
 mod annotations;
 mod error;
 mod exports;
+mod host;
 mod images;
 mod labels;
 mod projects;
@@ -9,9 +10,12 @@ mod tiles;
 
 use std::{
     fs,
+    future::Future,
     io::{self, Write},
     path::{Path, PathBuf},
+    pin::Pin,
     str::FromStr,
+    sync::Arc,
     time::Duration,
 };
 
@@ -21,10 +25,19 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
 
+/// Opens the desktop's folder dialog on the server's machine: the chosen folder, or none if it
+/// was cancelled.
+pub type FolderDialog = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<Option<PathBuf>, String>> + Send>> + Send + Sync>;
+
 pub struct Config {
     pub database_url: String,
-    /// Images can only be imported from inside this folder.
+    /// The folder the server's own folder browser shows; requests from the server's machine may
+    /// also import any folder by its absolute path (ADR 0003).
     pub images_root: PathBuf,
+    /// Images uploaded from other machines are kept here.
+    pub upload_dir: PathBuf,
+    /// How to show the desktop's folder dialog, if the server runs on a desktop.
+    pub folder_dialog: Option<FolderDialog>,
     /// Generated thumbnails and tiles live here; safe to delete.
     pub cache_dir: PathBuf,
     /// Exports are written into folders here.
@@ -35,6 +48,8 @@ pub struct Config {
 struct AppState {
     pool: SqlitePool,
     images_root: PathBuf,
+    upload_dir: PathBuf,
+    folder_dialog: Option<FolderDialog>,
     cache_dir: PathBuf,
     export_dir: PathBuf,
     pyramid_locks: tiles::GenerationLocks,
@@ -63,12 +78,15 @@ pub async fn app(config: Config) -> Result<Router, sqlx::Error> {
     let state = AppState {
         pool,
         images_root: config.images_root,
+        upload_dir: config.upload_dir,
+        folder_dialog: config.folder_dialog,
         cache_dir: config.cache_dir,
         export_dir: config.export_dir,
         pyramid_locks: tiles::GenerationLocks::default(),
     };
     Ok(Router::new()
         .merge(projects::routes())
+        .merge(host::routes())
         .merge(labels::routes())
         .merge(images::routes())
         .merge(annotations::routes())

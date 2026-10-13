@@ -1,8 +1,11 @@
 // The browser-level flows of the annotation workspace. Each test gets a fresh project with the
 // nine labels of NINE_LABELS (only "line", 3, rejects rectangles) and one 1600 × 1000 image.
 
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { KEY } from './bidi.mjs';
-import { NINE_LABELS, box, openWorkspace } from './rtag.mjs';
+import { NINE_LABELS, box, openWorkspace, writeTestImage } from './rtag.mjs';
 
 function equal(actual, expected, what) {
   const a = JSON.stringify(actual);
@@ -773,9 +776,9 @@ tests.push({
     await t.b.click(box.x + 20, box.y + box.height / 2);
     for (const ch of 'Copied') await t.b.key(ch);
     await t.b.eval(`(() => { const s = document.querySelector('[role=dialog] select.copy-from'); s.value = '${t.project.id}'; s.dispatchEvent(new Event('change', { bubbles: true })); return 1; })()`);
+    // The host's folder dialog "picks" the image root.
+    writeFileSync(join(t.work, 'folder-dialog.txt'), join(t.work, 'images'));
     await t.b.eval(`[...document.querySelectorAll('[role=dialog] button')].find((b) => b.textContent.startsWith('Browse')).click(), 1`);
-    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.folder-picker')`), 'the folder picker');
-    await t.b.eval(`[...document.querySelectorAll('.folder-picker button')].find((b) => b.textContent.startsWith('Use this folder')).click(), 1`);
     await t.b.waitFor(() => t.b.eval(`/\\d+ images? found/.test(document.querySelector('.folder-count')?.textContent ?? '')`), 'the image count');
     await t.b.eval(`document.querySelector('[role=dialog] button.primary').click(), 1`);
 
@@ -802,6 +805,67 @@ tests.push({
     equal(steps.map((s) => s.split(' ')[0]), ['Labels', 'Images', 'Jobs'], 'steps');
     await t.b.eval(`[...document.querySelectorAll('.get-started button')].find((b) => b.textContent.startsWith('Import images')).click(), 1`);
     await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.backdrop .dialog')`), 'the import dialog');
+  },
+});
+
+// Images from any host folder, or uploaded (ADR 0003).
+const answerFolderDialog = (t, answer) => writeFileSync(join(t.work, 'folder-dialog.txt'), answer);
+const newProjectNamed = async (t, name) => {
+  await t.b.goto(`${t.base}/`);
+  await t.b.waitFor(() => t.b.eval(`!!document.querySelector('button.new-project')`), 'the projects page');
+  await t.b.eval(`document.querySelector('button.new-project').click(), 1`);
+  await t.b.waitFor(() => t.b.eval(`!!document.querySelector('[role=dialog] input.project-name')`), 'the dialog');
+  const box = await t.b.json(`document.querySelector('[role=dialog] input.project-name').getBoundingClientRect()`);
+  await t.b.click(box.x + 20, box.y + box.height / 2);
+  for (const ch of name) await t.b.key(ch);
+};
+const browse = (t) => t.b.eval(`[...document.querySelectorAll('[role=dialog] button')].find((b) => b.textContent.startsWith('Browse')).click(), 1`);
+const createAndOpen = async (t) => {
+  await t.b.eval(`document.querySelector('[role=dialog] button.primary').click(), 1`);
+  return t.b.waitFor(async () => {
+    const match = /^\/projects\/(\d+)$/.exec(await t.b.eval('location.pathname'));
+    return match && Number(match[1]) !== t.project.id && Number(match[1]);
+  }, 'the new project to open', 20000);
+};
+const importedPaths = (t, id) => t.b.waitFor(async () => {
+  const page = await t.api.call('GET', `/api/projects/${id}/images`);
+  return page.total > 0 && page.images.map((image) => image.path);
+}, 'the imported images', 20000);
+
+tests.push({
+  name: 'Browse… on the server\'s machine opens its folder dialog and imports the folder where it is',
+  async run(t) {
+    const folder = join(t.work, 'host-pictures');
+    writeTestImage(join(folder, 'a.png'), 64, 48);
+    writeTestImage(join(folder, 'deeper', 'b.png'), 48, 64);
+    answerFolderDialog(t, folder);
+    await newProjectNamed(t, 'Host folder');
+    await browse(t);
+    await t.b.waitFor(() => t.b.eval(`/^2 images found/.test(document.querySelector('.folder-count')?.textContent ?? '')`), 'the count');
+    const id = await createAndOpen(t);
+    const paths = await importedPaths(t, id);
+    equal(paths.sort(), [join(folder, 'a.png'), join(folder, 'deeper', 'b.png')], 'referenced where they are');
+  },
+}, {
+  name: 'when the server cannot show its dialog, Browse… picks the folder in the browser and uploads the images',
+  async run(t) {
+    const folder = join(t.work, 'browser-pictures');
+    writeTestImage(join(folder, 'one.png'), 64, 48);
+    writeTestImage(join(folder, 'two.png'), 48, 64);
+    answerFolderDialog(t, 'unavailable');
+    await newProjectNamed(t, 'Uploaded');
+    await browse(t);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('[role=dialog] input.pick-folder')`), 'the browser folder input');
+    // WebDriver cannot hand a folder to the input, so it gets the folder's files (without their
+    // folder path, which a real folder dialog adds).
+    await t.b.setFiles('[role=dialog] input.pick-folder', [join(folder, 'one.png'), join(folder, 'two.png')]);
+    await t.b.waitFor(() => t.b.eval(`/^2 images to upload/.test(document.querySelector('.folder-count')?.textContent ?? '')`), 'the count');
+    const id = await createAndOpen(t).catch(async (err) => {
+      throw new Error(`${err.message}; dialog says: ${await t.b.eval(`document.querySelector('[role=dialog] .error')?.textContent ?? 'nothing'`)}`);
+    });
+    const paths = await importedPaths(t, id);
+    equal(paths.length, 2, 'two images');
+    if (!paths.every((p) => p.startsWith(join(t.work, 'uploads')))) throw new Error(`not kept by the server: ${paths}`);
   },
 });
 

@@ -48,6 +48,11 @@ export async function connect(port) {
       if (result.type === 'exception') throw new Error(`page threw: ${result.exceptionDetails.text}`);
       return result.result.value;
     },
+    /** Gives the file input matching `selector` these files (or, for a folder input, a folder). */
+    async setFiles(selector, files) {
+      const found = await send('script.evaluate', { expression: `document.querySelector(${JSON.stringify(selector)})`, target: { context }, awaitPromise: false, resultOwnership: 'root' });
+      await send('input.setFiles', { context, element: { sharedId: found.result.sharedId }, files });
+    },
     async json(expression) {
       return JSON.parse(await browser.eval(`JSON.stringify(${expression})`));
     },

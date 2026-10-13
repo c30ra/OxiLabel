@@ -4,8 +4,9 @@ edition.workspace = true
 version.workspace = true
 
 [dependencies]
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 blake3 = "1"
+ashpd = { version = "0.11", default-features = false, features = ["tokio"] }
 image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png", "tiff", "webp"] }
 regex = "1"
 rtag-core = { path = "../rtag-core" }

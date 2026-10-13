@@ -104,13 +104,16 @@ async fn unreadable_images_are_reported_and_other_files_counted() {
 async fn paths_outside_the_image_root_are_refused() {
     let app = test_app().await;
     let project = new_project(&app).await;
-    for path in ["..", "a/../../etc", "/etc"] {
+    for path in ["..", "a/../../etc"] {
         let (status, body) = import(&app, project, path).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
         assert_eq!(body["error"], "path must be inside the image root", "{path}");
         let (status, _) = browse(&app, path).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "browse {path}");
     }
+    // An absolute path is a host folder: only for the server's own machine (see host_api.rs).
+    let (status, _) = import(&app, project, "/etc").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -459,3 +462,4 @@ async fn a_folders_images_can_be_counted_before_importing() {
     let (status, _) = call(&app, Method::GET, "/api/browse/count?path=../outside", None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+

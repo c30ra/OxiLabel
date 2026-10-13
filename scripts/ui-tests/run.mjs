@@ -67,6 +67,9 @@ start(server, [], {
   RTAG_CACHE_DIR: join(work, 'cache'),
   RTAG_EXPORT_DIR: join(work, 'exports'),
   RTAG_WEB_ROOT: join(root, 'crates', 'rtag-ui', 'dist'),
+  RTAG_UPLOAD_DIR: join(work, 'uploads'),
+  // Tests write what the host's folder dialog "picks" here, so no real dialog opens.
+  RTAG_FOLDER_DIALOG: `answers:${join(work, 'folder-dialog.txt')}`,
 });
 await until(async () => (await fetch(`${base}/api/projects`)).ok, 'the server');
 
@@ -88,7 +91,7 @@ for (const [index, test] of selected.entries()) {
   const started = Date.now();
   try {
     const project = await client.project(`UI test ${index + 1}`, LABELS);
-    await test.run({ b, base, api: client, project, scale: (w) => w.scale });
+    await test.run({ b, base, api: client, project, work, scale: (w) => w.scale });
     console.log(`  ✓ ${test.name} (${Date.now() - started} ms)`);
   } catch (err) {
     failed++;

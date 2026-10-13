@@ -33,6 +33,12 @@ pub async fn post<B: Serialize, T: DeserializeOwned>(url: &str, body: &B) -> Res
     send_json(Request::post(&absolute(url)), body).await
 }
 
+/// POST of a multipart form (e.g. files to upload).
+pub async fn post_form<T: DeserializeOwned>(url: &str, form: web_sys::FormData) -> Result<T, String> {
+    let request = Request::post(&absolute(url)).body(form).map_err(|err| err.to_string())?;
+    read_json(check(request.send().await).await?).await
+}
+
 pub async fn put<B: Serialize, T: DeserializeOwned>(url: &str, body: &B) -> Result<T, String> {
     send_json(Request::put(&absolute(url)), body).await
 }
