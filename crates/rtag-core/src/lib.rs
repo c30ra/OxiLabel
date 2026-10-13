@@ -26,6 +26,26 @@ pub struct Project {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewProject {
     pub name: String,
+    /// A project whose labels (with their ids, keys, shapes and attributes) the new one starts with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_labels_from: Option<i64>,
+}
+
+/// A project as the projects list shows it: how many images, how many annotated, and its labels'
+/// colors in id order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectSummary {
+    pub id: i64,
+    pub name: String,
+    pub images: i64,
+    pub annotated: i64,
+    pub label_colors: Vec<String>,
+}
+
+/// How many images a folder of the image root holds, subfolders included.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FolderCount {
+    pub images: u64,
 }
 
 /// The kinds of annotation a label can be used with.

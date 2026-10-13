@@ -11,7 +11,7 @@ use axum::{
     routing::{get, post},
 };
 use rtag_core::{
-    BrowseEntry, BrowseListing, EntryKind, Image, ImageFilter, ImagePage, ImportFailure, ImportReport, ImportRequest,
+    BrowseEntry, BrowseListing, EntryKind, FolderCount, Image, ImageFilter, ImagePage, ImportFailure, ImportReport, ImportRequest,
     RemovalReport, RemovalRequest,
 };
 use serde::Deserialize;
@@ -25,6 +25,7 @@ const MAX_PAGE_SIZE: i64 = 500;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/browse", get(browse))
+        .route("/api/browse/count", get(count_folder))
         .route("/api/projects/{project}/imports", post(import_selection))
         .route("/api/projects/{project}/images", get(list_images))
         .route("/api/projects/{project}/images/{image}", get(get_image))
@@ -93,6 +94,23 @@ async fn browse(State(state): State<AppState>, Query(query): Query<BrowseQuery>)
         (a.kind != EntryKind::Folder, a.name.to_lowercase()).cmp(&(b.kind != EntryKind::Folder, b.name.to_lowercase()))
     });
     Ok(Json(BrowseListing { path: relative_path(&root, &folder), entries }))
+}
+
+/// How many images a folder holds, subfolders included (what importing it would read).
+async fn count_folder(State(state): State<AppState>, Query(query): Query<BrowseQuery>) -> Result<Json<FolderCount>, ApiError> {
+    let root = image_root(&state)?;
+    let folder = resolve(&root, &query.path)?;
+    if !folder.is_dir() {
+        return Err(ApiError::BadRequest(format!("\"{}\" is not a folder", query.path.trim())));
+    }
+    let images = tokio::task::spawn_blocking(move || {
+        let mut files = BTreeSet::new();
+        collect_files(&folder, &mut files);
+        files.iter().filter(|file| is_supported(file)).count() as u64
+    })
+    .await
+    .expect("counting panicked");
+    Ok(Json(FolderCount { images }))
 }
 
 async fn import_selection(

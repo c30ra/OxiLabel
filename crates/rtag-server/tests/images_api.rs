@@ -447,3 +447,15 @@ async fn ids_of_all_matching_images_are_listed_across_pages() {
     let (_, body) = call(&app, Method::GET, &format!("/api/projects/{project}/image-ids?min_width=5"), None).await;
     assert_eq!(body, json!(all[3..]));
 }
+
+#[tokio::test]
+async fn a_folders_images_can_be_counted_before_importing() {
+    let app = test_app().await;
+    write_png(app.images.path(), "cells/a.png", 4, 4, 1);
+    write_png(app.images.path(), "cells/deep/b.png", 4, 4, 2);
+    std::fs::write(app.images.path().join("cells/notes.txt"), "not an image").unwrap();
+    let (status, count) = call(&app, Method::GET, "/api/browse/count?path=cells", None).await;
+    assert_eq!((status, count), (StatusCode::OK, json!({"images": 2})));
+    let (status, _) = call(&app, Method::GET, "/api/browse/count?path=../outside", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}

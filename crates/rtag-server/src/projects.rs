@@ -4,7 +4,7 @@ use axum::{
     http::StatusCode,
     routing::get,
 };
-use rtag_core::{NewProject, Project};
+use rtag_core::{NewProject, Project, ProjectSummary};
 use sqlx::{Row, SqliteConnection, SqlitePool};
 
 use crate::{AppState, error::ApiError};
@@ -23,19 +23,59 @@ async fn create_project(
     if name.is_empty() {
         return Err(ApiError::BadRequest("project name must not be blank".into()));
     }
+    let mut tx = pool.begin().await?;
     let id = sqlx::query("INSERT INTO projects (name) VALUES (?) RETURNING id")
         .bind(name)
-        .fetch_one(&pool)
+        .fetch_one(&mut *tx)
         .await?
         .get::<i64, _>("id");
+    if let Some(source) = new.copy_labels_from {
+        copy_labels(&mut tx, source, id).await?;
+    }
+    tx.commit().await?;
     Ok((StatusCode::CREATED, Json(Project { id, name: name.to_owned() })))
 }
 
-async fn list_projects(State(pool): State<SqlitePool>) -> Result<Json<Vec<Project>>, ApiError> {
-    let rows = sqlx::query("SELECT id, name FROM projects ORDER BY id").fetch_all(&pool).await?;
+/// Gives project `target` the labels of `source` with the same ids, and the same next id, so ids
+/// mean the same in both and a deleted id stays unused.
+async fn copy_labels(conn: &mut SqliteConnection, source: i64, target: i64) -> Result<(), ApiError> {
+    let next: i64 = sqlx::query("SELECT next_label_id FROM projects WHERE id = ?")
+        .bind(source)
+        .fetch_optional(&mut *conn)
+        .await?
+        .ok_or_else(|| ApiError::BadRequest(format!("there is no project {source} to copy labels from")))?
+        .get("next_label_id");
+    sqlx::query(
+        "INSERT INTO labels (project_id, id, name, color, hotkey, shape_types, is_ignore, attributes) \
+         SELECT ?, id, name, color, hotkey, shape_types, is_ignore, attributes FROM labels WHERE project_id = ?",
+    )
+    .bind(target)
+    .bind(source)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query("UPDATE projects SET next_label_id = ? WHERE id = ?").bind(next).bind(target).execute(&mut *conn).await?;
+    Ok(())
+}
+
+async fn list_projects(State(pool): State<SqlitePool>) -> Result<Json<Vec<ProjectSummary>>, ApiError> {
+    let rows = sqlx::query(
+        "SELECT p.id, p.name, \
+           (SELECT COUNT(*) FROM images WHERE project_id = p.id) AS images, \
+           (SELECT COUNT(*) FROM images WHERE project_id = p.id AND annotated) AS annotated, \
+           (SELECT json_group_array(color) FROM (SELECT color FROM labels WHERE project_id = p.id ORDER BY id)) AS colors \
+         FROM projects p ORDER BY p.id",
+    )
+    .fetch_all(&pool)
+    .await?;
     Ok(Json(
         rows.iter()
-            .map(|row| Project { id: row.get("id"), name: row.get("name") })
+            .map(|row| ProjectSummary {
+                id: row.get("id"),
+                name: row.get("name"),
+                images: row.get("images"),
+                annotated: row.get("annotated"),
+                label_colors: serde_json::from_str(row.get("colors")).unwrap_or_default(),
+            })
             .collect(),
     ))
 }

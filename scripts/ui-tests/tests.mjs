@@ -757,6 +757,54 @@ tests.push({
   },
 });
 
+// Creating a project (design A: a dialog, then a get-started checklist).
+tests.push({
+  name: 'New project opens a dialog that copies labels and imports a folder, then opens the project',
+  async run(t) {
+    await t.b.goto(`${t.base}/`);
+    const card = `a.project-card[href="/projects/${t.project.id}"]`;
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector(${JSON.stringify(card)})`), 'the project card');
+    const text = await t.b.eval(`document.querySelector(${JSON.stringify(card)}).textContent`);
+    if (!text.includes('1 image') || !text.includes('9 labels')) throw new Error(`card text: ${text}`);
+
+    await t.b.eval(`document.querySelector('button.new-project').click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('[role=dialog][aria-label="New project"]')`), 'the dialog');
+    const box = await t.b.json(`document.querySelector('[role=dialog] input.project-name').getBoundingClientRect()`);
+    await t.b.click(box.x + 20, box.y + box.height / 2);
+    for (const ch of 'Copied') await t.b.key(ch);
+    await t.b.eval(`(() => { const s = document.querySelector('[role=dialog] select.copy-from'); s.value = '${t.project.id}'; s.dispatchEvent(new Event('change', { bubbles: true })); return 1; })()`);
+    await t.b.eval(`[...document.querySelectorAll('[role=dialog] button')].find((b) => b.textContent.startsWith('Browse')).click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.folder-picker')`), 'the folder picker');
+    await t.b.eval(`[...document.querySelectorAll('.folder-picker button')].find((b) => b.textContent.startsWith('Use this folder')).click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`/\\d+ images? found/.test(document.querySelector('.folder-count')?.textContent ?? '')`), 'the image count');
+    await t.b.eval(`document.querySelector('[role=dialog] button.primary').click(), 1`);
+
+    const id = await t.b.waitFor(async () => {
+      const match = /^\/projects\/(\d+)$/.exec(await t.b.eval('location.pathname'));
+      return match && Number(match[1]) !== t.project.id && Number(match[1]);
+    }, 'the new project to open');
+    const source = await t.api.call('GET', `/api/projects/${t.project.id}/labels`);
+    const copied = await t.api.call('GET', `/api/projects/${id}/labels`);
+    equal(copied, source, 'copied labels');
+    const page = await t.b.waitFor(async () => {
+      const page = await t.api.call('GET', `/api/projects/${id}/images`);
+      return page.total > 0 && page;
+    }, 'the imported images');
+    equal(page.images.some((image) => image.path === 'test.png'), true, 'the test image');
+  },
+}, {
+  name: 'an empty project shows a get-started checklist whose import button opens the import dialog',
+  async run(t) {
+    const project = await t.api.call('POST', '/api/projects', { name: 'Empty' });
+    await t.b.goto(`${t.base}/projects/${project.id}`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.get-started')`), 'the checklist');
+    const steps = await t.b.json(`[...document.querySelectorAll('.get-started li strong')].map((s) => s.textContent.trim())`);
+    equal(steps.map((s) => s.split(' ')[0]), ['Labels', 'Images', 'Jobs'], 'steps');
+    await t.b.eval(`[...document.querySelectorAll('.get-started button')].find((b) => b.textContent.startsWith('Import images')).click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.backdrop .dialog')`), 'the import dialog');
+  },
+});
+
 // Export (ticket 06).
 tests.push({
   name: 'the export dialog writes a YOLO dataset and offers it as a zip',
