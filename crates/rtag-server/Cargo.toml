@@ -5,6 +5,9 @@ version.workspace = true
 
 [dependencies]
 axum = { version = "0.8", features = ["multipart"] }
+argon2 = "0.5"
+# The operating system's random numbers, for salts and session tokens.
+password-hash = { version = "0.5", features = ["getrandom"] }
 blake3 = "1"
 ashpd = { version = "0.11", default-features = false, features = ["tokio"] }
 image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png", "tiff", "webp"] }

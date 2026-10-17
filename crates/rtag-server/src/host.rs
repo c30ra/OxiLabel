@@ -11,7 +11,7 @@ use axum::{
 };
 use serde::Serialize;
 
-use crate::{AppState, error::ApiError};
+use crate::{AppState, auth::Admin, error::ApiError};
 
 pub fn routes() -> Router<AppState> {
     Router::new().route("/api/host", get(host)).route("/api/host/folder-dialog", post(folder_dialog))
@@ -56,7 +56,7 @@ struct Picked {
 }
 
 /// Opens the desktop's folder dialog on the server's machine and waits for the choice.
-async fn folder_dialog(State(state): State<AppState>, caller: Caller) -> Result<Json<Picked>, ApiError> {
+async fn folder_dialog(_: Admin, State(state): State<AppState>, caller: Caller) -> Result<Json<Picked>, ApiError> {
     caller.require_local("the folder dialog")?;
     let dialog = state.folder_dialog.clone().ok_or_else(|| ApiError::Conflict("this server cannot show a folder dialog".into()))?;
     let picked = dialog().await.map_err(|reason| ApiError::Conflict(format!("the folder dialog could not open: {reason}")))?;

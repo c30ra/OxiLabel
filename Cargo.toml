@@ -5,3 +5,9 @@ members = ["crates/rtag-core", "crates/rtag-server", "crates/rtag-formats", "cra
 [workspace.package]
 edition = "2024"
 version = "0.1.0"
+
+# Password hashing is far too slow unoptimised; tests log in many times.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3

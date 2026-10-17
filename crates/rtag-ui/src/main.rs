@@ -1,3 +1,4 @@
+mod account;
 mod analysis;
 mod annotate;
 mod api;
@@ -17,18 +18,38 @@ use leptos_router::{
     path,
 };
 
-use pages::{ProjectPage, ProjectsPage, Tab, WorkspacePage};
+use account::{Account, SignIn};
+use pages::{ProjectPage, ProjectsPage, Tab, UsersPage, WorkspacePage};
+use rtag_core::user::Session;
 
+/// The pages, once someone is signed in; before that the sign-in (or first account) form.
 #[component]
 fn App() -> impl IntoView {
+    let session = LocalResource::new(|| api::get::<Session>("/api/session"));
+    let refresh = Callback::new(move |()| session.refetch());
     view! {
         <Router>
-            <Routes fallback=|| view! { <p class="page">"Page not found."</p> }>
-                <Route path=path!("/") view=ProjectsPage />
-                <Route path=path!("/projects/:id") view=|| view! { <ProjectPage tab=Tab::Images /> } />
-                <Route path=path!("/projects/:id/labels") view=|| view! { <ProjectPage tab=Tab::Labels /> } />
-                <Route path=path!("/projects/:id/images/:image") view=WorkspacePage />
-            </Routes>
+            {move || match session.get() {
+                None => view! { <p class="page muted">"Loading…"</p> }.into_any(),
+                Some(Err(message)) => view! { <p class="page error" role="alert">{message}</p> }.into_any(),
+                Some(Ok(Session { setup, user: None })) => {
+                    api::on_signed_out(None);
+                    view! { <SignIn setup=setup on_signed_in=refresh /> }.into_any()
+                }
+                Some(Ok(Session { user: Some(user), .. })) => {
+                    api::on_signed_out(Some(refresh));
+                    provide_context(Account { user, refresh });
+                    view! {
+                        <Routes fallback=|| view! { <p class="page">"Page not found."</p> }>
+                            <Route path=path!("/") view=ProjectsPage />
+                            <Route path=path!("/users") view=UsersPage />
+                            <Route path=path!("/projects/:id") view=|| view! { <ProjectPage tab=Tab::Images /> } />
+                            <Route path=path!("/projects/:id/labels") view=|| view! { <ProjectPage tab=Tab::Labels /> } />
+                            <Route path=path!("/projects/:id/images/:image") view=WorkspacePage />
+                        </Routes>
+                    }.into_any()
+                }
+            }}
         </Router>
     }
 }

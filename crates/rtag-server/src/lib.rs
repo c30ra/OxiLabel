@@ -1,4 +1,5 @@
 mod annotations;
+mod auth;
 pub mod enhance;
 mod error;
 mod exports;
@@ -8,6 +9,7 @@ mod labels;
 mod projects;
 mod thumbnails;
 mod tiles;
+mod users;
 
 pub use tiles::KEPT_FILTERS;
 
@@ -22,7 +24,7 @@ use std::{
     time::Duration,
 };
 
-use axum::{Router, extract::FromRef};
+use axum::{Router, extract::FromRef, middleware};
 use sqlx::{
     SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
@@ -78,6 +80,8 @@ pub async fn app(config: Config) -> Result<Router, sqlx::Error> {
     let pool = options.connect_with(connect).await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
     tokio::spawn(images::backfill_file_info(pool.clone(), config.images_root.clone()));
+    // Ready before the first login with an unknown name, which must take no longer than others.
+    tokio::task::spawn_blocking(|| std::sync::LazyLock::force(&auth::UNKNOWN_USER_HASH));
     let state = AppState {
         pool,
         images_root: config.images_root,
@@ -87,7 +91,7 @@ pub async fn app(config: Config) -> Result<Router, sqlx::Error> {
         export_dir: config.export_dir,
         pyramid_locks: tiles::GenerationLocks::default(),
     };
-    Ok(Router::new()
+    let signed_in = Router::new()
         .merge(projects::routes())
         .merge(host::routes())
         .merge(labels::routes())
@@ -96,7 +100,9 @@ pub async fn app(config: Config) -> Result<Router, sqlx::Error> {
         .merge(exports::routes())
         .merge(thumbnails::routes())
         .merge(tiles::routes())
-        .with_state(state))
+        .merge(users::routes())
+        .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_session));
+    Ok(Router::new().merge(signed_in).merge(auth::routes()).with_state(state))
 }
 
 /// Writes `path` through a temporary file in the same folder, so a concurrent reader never sees

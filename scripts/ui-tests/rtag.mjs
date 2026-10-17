@@ -37,11 +37,20 @@ export function writeTestImage(path, width = 1600, height = 1000) {
   ]));
 }
 
-export function api(base) {
+/** The account the browser signs in with on the first run's setup form. */
+export const ADMIN = { username: 'admin', password: 'admin password' };
+
+/** A client of the server's API, signed in as `username` (whose account must exist). */
+export async function api(base, { username, password } = ADMIN) {
+  const login = await fetch(`${base}/api/login`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username, password }),
+  });
+  if (!login.ok) throw new Error(`login as ${username} → ${login.status} ${await login.text()}`);
+  const cookie = login.headers.get('set-cookie').split(';')[0];
   const call = async (method, path, body) => {
     const response = await fetch(base + path, {
       method,
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', cookie },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const text = await response.text();
@@ -50,6 +59,12 @@ export function api(base) {
   };
   return {
     call,
+    /** A GET whose body is not JSON, e.g. a zip download. */
+    async bytes(path) {
+      const response = await fetch(base + path, { headers: { cookie } });
+      if (!response.ok) throw new Error(`GET ${path} → ${response.status} ${await response.text()}`);
+      return Buffer.from(await response.arrayBuffer());
+    },
     /** A project with `labels` ({name, color, hotkey, shapes}) and the test image imported. */
     async project(name, labels) {
       const project = await call('POST', '/api/projects', { name });
@@ -69,6 +84,30 @@ export function api(base) {
       return call('PUT', project.annotations, { base_version: version, annotations });
     },
   };
+}
+
+/**
+ * Fills in and submits the sign-in form (or, with `setup`, the first account's form) and waits
+ * for the projects page.
+ */
+export async function signIn(b, base, { username, password }, { setup = false } = {}) {
+  await b.goto(`${base}/`);
+  const form = setup ? 'Create the admin account' : 'Sign in';
+  await b.waitFor(() => b.eval(`!!document.querySelector('form[aria-label="${form}"]')`), `the ${form} form`);
+  await b.eval(`(() => {
+    const set = (selector, value) => {
+      const input = document.querySelector(selector);
+      if (!input) return;
+      input.value = value;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+    set('.sign-in input.username', ${JSON.stringify(username)});
+    set('.sign-in input.password', ${JSON.stringify(password)});
+    set('.sign-in input.repeat', ${JSON.stringify(password)});
+    document.querySelector('.sign-in button.primary').click();
+    return 1;
+  })()`);
+  await b.waitFor(() => b.eval(`!!document.querySelector('.account .username')`), 'the signed-in page');
 }
 
 export const box = (label, x0, y0, x1, y1) => ({ label, shape: { type: 'rectangle', min: { x: x0, y: y0 }, max: { x: x1, y: y1 } } });

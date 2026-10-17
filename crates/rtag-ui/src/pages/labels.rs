@@ -5,7 +5,7 @@ use rtag_core::{
     attribute::{AttributeDefinition, AttributeKind},
 };
 
-use crate::api;
+use crate::{account::is_admin, api};
 
 const DEFAULT_COLOR: &str = "#e74c3c";
 
@@ -135,6 +135,7 @@ pub fn LabelSet(project: i64) -> impl IntoView {
         }
     };
 
+    let admin = is_admin();
     view! {
         {move || match labels.get() {
             None => view! { <p>"Loading…"</p> }.into_any(),
@@ -164,8 +165,10 @@ pub fn LabelSet(project: i64) -> impl IntoView {
                                         <td><kbd>{label.hotkey.clone()}</kbd></td>
                                         <td class="shapes">{shapes}</td>
                                         <td class="actions">
-                                            <button on:click=move |_| start_edit(to_edit.clone())>"Edit"</button>
-                                            <button on:click=move |_| on_delete(to_delete.clone())>"Delete"</button>
+                                            {admin.then(|| view! {
+                                                <button on:click=move |_| start_edit(to_edit.clone())>"Edit"</button>
+                                                <button on:click=move |_| on_delete(to_delete.clone())>"Delete"</button>
+                                            })}
                                         </td>
                                     </tr>
                                 }
@@ -176,64 +179,66 @@ pub fn LabelSet(project: i64) -> impl IntoView {
             }
         }}
 
-        <form class="label-form" on:submit=on_submit>
-            <h3>{move || if editing.get().is_some() { "Edit label" } else { "Add label" }}</h3>
-            <div class="row">
-                <input placeholder="Name" prop:value=name on:input:target=move |ev| name.set(ev.target().value()) />
-                <input type="color" title="Color" prop:value=color on:input:target=move |ev| color.set(ev.target().value()) />
-                <input class="key" placeholder="Key" maxlength="1" title="Hotkey"
-                    prop:value=hotkey on:input:target=move |ev| hotkey.set(ev.target().value()) />
-            </div>
-            <fieldset>
-                <legend>"Allowed shapes"</legend>
-                {ShapeType::ALL.into_iter().map(|shape| view! {
-                    <label class="check">
-                        <input type="checkbox"
-                            prop:checked=move || shapes.read().contains(&shape)
-                            on:change:target=move |ev| {
-                                let checked = ev.target().checked();
-                                shapes.update(|list| {
-                                    list.retain(|s| *s != shape);
-                                    if checked {
-                                        list.push(shape);
-                                    }
-                                });
-                            } />
-                        {shape.name()}
+        {admin.then(|| view! {
+            <form class="label-form" on:submit=on_submit>
+                <h3>{move || if editing.get().is_some() { "Edit label" } else { "Add label" }}</h3>
+                <div class="row">
+                    <input placeholder="Name" prop:value=name on:input:target=move |ev| name.set(ev.target().value()) />
+                    <input type="color" title="Color" prop:value=color on:input:target=move |ev| color.set(ev.target().value()) />
+                    <input class="key" placeholder="Key" maxlength="1" title="Hotkey"
+                        prop:value=hotkey on:input:target=move |ev| hotkey.set(ev.target().value()) />
+                </div>
+                <fieldset>
+                    <legend>"Allowed shapes"</legend>
+                    {ShapeType::ALL.into_iter().map(|shape| view! {
+                        <label class="check">
+                            <input type="checkbox"
+                                prop:checked=move || shapes.read().contains(&shape)
+                                on:change:target=move |ev| {
+                                    let checked = ev.target().checked();
+                                    shapes.update(|list| {
+                                        list.retain(|s| *s != shape);
+                                        if checked {
+                                            list.push(shape);
+                                        }
+                                    });
+                                } />
+                            {shape.name()}
+                        </label>
+                    }).collect_view()}
+                </fieldset>
+                <fieldset class="sizes">
+                    <legend>"In exports"</legend>
+                    <label title="Polylines become areas this wide in YOLO segment and OBB exports">
+                        "Line width"
+                        <input class="line-width" type="number" min="0.5" step="0.5" prop:value=move || line_width.get().to_string()
+                            on:input:target={move |ev| if let Ok(v) = ev.target().value().parse::<f64>() { line_width.set(v) }} />
+                        "px"
                     </label>
-                }).collect_view()}
-            </fieldset>
-            <fieldset class="sizes">
-                <legend>"In exports"</legend>
-                <label title="Polylines become areas this wide in YOLO segment and OBB exports">
-                    "Line width"
-                    <input class="line-width" type="number" min="0.5" step="0.5" prop:value=move || line_width.get().to_string()
-                        on:input:target={move |ev| if let Ok(v) = ev.target().value().parse::<f64>() { line_width.set(v) }} />
-                    "px"
+                    <label title="Points become discs of this radius in YOLO segment and OBB exports">
+                        "Point radius"
+                        <input class="point-radius" type="number" min="0.5" step="0.5" prop:value=move || point_radius.get().to_string()
+                            on:input:target={move |ev| if let Ok(v) = ev.target().value().parse::<f64>() { point_radius.set(v) }} />
+                        "px"
+                    </label>
+                    <span class="muted hint">"in original image pixels"</span>
+                </fieldset>
+                <AttributeList rows=attributes />
+                <label class="check">
+                    <input type="checkbox" prop:checked=ignore on:change:target=move |ev| ignore.set(ev.target().checked()) />
+                    "Ignore label (uncertain regions, skipped in training)"
                 </label>
-                <label title="Points become discs of this radius in YOLO segment and OBB exports">
-                    "Point radius"
-                    <input class="point-radius" type="number" min="0.5" step="0.5" prop:value=move || point_radius.get().to_string()
-                        on:input:target={move |ev| if let Ok(v) = ev.target().value().parse::<f64>() { point_radius.set(v) }} />
-                    "px"
-                </label>
-                <span class="muted hint">"in original image pixels"</span>
-            </fieldset>
-            <AttributeList rows=attributes />
-            <label class="check">
-                <input type="checkbox" prop:checked=ignore on:change:target=move |ev| ignore.set(ev.target().checked()) />
-                "Ignore label (uncertain regions, skipped in training)"
-            </label>
-            <Show when=move || error.get().is_some()>
-                <p class="error" role="alert">{move || error.get()}</p>
-            </Show>
-            <div class="row">
-                <button class="primary" type="submit">{move || if editing.get().is_some() { "Save" } else { "Add label" }}</button>
-                <Show when=move || editing.get().is_some()>
-                    <button type="button" on:click=move |_| reset()>"Cancel"</button>
+                <Show when=move || error.get().is_some()>
+                    <p class="error" role="alert">{move || error.get()}</p>
                 </Show>
-            </div>
-        </form>
+                <div class="row">
+                    <button class="primary" type="submit">{move || if editing.get().is_some() { "Save" } else { "Add label" }}</button>
+                    <Show when=move || editing.get().is_some()>
+                        <button type="button" on:click=move |_| reset()>"Cancel"</button>
+                    </Show>
+                </div>
+            </form>
+        })}
     }
 }
 

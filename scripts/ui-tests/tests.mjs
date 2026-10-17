@@ -5,7 +5,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { KEY } from './bidi.mjs';
-import { NINE_LABELS, box, openWorkspace, writeTestImage } from './rtag.mjs';
+import { ADMIN, NINE_LABELS, api, box, openWorkspace, signIn, writeTestImage } from './rtag.mjs';
 
 function equal(actual, expected, what) {
   const a = JSON.stringify(actual);
@@ -1018,7 +1018,7 @@ tests.push({
     const report = await t.b.waitFor(() => t.b.eval(`document.querySelector('.export-dialog .report')?.textContent`), 'the export result');
     if (!report.includes('Exported 1 images') || !report.includes('1 annotations')) throw new Error(`report: ${report}`);
     const href = await t.b.eval(`document.querySelector('.export-dialog a[download]').getAttribute('href')`);
-    const zip = Buffer.from(await (await fetch(t.base + href)).arrayBuffer());
+    const zip = await t.api.bytes(href);
     equal(zip.subarray(0, 2).toString(), 'PK', 'zip signature');
     if (!zip.includes('images/train/') && !zip.includes('images/val/')) throw new Error('the zip has no images');
   },
@@ -1124,5 +1124,75 @@ tests.push({
     await t.b.click(...w.at(1150, 650));
     await t.b.waitFor(async () => (await tileRequests(t, 'analysis')).some((n) => n.includes('?filter=clahe_0.05_3.0_16')), 'filtered analysis tiles');
     await saved(t, (list) => list.length === 1 && list[0].shape.type === 'mask', 'the fill');
+  },
+});
+
+tests.push({
+  name: 'an admin adds an annotator and resets their password; the annotator sees no admin actions and logs out',
+  async run(t) {
+    const anna = { username: 'anna', password: 'first password' };
+    const clickButton = (selector, text) => t.b.eval(`[...document.querySelectorAll(${JSON.stringify(selector)})].find((b) => b.textContent.trim() === ${JSON.stringify(text)}).click(), 1`);
+    const fill = (selector, value) => t.b.eval(`(() => {
+      const input = document.querySelector(${JSON.stringify(selector)});
+      input.value = ${JSON.stringify(value)};
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      return 1;
+    })()`);
+    const row = (name) => `.users tr[data-user="${name}"]`;
+    const logOut = async () => {
+      await t.b.eval(`document.querySelector('.account button.log-out').click(), 1`);
+      await t.b.waitFor(() => t.b.eval(`!!document.querySelector('form[aria-label="Sign in"]')`), 'the sign-in form');
+    };
+
+    await t.b.goto(`${t.base}/`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.account a[href="/users"]')`), 'the Users link');
+    await t.b.eval(`document.querySelector('.account a[href="/users"]').click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector(${JSON.stringify(row('admin'))})`), 'the users table');
+    await fill('.new-user input.username', anna.username);
+    await fill('.new-user input.password', anna.password);
+    await clickButton('.new-user button', 'Add user');
+    await t.b.waitFor(() => t.b.eval(`document.querySelector(${JSON.stringify(row('anna') + ' select.role')})?.value === 'annotator'`), 'anna as annotator');
+
+    await clickButton(`${row('anna')} button`, 'Reset password…');
+    await fill(`${row('anna')} input.new-password`, 'second password');
+    await clickButton(`${row('anna')} button`, 'Set');
+    await t.b.waitFor(() => t.b.eval(`document.querySelector('[role=status]')?.textContent.includes("anna's password was reset")`), 'the reset notice');
+    anna.password = 'second password';
+    await api(t.base, anna);
+
+    await logOut();
+    try {
+      await signIn(t.b, t.base, anna);
+      await t.b.waitFor(() => t.b.eval(`!!document.querySelector('a.project-card')`), 'the project cards');
+      const hidden = await t.b.json(`({
+        users: !!document.querySelector('.account a[href="/users"]'),
+        newProject: !!document.querySelector('button.new-project, button.new-card'),
+        deleteProject: !!document.querySelector('.project-card .delete'),
+      })`);
+      equal(hidden, { users: false, newProject: false, deleteProject: false }, 'admin controls on the projects page');
+      await t.b.goto(`${t.base}/projects/${t.project.id}/labels`);
+      await t.b.waitFor(() => t.b.eval(`!!document.querySelector('table.labels')`), 'the labels table');
+      const projectHidden = await t.b.json(`({
+        importExport: [...document.querySelectorAll('.topbar button')].some((b) => /Import|Export/.test(b.textContent)),
+        labelForm: !!document.querySelector('form.label-form'),
+        labelButtons: document.querySelectorAll('table.labels td.actions button').length,
+      })`);
+      equal(projectHidden, { importExport: false, labelForm: false, labelButtons: 0 }, 'admin controls on the project page');
+
+      // A password reset ends anna's session: her next request brings back the sign-in form.
+      const users = await t.api.call('GET', '/api/users');
+      const id = users.find((user) => user.username === 'anna').id;
+      await t.api.call('PUT', `/api/users/${id}`, { password: 'third password' });
+      await t.b.eval(`document.querySelector('a.tab[href="/projects/${t.project.id}"]').click(), 1`);
+      await t.b.waitFor(() => t.b.eval(`!!document.querySelector('form[aria-label="Sign in"]')`), 'the sign-in form after the reset');
+
+      await signIn(t.b, t.base, { username: 'anna', password: 'third password' });
+      await t.b.goto(`${t.base}/users`);
+      await t.b.waitFor(() => t.b.eval(`document.querySelector('main.users')?.textContent.includes('Only admins manage users.')`), 'the Users page refusing anna');
+      equal(await t.b.eval(`!!document.querySelector('form.new-user')`), false, 'the add-user form for anna');
+      await logOut();
+    } finally {
+      await signIn(t.b, t.base, ADMIN);
+    }
   },
 });

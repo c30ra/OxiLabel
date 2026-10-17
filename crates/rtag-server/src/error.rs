@@ -8,6 +8,8 @@ use serde_json::json;
 pub enum ApiError {
     BadRequest(String),
     NotFound,
+    /// The request has no valid session.
+    Unauthorized(String),
     Forbidden(String),
     /// The request clashes with the current state, e.g. a save based on an outdated version.
     Conflict(String),
@@ -27,6 +29,7 @@ impl IntoResponse for ApiError {
         let (status, message) = match self {
             ApiError::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not found".to_owned()),
+            ApiError::Unauthorized(message) => (StatusCode::UNAUTHORIZED, message),
             ApiError::Forbidden(message) => (StatusCode::FORBIDDEN, message),
             ApiError::Conflict(message) => (StatusCode::CONFLICT, message),
             ApiError::Database(err) => {

@@ -17,7 +17,7 @@ use rtag_core::{
 use serde::Deserialize;
 use sqlx::{QueryBuilder, Row, Sqlite, SqliteConnection, SqlitePool};
 
-use crate::{AppState, error::ApiError, host::Caller, projects};
+use crate::{AppState, auth::Admin, error::ApiError, host::Caller, projects};
 
 const SUPPORTED_EXTENSIONS: [&str; 7] = ["bmp", "jpeg", "jpg", "png", "tif", "tiff", "webp"];
 const MAX_PAGE_SIZE: i64 = 500;
@@ -66,7 +66,7 @@ struct BrowseQuery {
     project: Option<i64>,
 }
 
-async fn browse(State(state): State<AppState>, Query(query): Query<BrowseQuery>) -> Result<Json<BrowseListing>, ApiError> {
+async fn browse(_: Admin, State(state): State<AppState>, Query(query): Query<BrowseQuery>) -> Result<Json<BrowseListing>, ApiError> {
     let root = image_root(&state)?;
     let folder = resolve(&root, &query.path)?;
     if !folder.is_dir() {
@@ -103,7 +103,7 @@ async fn browse(State(state): State<AppState>, Query(query): Query<BrowseQuery>)
 }
 
 /// How many images a folder holds, subfolders included (what importing it would read).
-async fn count_folder(State(state): State<AppState>, caller: Caller, Query(query): Query<BrowseQuery>) -> Result<Json<FolderCount>, ApiError> {
+async fn count_folder(_: Admin, State(state): State<AppState>, caller: Caller, Query(query): Query<BrowseQuery>) -> Result<Json<FolderCount>, ApiError> {
     let root = image_root(&state)?;
     let folder = resolve_for(caller, &root, &query.path)?;
     if !folder.is_dir() {
@@ -120,6 +120,7 @@ async fn count_folder(State(state): State<AppState>, caller: Caller, Query(query
 }
 
 async fn import_selection(
+    _: Admin,
     State(state): State<AppState>,
     caller: Caller,
     UrlPath(project): UrlPath<i64>,
@@ -165,6 +166,7 @@ async fn add_images(pool: &SqlitePool, project: i64, new_images: &[NewImage]) ->
 }
 
 async fn remove_images(
+    _: Admin,
     State(pool): State<SqlitePool>,
     UrlPath(project): UrlPath<i64>,
     Json(request): Json<RemovalRequest>,
@@ -320,6 +322,7 @@ const UPLOAD_LIMIT: usize = 1 << 30;
 /// inside the picked folder. They are kept under the upload folder and imported; copies of
 /// duplicates and of files that are not images are removed again.
 async fn upload_images(
+    _: Admin,
     State(state): State<AppState>,
     UrlPath(project): UrlPath<i64>,
     mut multipart: axum::extract::Multipart,

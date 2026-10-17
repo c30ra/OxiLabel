@@ -8,7 +8,7 @@ use rtag_core::{Label, LabelDefinition, annotation::LabelUsage, attribute::Attri
 use serde::Deserialize;
 use sqlx::{Row, SqliteConnection, SqlitePool, sqlite::SqliteRow};
 
-use crate::{AppState, error::ApiError, projects};
+use crate::{AppState, auth::Admin, error::ApiError, projects};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -18,6 +18,7 @@ pub fn routes() -> Router<AppState> {
 }
 
 async fn create_label(
+    _: Admin,
     State(pool): State<SqlitePool>,
     Path(project): Path<i64>,
     Json(definition): Json<LabelDefinition>,
@@ -70,6 +71,7 @@ pub(crate) async fn project_labels(conn: &mut SqliteConnection, project: i64) ->
 }
 
 async fn update_label(
+    _: Admin,
     State(pool): State<SqlitePool>,
     Path((project, id)): Path<(i64, i64)>,
     Json(definition): Json<LabelDefinition>,
@@ -137,6 +139,7 @@ struct DeleteQuery {
 
 /// Deletes a label. If annotations use it they are deleted too, but only with `?confirm=true`.
 async fn delete_label(
+    _: Admin,
     State(pool): State<SqlitePool>,
     Path((project, id)): Path<(i64, i64)>,
     Query(query): Query<DeleteQuery>,

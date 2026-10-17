@@ -13,7 +13,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { connect } from './bidi.mjs';
-import { api, writeTestImage } from './rtag.mjs';
+import { ADMIN, api, signIn, writeTestImage } from './rtag.mjs';
 import { LABELS, tests } from './tests.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -71,7 +71,7 @@ start(server, [], {
   // Tests write what the host's folder dialog "picks" here, so no real dialog opens.
   RTAG_FOLDER_DIALOG: `answers:${join(work, 'folder-dialog.txt')}`,
 });
-await until(async () => (await fetch(`${base}/api/projects`)).ok, 'the server');
+await until(async () => (await fetch(`${base}/api/session`)).ok, 'the server');
 
 const [command, ...prefix] = (process.env.RTAG_UI_TEST_BROWSER ?? 'firefox').split(' ').filter(Boolean);
 // A flatpak browser only sees folders it is given.
@@ -84,7 +84,9 @@ mkdirSync(join(work, 'profile'), { recursive: true });
 await until(async () => browserOutput.includes('WebDriver BiDi listening'), 'the browser');
 
 const b = await connect(browserPort);
-const client = api(base);
+// The first visit asks for the first account; the browser stays signed in as it for every test.
+await signIn(b, base, ADMIN, { setup: true });
+const client = await api(base);
 let failed = 0;
 const selected = tests.filter((test) => test.name.includes(filter));
 for (const [index, test] of selected.entries()) {

@@ -1,7 +1,28 @@
 //! Thin JSON client for the rtag server API. Errors are messages ready to show the user.
 
+use std::cell::RefCell;
+
 use gloo_net::http::{Request, RequestBuilder, Response};
+use leptos::prelude::{Callable, Callback};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+
+thread_local! {
+    static ON_SIGNED_OUT: RefCell<Option<Callback<()>>> = const { RefCell::new(None) };
+}
+
+/// What to do when the server says the session has ended (expired, or ended by a password
+/// reset): set while someone is signed in, to show the sign-in form again.
+pub fn on_signed_out(callback: Option<Callback<()>>) {
+    ON_SIGNED_OUT.with(|slot| *slot.borrow_mut() = callback);
+}
+
+fn signed_out_if_unauthorized(status: u16) {
+    if status == 401
+        && let Some(callback) = ON_SIGNED_OUT.with(|slot| *slot.borrow())
+    {
+        callback.run(());
+    }
+}
 
 #[derive(Deserialize)]
 struct ErrorBody {
@@ -66,6 +87,7 @@ pub async fn put_detailed<B: Serialize, T: DeserializeOwned>(
     })?;
     let status = response.status();
     if !response.ok() {
+        signed_out_if_unauthorized(status);
         let message = match response.json::<ErrorBody>().await {
             Ok(body) => body.error,
             Err(_) => format!("Request failed ({status})"),
@@ -75,6 +97,13 @@ pub async fn put_detailed<B: Serialize, T: DeserializeOwned>(
     read_json(response)
         .await
         .map_err(|message| Failure { status, message })
+}
+
+/// POST without a body, for actions that answer with none.
+pub async fn post_action(url: &str) -> Result<(), String> {
+    check(Request::post(&absolute(url)).send().await)
+        .await
+        .map(|_| ())
 }
 
 pub async fn delete(url: &str) -> Result<(), String> {
@@ -114,6 +143,7 @@ async fn check(result: Result<Response, gloo_net::Error>) -> Result<Response, St
     if response.ok() {
         return Ok(response);
     }
+    signed_out_if_unauthorized(response.status());
     Err(match response.json::<ErrorBody>().await {
         Ok(body) => body.error,
         Err(_) => format!("Request failed ({})", response.status()),

@@ -346,3 +346,19 @@ a.button.primary { background: var(--accent); border-color: var(--accent); color
 .view-filter .slider .value { color: var(--text); text-align: right; font-size: 12px; }
 .view-filter .reset { align-self: flex-end; height: 26px; padding: 0 10px; font-size: 12px; }
 .view-chip { height: 30px; padding: 0 10px; font-size: 13px; }
+
+/* Account menu in the top bar, and the sign-in screen */
+.account { display: flex; align-items: center; gap: 12px; margin-left: auto; font-size: 13px; }
+.actions + .account { margin-left: 0; }
+.account a { color: var(--muted); text-decoration: none; }
+.account a:hover { color: var(--text); }
+.account .username { color: var(--muted); }
+.sign-in { min-height: 100vh; display: grid; place-items: center; padding: 16px; box-sizing: border-box; }
+.sign-in-card { width: 100%; max-width: 360px; display: flex; flex-direction: column; gap: 14px; padding: 28px; background: var(--panel); border: 1px solid var(--border-strong); border-radius: 12px; box-sizing: border-box; }
+.sign-in-card h1 { margin: 8px 0 0; font-size: 22px; font-weight: 600; }
+.sign-in-card p { margin: 0; }
+.sign-in-card label { display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: 13px; }
+.sign-in-card input { color: var(--text); }
+.sign-in-card button { margin-top: 6px; }
+.reset-form { display: inline-flex; gap: 6px; }
+.reset-form input { width: 12rem; }

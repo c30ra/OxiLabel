@@ -12,6 +12,7 @@ pub mod mask;
 pub mod oriented;
 pub mod pie;
 pub mod pyramid;
+pub mod user;
 pub mod view;
 
 use serde::{Deserialize, Serialize};

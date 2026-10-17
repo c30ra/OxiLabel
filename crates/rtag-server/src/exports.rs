@@ -26,7 +26,7 @@ use sqlx::Row;
 use tokio_util::io::ReaderStream;
 use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
-use crate::{AppState, annotations::annotation_from_row, error::ApiError, labels, write_atomically_to};
+use crate::{AppState, auth::Admin, annotations::annotation_from_row, error::ApiError, labels, write_atomically_to};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -35,7 +35,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/exports/{name}/zip", get(download_zip))
 }
 
-async fn list_exporters() -> Json<Vec<ExportFormat>> {
+async fn list_exporters(_: Admin) -> Json<Vec<ExportFormat>> {
     Json(
         rtag_formats::exporters()
             .iter()
@@ -49,6 +49,7 @@ async fn list_exporters() -> Json<Vec<ExportFormat>> {
 }
 
 async fn create_export(
+    _: Admin,
     State(state): State<AppState>,
     UrlPath(project): UrlPath<i64>,
     Json(request): Json<ExportRequest>,
@@ -202,7 +203,7 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (year, month, day)
 }
 
-async fn download_zip(State(state): State<AppState>, UrlPath(name): UrlPath<String>) -> Result<impl IntoResponse, ApiError> {
+async fn download_zip(_: Admin, State(state): State<AppState>, UrlPath(name): UrlPath<String>) -> Result<impl IntoResponse, ApiError> {
     // Only names this server generates; anything else (e.g. `..`) is not an export.
     let valid = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
     let dir = state.export_dir.join(&name);

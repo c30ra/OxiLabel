@@ -7,7 +7,7 @@ use axum::{
 use rtag_core::{NewProject, Project, ProjectSummary};
 use sqlx::{Row, SqliteConnection, SqlitePool};
 
-use crate::{AppState, error::ApiError};
+use crate::{AppState, auth::Admin, error::ApiError};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -16,6 +16,7 @@ pub fn routes() -> Router<AppState> {
 }
 
 async fn create_project(
+    _: Admin,
     State(pool): State<SqlitePool>,
     Json(new): Json<NewProject>,
 ) -> Result<(StatusCode, Json<Project>), ApiError> {
@@ -89,7 +90,7 @@ async fn get_project(State(pool): State<SqlitePool>, Path(id): Path<i64>) -> Res
     Ok(Json(Project { id: row.get("id"), name: row.get("name") }))
 }
 
-async fn delete_project(State(pool): State<SqlitePool>, Path(id): Path<i64>) -> Result<StatusCode, ApiError> {
+async fn delete_project(_: Admin, State(pool): State<SqlitePool>, Path(id): Path<i64>) -> Result<StatusCode, ApiError> {
     let result = sqlx::query("DELETE FROM projects WHERE id = ?").bind(id).execute(&pool).await?;
     if result.rows_affected() == 0 {
         return Err(ApiError::NotFound);

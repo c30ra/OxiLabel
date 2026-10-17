@@ -5,13 +5,17 @@ use leptos::{prelude::*, task::spawn_local};
 use leptos_router::{components::A, hooks::use_navigate};
 use rtag_core::{FolderCount, ImportReport, ImportRequest, Label, LabelDefinition, NewProject, Project, ProjectSummary, ShapeType};
 
-use crate::api;
+use crate::{
+    account::{AccountMenu, is_admin},
+    api,
+};
 
 #[component]
 pub fn ProjectsPage() -> impl IntoView {
     let projects = LocalResource::new(|| api::get::<Vec<ProjectSummary>>("/api/projects"));
     let creating = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
+    let admin = is_admin();
 
     let on_delete = move |project: ProjectSummary| {
         let question = format!("Delete project \"{}\" and its annotations? The image files stay.", project.name);
@@ -27,11 +31,12 @@ pub fn ProjectsPage() -> impl IntoView {
     view! {
         <header class="topbar">
             <A href="/" attr:class="brand">"rtag"</A>
+            <AccountMenu />
         </header>
         <main class="page projects">
             <div class="page-head">
                 <h1>"Projects"</h1>
-                <button class="primary new-project" on:click=move |_| creating.set(true)>"New project"</button>
+                {admin.then(|| view! { <button class="primary new-project" on:click=move |_| creating.set(true)>"New project"</button> })}
             </div>
             <Show when=move || error.get().is_some()>
                 <p class="error" role="alert">{move || error.get()}</p>
@@ -41,11 +46,13 @@ pub fn ProjectsPage() -> impl IntoView {
                 Some(Err(message)) => view! { <p class="error" role="alert">{message}</p> }.into_any(),
                 Some(Ok(list)) => view! {
                     <div class="project-grid">
-                        {list.into_iter().map(|project| view! { <ProjectCard project=project on_delete=on_delete /> }).collect_view()}
-                        <button class="new-card" on:click=move |_| creating.set(true)>
-                            <span class="plus" aria-hidden="true">"+"</span>
-                            "New project"
-                        </button>
+                        {list.into_iter().map(|project| view! { <ProjectCard project=project admin=admin on_delete=on_delete /> }).collect_view()}
+                        {admin.then(|| view! {
+                            <button class="new-card" on:click=move |_| creating.set(true)>
+                                <span class="plus" aria-hidden="true">"+"</span>
+                                "New project"
+                            </button>
+                        })}
                     </div>
                 }.into_any(),
             }}
@@ -60,7 +67,7 @@ pub fn ProjectsPage() -> impl IntoView {
 }
 
 #[component]
-fn ProjectCard(project: ProjectSummary, on_delete: impl Fn(ProjectSummary) + Copy + Send + Sync + 'static) -> impl IntoView {
+fn ProjectCard(project: ProjectSummary, admin: bool, on_delete: impl Fn(ProjectSummary) + Copy + Send + Sync + 'static) -> impl IntoView {
     let percent = if project.images > 0 { project.annotated * 100 / project.images } else { 0 };
     let plural = |n: i64, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
     let target = project.clone();
@@ -79,12 +86,14 @@ fn ProjectCard(project: ProjectSummary, on_delete: impl Fn(ProjectSummary) + Cop
             <span class="swatches">
                 {project.label_colors.iter().map(|color| view! { <span class="swatch" style:background=color.clone()></span> }).collect_view()}
             </span>
-            <button class="delete" title="Delete this project" aria-label=format!("Delete {}", project.name)
-                on:click=move |ev| {
-                    // The card is a link: deleting must not open it.
-                    ev.prevent_default();
-                    on_delete(target.clone());
-                }>"×"</button>
+            {admin.then(|| view! {
+                <button class="delete" title="Delete this project" aria-label=format!("Delete {}", project.name)
+                    on:click=move |ev| {
+                        // The card is a link: deleting must not open it.
+                        ev.prevent_default();
+                        on_delete(target.clone());
+                    }>"×"</button>
+            })}
         </a>
     }
 }

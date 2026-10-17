@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use leptos::{ev::MouseEvent, prelude::*, task::spawn_local};
 use rtag_core::{Image, ImageFilter, ImagePage, RemovalReport, RemovalRequest};
 
-use crate::api;
+use crate::{account::is_admin, api};
 
 const PAGE_SIZES: [i64; 4] = [30, 60, 120, 240];
 const BYTES_PER_MB: f64 = 1_000_000.0;
@@ -20,6 +20,7 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>, selected: RwSignal<BTreeSe
     let total = RwSignal::new(0_i64);
     let anchor = RwSignal::new(None::<usize>);
     let confirming = RwSignal::new(false);
+    let admin = is_admin();
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
 
@@ -151,7 +152,7 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>, selected: RwSignal<BTreeSe
             "a" | "A" if ev.alt_key() => clear(),
             "a" | "A" => select_all(),
             "Escape" if has_selection => clear(),
-            "Delete" if has_selection => confirming.set(true),
+            "Delete" if has_selection && admin => confirming.set(true),
             "PageDown" => offset.update(|o| {
                 *o = (*o + size).min(((total.get_untracked() - 1).max(0) / size) * size)
             }),
@@ -218,7 +219,9 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>, selected: RwSignal<BTreeSe
                                 <span class="grow"><strong>{format!("{count} selected")}</strong></span>
                                 <button on:click=move |_| selected.update(|set| set.extend(page_ids()))>"Select page"</button>
                                 <button title="Alt+A" on:click=move |_| clear()>"Clear"</button>
-                                <button class="danger" title="Delete" on:click=move |_| confirming.set(true)>"Remove from project…"</button>
+                                {admin.then(|| view! {
+                                    <button class="danger" title="Delete" on:click=move |_| confirming.set(true)>"Remove from project…"</button>
+                                })}
                             }.into_any()
                         }
                     }}

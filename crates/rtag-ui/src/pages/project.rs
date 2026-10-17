@@ -5,7 +5,10 @@ use rtag_core::{ImagePage, Label, Project};
 use std::collections::BTreeSet;
 
 use super::{export::ExportDialog, images::ImageSet, import::ImportDialog, labels::LabelSet};
-use crate::api;
+use crate::{
+    account::{AccountMenu, is_admin},
+    api,
+};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Tab {
@@ -31,6 +34,7 @@ pub fn ProjectPage(tab: Tab) -> impl IntoView {
             }
         }
     });
+    let admin = is_admin();
     let importing = RwSignal::new(false);
     let exporting = RwSignal::new(false);
     let images_version = RwSignal::new(0_u32);
@@ -61,10 +65,13 @@ pub fn ProjectPage(tab: Tab) -> impl IntoView {
                         <span class="sep" aria-hidden="true">"›"</span>
                         <span class="current">{project.name.clone()}</span>
                     </nav>
-                    <div class="actions">
-                        <button on:click=move |_| importing.set(true)>"Import images…"</button>
-                        <button on:click=move |_| exporting.set(true)>"Export…"</button>
-                    </div>
+                    {admin.then(|| view! {
+                        <div class="actions">
+                            <button on:click=move |_| importing.set(true)>"Import images…"</button>
+                            <button on:click=move |_| exporting.set(true)>"Export…"</button>
+                        </div>
+                    })}
+                    <AccountMenu />
                 </header>
                 <nav class="tabs" aria-label="Project">
                     <A href=format!("/projects/{id}") attr:class=if tab == Tab::Images { "tab active" } else { "tab" }>"Images"</A>
@@ -136,7 +143,7 @@ fn GetStarted(project: i64, on_import: impl Fn() + Copy + Send + Sync + 'static)
                         <strong>"Images"</strong>
                         <span class="muted">"Import from folders of the server's image folder; nothing is copied."</span>
                     </span>
-                    <button class="primary" on:click=move |_| on_import()>"Import images…"</button>
+                    {is_admin().then(|| view! { <button class="primary" on:click=move |_| on_import()>"Import images…"</button> })}
                 </li>
                 <li>
                     <span class="mark">"3"</span>
