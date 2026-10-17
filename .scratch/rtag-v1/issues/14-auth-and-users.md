@@ -4,11 +4,11 @@
 
 **Blocked by:** 01
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] On first run I am asked to create the first account, which becomes admin
+- [x] On first run I am asked to create the first account, which becomes admin
 - [x] Unauthenticated requests are rejected, and login and logout work with a session cookie
-- [ ] Admins can create users, assign roles and reset passwords in an admin screen
+- [x] Admins can create users, assign roles and reset passwords in an admin screen
 - [x] Annotators cannot reach admin-only actions
 - [x] API tests cover login, roles and rejected access
 
