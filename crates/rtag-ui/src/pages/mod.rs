@@ -1,3 +1,4 @@
+mod cvat_import;
 mod export;
 mod images;
 mod import;

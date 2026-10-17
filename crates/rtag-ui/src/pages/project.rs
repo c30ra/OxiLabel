@@ -4,7 +4,7 @@ use rtag_core::{ImagePage, Label, Project};
 
 use std::collections::BTreeSet;
 
-use super::{export::ExportDialog, images::ImageSet, import::ImportDialog, jobs::JobsTab, labels::LabelSet, statistics::StatisticsTab};
+use super::{cvat_import::CvatImportDialog, export::ExportDialog, images::ImageSet, import::ImportDialog, jobs::JobsTab, labels::LabelSet, statistics::StatisticsTab};
 use crate::{
     account::{AccountMenu, is_admin},
     api,
@@ -38,6 +38,7 @@ pub fn ProjectPage(tab: Tab) -> impl IntoView {
     });
     let admin = is_admin();
     let importing = RwSignal::new(false);
+    let importing_annotations = RwSignal::new(false);
     let exporting = RwSignal::new(false);
     let images_version = RwSignal::new(0_u32);
     // The grid's selection; the export dialog can export just these images.
@@ -71,6 +72,7 @@ pub fn ProjectPage(tab: Tab) -> impl IntoView {
                     {admin.then(|| view! {
                         <div class="actions">
                             <button on:click=move |_| importing.set(true)>"Import images…"</button>
+                            <button class="import-annotations" on:click=move |_| importing_annotations.set(true)>"Import annotations…"</button>
                             <button on:click=move |_| exporting.set(true)>"Export…"</button>
                         </div>
                     })}
@@ -97,6 +99,11 @@ pub fn ProjectPage(tab: Tab) -> impl IntoView {
                 </main>
                 <Show when=move || exporting.get()>
                     <ExportDialog project=id project_name=export_name.clone() selected=selected on_close=move || exporting.set(false) />
+                </Show>
+                <Show when=move || importing_annotations.get()>
+                    <CvatImportDialog project=id
+                        on_imported=move || images_version.update(|v| *v += 1)
+                        on_close=move || importing_annotations.set(false) />
                 </Show>
                 <Show when=move || importing.get()>
                     <ImportDialog

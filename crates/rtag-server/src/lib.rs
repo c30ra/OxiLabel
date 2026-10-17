@@ -1,5 +1,6 @@
 mod annotations;
 mod auth;
+mod cvat;
 pub mod enhance;
 mod error;
 mod exports;
@@ -103,6 +104,7 @@ pub async fn app(config: Config) -> Result<Router, sqlx::Error> {
         .merge(tiles::routes())
         .merge(users::routes())
         .merge(jobs::routes())
+        .merge(cvat::routes())
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_session));
     Ok(Router::new().merge(signed_in).merge(auth::routes()).with_state(state))
 }

@@ -5,7 +5,10 @@ use axum::{
     extract::{Path, State},
     routing::get,
 };
-use rtag_core::annotation::{Annotation, ImageAnnotations, SaveAnnotations};
+use rtag_core::{
+    Label,
+    annotation::{Annotation, ImageAnnotations, SaveAnnotations},
+};
 use sqlx::{Row, SqliteConnection, SqlitePool};
 
 use crate::{AppState, auth::CurrentUser, error::ApiError, jobs, labels};
@@ -82,13 +85,7 @@ async fn save_annotations(
             .iter()
             .find(|label| label.id == annotation.label)
             .ok_or_else(|| invalid(format!("there is no label with id {}", annotation.label)))?;
-        let shape_type = annotation.shape.shape_type();
-        if !label.shape_types.contains(&shape_type) {
-            let name = serde_json::to_value(shape_type).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
-            return Err(invalid(format!("label \"{}\" does not allow {name} shapes", label.name)));
-        }
-        annotation.shape.validate(width, height).map_err(invalid)?;
-        label.check_attributes(&annotation.attributes).map_err(invalid)?;
+        check_annotation(label, annotation, width, height).map_err(invalid)?;
         let repeated = annotation.shape.is_tag()
             && request.annotations[..index].iter().any(|earlier| earlier.shape.is_tag() && earlier.label == annotation.label);
         if repeated {
@@ -107,7 +104,26 @@ async fn save_annotations(
         return Err(stale(current));
     }
     sqlx::query("DELETE FROM annotations WHERE image_id = ?").bind(image).execute(&mut *tx).await?;
-    for (position, annotation) in request.annotations.iter().enumerate() {
+    insert_annotations(&mut tx, project, image, 0, &request.annotations).await?;
+    tx.commit().await?;
+    Ok(Json(ImageAnnotations { version: request.base_version + 1, annotations: request.annotations }))
+}
+
+/// Checks that `label` allows the annotation's shape, the shape lies in a `width` × `height`
+/// image, and its attribute values suit the label.
+pub(crate) fn check_annotation(label: &Label, annotation: &Annotation, width: u32, height: u32) -> Result<(), String> {
+    let shape_type = annotation.shape.shape_type();
+    if !label.shape_types.contains(&shape_type) {
+        let name = serde_json::to_value(shape_type).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
+        return Err(format!("label \"{}\" does not allow {name} shapes", label.name));
+    }
+    annotation.shape.validate(width, height)?;
+    label.check_attributes(&annotation.attributes)
+}
+
+/// Stores `annotations` on the image in order, the first at drawing position `first`.
+pub(crate) async fn insert_annotations(conn: &mut SqliteConnection, project: i64, image: i64, first: i64, annotations: &[Annotation]) -> Result<(), ApiError> {
+    for (offset, annotation) in annotations.iter().enumerate() {
         let shape = serde_json::to_string(&annotation.shape).expect("shapes serialize");
         sqlx::query(
             "INSERT INTO annotations (image_id, project_id, label_id, position, shape, source, confidence, attributes, hidden, locked) \
@@ -116,18 +132,17 @@ async fn save_annotations(
         .bind(image)
         .bind(project)
         .bind(annotation.label)
-        .bind(position as i64)
+        .bind(first + offset as i64)
         .bind(shape)
         .bind(&annotation.source)
         .bind(annotation.confidence)
         .bind(serde_json::to_string(&annotation.attributes).expect("attributes serialize"))
         .bind(annotation.hidden)
         .bind(annotation.locked)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
     }
-    tx.commit().await?;
-    Ok(Json(ImageAnnotations { version: request.base_version + 1, annotations: request.annotations }))
+    Ok(())
 }
 
 fn stale(current: i64) -> ApiError {

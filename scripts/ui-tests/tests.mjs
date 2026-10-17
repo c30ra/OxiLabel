@@ -1280,3 +1280,56 @@ tests.push({
     }
   },
 });
+
+tests.push({
+  name: 'a CVAT export is previewed, its labels mapped, created or left out, and then imported',
+  async run(t) {
+    const p = t.project.id;
+    const xml = `<?xml version="1.0" encoding="utf-8"?>
+<annotations><version>1.1</version>
+  <meta><project><labels>
+    <label><name>crack</name><color>#e6194b</color><type>any</type><attributes></attributes></label>
+    <label><name>newbie</name><color>#123456</color><type>any</type><attributes></attributes></label>
+  </labels></project></meta>
+  <image id="0" name="cvat/test.png" width="1600" height="1000">
+    <box label="crack" source="manual" occluded="0" xtl="100" ytl="100" xbr="200" ybr="150" z_order="0"></box>
+    <ellipse label="newbie" source="manual" occluded="0" cx="400" cy="400" rx="50" ry="20" rotation="30" z_order="1"></ellipse>
+  </image>
+  <image id="1" name="missing.png" width="10" height="10"></image>
+</annotations>`;
+    const file = join(t.work, 'cvat-export.xml');
+    writeFileSync(file, xml);
+    const importButton = () => t.b.eval(`document.querySelector('.cvat-dialog button.import')?.textContent ?? ''`);
+    const choose = (label, value) => t.b.eval(`(() => {
+      const s = document.querySelector('.cvat-labels tr[data-label="${label}"] select');
+      s.value = ${JSON.stringify(value)};
+      s.dispatchEvent(new Event('change', { bubbles: true }));
+      return 1;
+    })()`);
+
+    await t.b.goto(`${t.base}/projects/${p}`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('button.import-annotations')`), 'the button');
+    await t.b.eval(`document.querySelector('button.import-annotations').click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.cvat-dialog input.cvat-file')`), 'the dialog');
+    await t.b.setFiles('.cvat-dialog input.cvat-file', [file]);
+    await t.b.waitFor(() => t.b.eval(`document.querySelector('.cvat-summary')?.textContent === '1 of 2 images match.'`), 'the preview');
+    const choices = await t.b.json(`[...document.querySelectorAll('.cvat-labels tbody tr')].map((r) => [r.dataset.label, r.querySelector('select').selectedOptions[0].textContent])`);
+    equal(choices, [['crack', '→ crack'], ['newbie', 'New label']], 'suggested choices');
+    equal(await t.b.eval(`document.querySelector('.cvat-unmatched summary').textContent`), '1 image with no project image of that file name', 'unmatched');
+    equal(await importButton(), 'Import 2 annotations', 'button before');
+
+    await choose('newbie', 'skip');
+    await t.b.waitFor(async () => (await importButton()) === 'Import 1 annotation', 'the preview without newbie');
+    equal(await t.b.eval(`document.querySelector('.cvat-skipped li').textContent`), '1 × label "newbie" is skipped', 'skipped');
+    await choose('newbie', 'create');
+    await t.b.waitFor(async () => (await importButton()) === 'Import 2 annotations', 'the preview with newbie');
+    await t.b.eval(`document.querySelector('.cvat-dialog button.import').click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`document.querySelector('.cvat-result')?.textContent === 'Imported 2 annotations into 1 image.'`), 'the result');
+
+    const { annotations } = await t.api.annotations(t.project);
+    equal(annotations.map((a) => a.shape.type), ['rectangle', 'ellipse'], 'imported shapes');
+    const labels = await t.api.call('GET', `/api/projects/${p}/labels`);
+    equal(labels.at(-1).name, 'newbie', 'created label');
+    equal(annotations[1].label, labels.at(-1).id, 'ellipse label');
+  },
+});

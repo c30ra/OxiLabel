@@ -29,14 +29,21 @@ async fn create_label(
     Json(definition): Json<LabelDefinition>,
 ) -> Result<(StatusCode, Json<Label>), ApiError> {
     let mut tx = pool.begin().await?;
-    let others = project_labels(&mut tx, project).await?;
+    let label = insert_label(&mut tx, project, definition).await?;
+    tx.commit().await?;
+    Ok((StatusCode::CREATED, Json(label)))
+}
+
+/// Checks `definition` against the project's labels and adds it with the next id.
+pub(crate) async fn insert_label(conn: &mut SqliteConnection, project: i64, definition: LabelDefinition) -> Result<Label, ApiError> {
+    let others = project_labels(conn, project).await?;
     let definition = definition.validated(&others).map_err(ApiError::BadRequest)?;
     // Ids come from a per-project counter, so a deleted label's id is never handed out again.
     let id: i64 = sqlx::query(
         "UPDATE projects SET next_label_id = next_label_id + 1 WHERE id = ? RETURNING next_label_id - 1 AS id",
     )
     .bind(project)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *conn)
     .await?
     .ok_or(ApiError::NotFound)?
     .get("id");
@@ -54,10 +61,9 @@ async fn create_label(
     .bind(serde_json::to_string(&label.attributes).expect("attributes serialize"))
     .bind(label.line_width)
     .bind(label.point_radius)
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await?;
-    tx.commit().await?;
-    Ok((StatusCode::CREATED, Json(label)))
+    Ok(label)
 }
 
 async fn list_labels(user: CurrentUser, State(pool): State<SqlitePool>, Path(project): Path<i64>) -> Result<Json<Vec<Label>>, ApiError> {

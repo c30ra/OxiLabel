@@ -3,6 +3,7 @@
 //! tests) and whether images are included. Adding a format means implementing [`Exporter`] and
 //! listing it in [`exporters`]; the server and the core need no changes.
 
+pub mod cvat;
 mod regions;
 mod yolo;
 
