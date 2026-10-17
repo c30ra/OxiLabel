@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ShapeType,
     attribute::Attributes,
+    ellipse::Ellipse,
     geometry::{Point, Rect, bounds_of, distance_to_segment, inside_polygon, polygon_area},
     mask::Mask,
     oriented::OrientedRect,
@@ -23,8 +24,8 @@ pub enum Shape {
     Polyline { points: Vec<Point> },
     /// Separate points, e.g. keypoints or small defects.
     Points { points: Vec<Point> },
-    /// A circle (the outline of a sphere or a round defect).
-    Circle { centre: Point, radius: f64 },
+    /// An ellipse, possibly turned; a circle has equal radii.
+    Ellipse(Ellipse),
     /// Painted pixels (brush and eraser), run-length encoded.
     Mask(Mask),
     /// An image-level tag: the label applies to the whole image, so there is no geometry.
@@ -42,7 +43,7 @@ impl Shape {
             Shape::Polygon { .. } => ShapeType::Polygon,
             Shape::Polyline { .. } => ShapeType::Polyline,
             Shape::Points { .. } => ShapeType::Points,
-            Shape::Circle { .. } => ShapeType::Circle,
+            Shape::Ellipse(_) => ShapeType::Ellipse,
             Shape::Mask(_) => ShapeType::Mask,
             Shape::Tag => ShapeType::Tag,
         }
@@ -62,7 +63,7 @@ impl Shape {
             }
             Shape::OrientedRectangle(rect) => rect.corners().to_vec(),
             Shape::Polygon { points } | Shape::Polyline { points } | Shape::Points { points } => points.clone(),
-            Shape::Circle { centre, .. } => vec![*centre],
+            Shape::Ellipse(ellipse) => vec![ellipse.centre],
             Shape::Mask(_) | Shape::Tag => Vec::new(),
         }
     }
@@ -73,7 +74,7 @@ impl Shape {
             Shape::Rectangle(_) | Shape::OrientedRectangle(_) => 4,
             Shape::Polygon { .. } => 3,
             Shape::Polyline { .. } => 2,
-            Shape::Points { .. } | Shape::Circle { .. } => 1,
+            Shape::Points { .. } | Shape::Ellipse(_) => 1,
             Shape::Mask(_) | Shape::Tag => 0,
         }
     }
@@ -89,7 +90,7 @@ impl Shape {
                 let corners = self.vertices();
                 (0..4).map(|i| (corners[i], corners[(i + 1) % 4])).collect()
             }
-            Shape::Points { .. } | Shape::Circle { .. } | Shape::Mask(_) | Shape::Tag => Vec::new(),
+            Shape::Points { .. } | Shape::Ellipse(_) | Shape::Mask(_) | Shape::Tag => Vec::new(),
         }
     }
 
@@ -100,9 +101,7 @@ impl Shape {
             Shape::Rectangle(rect) => *rect,
             Shape::OrientedRectangle(rect) => rect.bounds(),
             Shape::Polygon { points } | Shape::Polyline { points } | Shape::Points { points } => bounds_of(points),
-            Shape::Circle { centre, radius } => {
-                Rect::new(centre.x - radius, centre.y - radius, centre.x + radius, centre.y + radius)
-            }
+            Shape::Ellipse(ellipse) => ellipse.bounds(),
             Shape::Mask(mask) => {
                 let area = mask.area();
                 Rect::new(f64::from(area.left), f64::from(area.top), f64::from(area.right()), f64::from(area.bottom()))
@@ -122,7 +121,7 @@ impl Shape {
             Shape::Polygon { points } => Shape::Polygon { points: shift(points) },
             Shape::Polyline { points } => Shape::Polyline { points: shift(points) },
             Shape::Points { points } => Shape::Points { points: shift(points) },
-            Shape::Circle { centre, radius } => Shape::Circle { centre: centre.offset(dx, dy), radius: *radius },
+            Shape::Ellipse(ellipse) => Shape::Ellipse(ellipse.translated(dx, dy)),
             Shape::Mask(mask) => {
                 let shift = |at: u32, by: f64| (f64::from(at) + by).round().max(0.0) as u32;
                 Shape::Mask(Mask { left: shift(mask.left, dx), top: shift(mask.top, dy), ..mask.clone() })
@@ -141,7 +140,7 @@ impl Shape {
             Shape::Polygon { points } => inside_polygon(point, points) || near_edge(),
             Shape::Polyline { .. } => near_edge(),
             Shape::Points { points } => points.iter().any(|p| p.distance(point) <= margin),
-            Shape::Circle { centre, radius } => centre.distance(point) <= radius + margin,
+            Shape::Ellipse(ellipse) => ellipse.contains(point, margin),
             Shape::Mask(mask) => mask.contains(point),
             Shape::Tag => false,
         }
@@ -159,7 +158,7 @@ impl Shape {
                     *point = to;
                 }
             }
-            Shape::Circle { centre, .. } => *centre = to,
+            Shape::Ellipse(ellipse) => ellipse.centre = to,
             Shape::Mask(_) | Shape::Tag => {}
         }
         moved
@@ -199,11 +198,11 @@ impl Shape {
             _ => {}
         }
         let mut vertices = self.vertices();
-        if let Shape::Circle { radius, .. } = self {
-            if !(radius.is_finite() && *radius > 0.0) {
-                return Err("a circle needs a radius".into());
+        if let Shape::Ellipse(ellipse) = self {
+            if !(ellipse.rx.is_finite() && ellipse.ry.is_finite() && ellipse.rx > 0.0 && ellipse.ry > 0.0 && ellipse.angle.is_finite()) {
+                return Err("an ellipse needs two radii and an angle".into());
             }
-            // The whole circle must be in the image, so check its bounding box.
+            // The whole ellipse must be in the image, so check its bounding box.
             let bounds = self.bounds();
             vertices = vec![bounds.min, bounds.max];
         }
@@ -396,16 +395,19 @@ mod tests {
     }
 
     #[test]
-    fn circles_hit_test_validate_and_move() {
-        let circle = Shape::Circle { centre: Point::new(50.0, 25.0), radius: 10.0 };
-        assert!(circle.contains(Point::new(58.0, 25.0), 0.0));
-        assert!(!circle.contains(Point::new(58.0, 33.0), 0.0));
-        assert_eq!(circle.bounds(), Rect::new(40.0, 15.0, 60.0, 35.0));
-        assert_eq!(circle.validate(100, 50), Ok(()));
-        assert!(Shape::Circle { centre: Point::new(5.0, 25.0), radius: 10.0 }.validate(100, 50).is_err(), "sticks out");
-        assert!(Shape::Circle { centre: Point::new(50.0, 25.0), radius: 0.0 }.validate(100, 50).is_err());
-        assert_eq!(circle.with_vertex(0, Point::new(60.0, 30.0)), Shape::Circle { centre: Point::new(60.0, 30.0), radius: 10.0 });
-        assert_eq!(serde_json::to_value(&circle).unwrap()["type"], "circle");
+    fn ellipses_hit_test_validate_and_move() {
+        let ellipse = Shape::Ellipse(Ellipse { centre: Point::new(50.0, 25.0), rx: 10.0, ry: 5.0, angle: 0.0 });
+        assert!(ellipse.contains(Point::new(58.0, 25.0), 0.0));
+        assert!(!ellipse.contains(Point::new(50.0, 31.0), 0.0));
+        assert_eq!(ellipse.bounds(), Rect::new(40.0, 20.0, 60.0, 30.0));
+        assert_eq!(ellipse.validate(100, 50), Ok(()));
+        assert!(Shape::Ellipse(Ellipse::circle(Point::new(5.0, 25.0), 10.0)).validate(100, 50).is_err(), "sticks out");
+        assert!(Shape::Ellipse(Ellipse { ry: 0.0, ..Ellipse::circle(Point::new(50.0, 25.0), 5.0) }).validate(100, 50).is_err());
+        // Turned upright, the long axis no longer fits the 50 px height.
+        assert!(Shape::Ellipse(Ellipse { rx: 30.0, angle: std::f64::consts::FRAC_PI_2, ..Ellipse::circle(Point::new(50.0, 25.0), 5.0) }).validate(100, 50).is_err());
+        let moved = ellipse.with_vertex(0, Point::new(60.0, 30.0));
+        assert_eq!(moved.vertices(), vec![Point::new(60.0, 30.0)]);
+        assert_eq!(serde_json::to_value(&ellipse).unwrap(), serde_json::json!({"type": "ellipse", "centre": {"x": 50.0, "y": 25.0}, "rx": 10.0, "ry": 5.0, "angle": 0.0}));
     }
 
     #[test]

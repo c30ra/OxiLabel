@@ -33,8 +33,8 @@ pub enum PieAction {
     SetFreehand(bool),
     /// Points: one point per click (true) or several per shape (false).
     SetSinglePoint(bool),
-    /// Circle: two points are a diameter (true) or centre and radius (false).
-    SetDiameter(bool),
+    /// Ellipse: drawn from its centre (true) or across its box (false).
+    SetEllipseFromCentre(bool),
     /// Brush: erase (true) or paint (false).
     SetEraser(bool),
     /// Brush: fuzzy fill (true) or painting (false).

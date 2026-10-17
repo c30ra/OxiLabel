@@ -177,7 +177,7 @@ export const tests = [
       await t.b.click(...w.at(800, 500), { button: 2 });
       const state = await w.state();
       equal(state.pie, 'Tools', 'pie after a right-button tap without a last tool');
-      equal(state.pieItems.filter((item) => item.enabled).map((item) => item.name), ['Select', 'Rectangle', 'Polygon', 'Points', 'Polyline', 'Brush', 'Circle', 'Tag'], 'enabled tools');
+      equal(state.pieItems.filter((item) => item.enabled).map((item) => item.name), ['Select', 'Rectangle', 'Polygon', 'Points', 'Polyline', 'Brush', 'Ellipse', 'Tag'], 'enabled tools');
       equal(state.pieItems.length, 8, 'tool slots');
     },
   },
@@ -399,7 +399,7 @@ tests.push(
   },
 );
 
-// Freehand polylines, single points, circles and the tool settings bar.
+// Freehand polylines, single points, ellipses and the tool settings bar.
 const clickOption = async (t, text) => {
   const rect = await t.b.json(`[...document.querySelectorAll('.tool-options button')].find((b) => b.textContent.startsWith(${JSON.stringify(text)})).getBoundingClientRect()`);
   await t.b.click(rect.x + rect.width / 2, rect.y + rect.height / 2);
@@ -421,7 +421,7 @@ tests.push(
         p: 'Snap 15°Shift',
         l: 'Click* | Freehand | Snap 15°Shift',
         '.': 'Multiple* | Single point',
-        c: 'Centre and radius* | Diameter',
+        c: 'From center* | Across the box',
         b: 'Paint* | Fuzzy fill | Brush* | Eraser | Stop at edgesShift | Filtered view',
       }, 'options per tool');
     },
@@ -467,23 +467,41 @@ tests.push(
     },
   },
   {
-    name: 'circles are drawn from the centre or by their diameter, and resized by their handle',
+    name: 'ellipses are drawn from the centre or across their box, Shift makes a circle, and handles resize and turn them',
     async run(t) {
       const w = await openWorkspace(t.b, t.base, t.project);
+      const tolerance = 2 / t.scale(w);
+      const sizes = (shape) => [shape.centre.x, shape.centre.y, shape.rx, shape.ry].map(Math.round);
       await t.b.key('c');
-      await t.b.drag(w.at(500, 500), w.at(600, 500));
-      let list = await saved(t, (list) => list.length === 1, 'the circle');
-      near([list[0].shape.centre.x, list[0].shape.centre.y, list[0].shape.radius].map(Math.round), [500, 500, 100], 2 / t.scale(w), 'centre and radius');
-      await clickOption(t, 'Diameter');
+      await t.b.drag(w.at(500, 500), w.at(600, 550));
+      let list = await saved(t, (list) => list.length === 1, 'the ellipse');
+      equal(list[0].shape.type, 'ellipse', 'type');
+      near(sizes(list[0].shape), [500, 500, 100, 50], tolerance, 'from the centre');
+      await t.b.drag(w.at(300, 800), w.at(360, 780), { modifiers: [KEY.shift] });
+      list = await saved(t, (list) => list.length === 2, 'the circle');
+      near(sizes(list[1].shape), [300, 800, 60, 60], tolerance, 'Shift: a circle');
+      // Near the left edge the circle shrinks around its centre and stays a circle.
+      await t.b.drag(w.at(30, 500), w.at(90, 520), { modifiers: [KEY.shift] });
+      list = await saved(t, (list) => list.length === 3, 'the circle at the edge');
+      near(sizes(list[2].shape), [30, 500, 30, 30], tolerance, 'a circle at the edge');
+      await clickOption(t, 'Across the box');
       await t.b.click(...w.at(200, 200));
-      await t.b.click(...w.at(400, 200));
-      list = await saved(t, (list) => list.length === 2, 'the diameter circle');
-      near([list[1].shape.centre.x, list[1].shape.centre.y, list[1].shape.radius].map(Math.round), [300, 200, 100], 2 / t.scale(w), 'diameter circle');
+      await t.b.click(...w.at(400, 300));
+      list = await saved(t, (list) => list.length === 4, 'the boxed ellipse');
+      near(sizes(list[3].shape), [300, 250, 100, 50], tolerance, 'across the box');
+
       await t.b.key('v');
       await t.b.click(...w.at(500, 500));
       await t.b.drag(w.at(600, 500), w.at(650, 500));
-      list = await saved(t, (list) => Math.round(list[0].shape.radius) >= 148, 'the radius change');
-      near([Math.round(list[0].shape.radius)], [150], 2 / t.scale(w), 'radius');
+      list = await saved(t, (list) => Math.round(list[0].shape.rx) >= 148, 'the rx change');
+      await t.b.drag(w.at(500, 550), w.at(500, 580));
+      list = await saved(t, (list) => Math.round(list[0].shape.ry) >= 78, 'the ry change');
+      near(sizes(list[0].shape), [500, 500, 150, 80], tolerance, 'radii');
+      // The rotation handle sits above the ellipse; pulled to its right, it turns it a quarter.
+      const [hx, hy] = w.at(500, 500 - 80);
+      await t.b.drag([hx, hy - 24], w.at(700, 500));
+      list = await saved(t, (list) => Math.abs(list[0].shape.angle - Math.PI / 2) < 0.05, 'the turn');
+      near(sizes(list[0].shape), [500, 500, 150, 80], tolerance, 'turned, same size');
     },
   },
 );

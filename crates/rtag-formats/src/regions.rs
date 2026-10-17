@@ -19,8 +19,8 @@ use rtag_core::{
     mask::Bitmap,
 };
 
-/// Corners of a circle's polygon.
-const CIRCLE_CORNERS: usize = 36;
+/// Corners of an ellipse's polygon.
+const ELLIPSE_CORNERS: usize = 36;
 /// Traced outlines lose points that lie within this many pixels of the simplified line.
 const TRACE_TOLERANCE: f64 = 0.75;
 
@@ -41,14 +41,7 @@ pub fn regions(annotation: &Annotation, label: &Label, image: (u32, u32), detail
         Shape::Tag => Vec::new(),
         Shape::Polygon { points } => vec![points.clone()],
         Shape::Rectangle(_) | Shape::OrientedRectangle(_) => vec![annotation.shape.vertices()],
-        Shape::Circle { centre, radius } => vec![
-            (0..CIRCLE_CORNERS)
-                .map(|i| {
-                    let angle = std::f64::consts::TAU * i as f64 / CIRCLE_CORNERS as f64;
-                    Point::new(centre.x + radius * angle.cos(), centre.y + radius * angle.sin())
-                })
-                .collect(),
-        ],
+        Shape::Ellipse(ellipse) => vec![ellipse.outline(ELLIPSE_CORNERS)],
         Shape::Mask(mask) => traced(&mask.to_bitmap(), detail),
         Shape::Polyline { points } => {
             let thickness = label.line_width.trunc().max(1.0);

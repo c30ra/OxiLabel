@@ -96,7 +96,7 @@ async fn omitted_shape_types_allow_every_shape() {
     let (_, label) = add_label(&app, project, json!({"name": "crack", "color": "#ffffff"})).await;
     assert_eq!(
         label["shape_types"],
-        json!(["rectangle", "oriented_rectangle", "polygon", "polyline", "points", "circle", "mask", "tag"])
+        json!(["rectangle", "oriented_rectangle", "polygon", "polyline", "points", "ellipse", "mask", "tag"])
     );
 }
 

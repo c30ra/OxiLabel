@@ -9,7 +9,8 @@
 //! or a double-click (a polygon also by clicking its first vertex); Backspace drops the last
 //! vertex and Shift snaps lines to 15°. Freehand polylines are dragged, with a vertex every
 //! "spacing" pixels (`[` and `]` change it); single-point mode makes each click one point.
-//! Circle (C) draws centre and radius (or a diameter) by a drag or two clicks. Brush (B) paints
+//! Ellipse (C) draws from its centre or across its box by a drag or two clicks; Shift makes a
+//! circle and Alt switches between centre and box, as for rectangles. Brush (B) paints
 //! masks and its eraser mode (E) erases them (see `masks`); Ctrl inverts a stroke, and `[` and
 //! `]` or F (then move the pointer right or left and click; Esc cancels) change the size. Its fuzzy fill mode
 //! (U) fills the similar region around a click (`fill`), a drag changing the threshold. Freehand
@@ -32,6 +33,7 @@ use rtag_core::{
     annotation::{Annotation, Shape, overlapping, topmost_at},
     attribute::Attributes,
     edges::EdgeMap,
+    ellipse::Ellipse,
     fill::{FillSettings, grow},
     geometry::{Handle, Point, Rect, snap_angle, steps_along, steps_towards},
     mask::{Bitmap, PixelRect},
@@ -47,6 +49,7 @@ use crate::{
     analysis::Analysis,
     masks::{FillPreview, SpriteCache, Stroke},
     pie::{LabelSearch, Pie, PieAction, PieItem, PieMenu, SearchEntry, now},
+    side_panel,
     viewer::{context_2d, typing_in_a_field},
 };
 
@@ -91,7 +94,7 @@ pub enum Tool {
     Polygon,
     Polyline,
     Points,
-    Circle,
+    Ellipse,
     /// Paints masks; its eraser mode erases them.
     Brush,
     /// Never active: picking it, then a label, toggles that label as an image tag.
@@ -107,7 +110,7 @@ impl Tool {
             Tool::Polygon => Some(ShapeType::Polygon),
             Tool::Polyline => Some(ShapeType::Polyline),
             Tool::Points => Some(ShapeType::Points),
-            Tool::Circle => Some(ShapeType::Circle),
+            Tool::Ellipse => Some(ShapeType::Ellipse),
             Tool::Brush => Some(ShapeType::Mask),
             Tool::Tag => Some(ShapeType::Tag),
         }
@@ -120,7 +123,7 @@ impl Tool {
             Tool::Polygon => "Polygon",
             Tool::Polyline => "Polyline",
             Tool::Points => "Points",
-            Tool::Circle => "Circle",
+            Tool::Ellipse => "Ellipse",
             Tool::Brush => "Brush",
             Tool::Tag => "Tag",
         }
@@ -134,7 +137,7 @@ impl Tool {
             "p" | "P" => Some(Tool::Polygon),
             "l" | "L" => Some(Tool::Polyline),
             "." => Some(Tool::Points),
-            "c" | "C" => Some(Tool::Circle),
+            "c" | "C" => Some(Tool::Ellipse),
             "b" | "B" => Some(Tool::Brush),
             _ => None,
         }
@@ -168,8 +171,9 @@ pub struct Editor {
     pub spacing: RwSignal<f64>,
     /// Points: every click is a finished one-point annotation.
     pub single_point: RwSignal<bool>,
-    /// Circle: the two points are the ends of a diameter instead of centre and radius.
-    pub diameter: RwSignal<bool>,
+    /// Ellipse: drawn from its centre out (true) or across its bounding box (false); Alt inverts
+    /// it while drawing.
+    pub ellipse_from_centre: RwSignal<bool>,
     /// Brush: diameter in image pixels, and whether it erases.
     pub brush_size: RwSignal<f64>,
     pub eraser: RwSignal<bool>,
@@ -209,7 +213,7 @@ pub struct Modes {
     oriented: bool,
     freehand: bool,
     single_point: bool,
-    diameter: bool,
+    ellipse_from_centre: bool,
     fill: bool,
     eraser: bool,
 }
@@ -226,20 +230,20 @@ impl Editor {
     }
 
     fn mode_signals(&self) -> [RwSignal<bool>; 6] {
-        [self.oriented, self.freehand, self.single_point, self.diameter, self.fill, self.eraser]
+        [self.oriented, self.freehand, self.single_point, self.ellipse_from_centre, self.fill, self.eraser]
     }
 
     /// The current modes (tracked).
     pub fn modes(&self) -> Modes {
-        let [oriented, freehand, single_point, diameter, fill, eraser] = self.mode_signals().map(|mode| mode.get());
-        Modes { oriented, freehand, single_point, diameter, fill, eraser }
+        let [oriented, freehand, single_point, ellipse_from_centre, fill, eraser] = self.mode_signals().map(|mode| mode.get());
+        Modes { oriented, freehand, single_point, ellipse_from_centre, fill, eraser }
     }
 
     /// Switches to `tool`, `label` and `modes`, touching only what differs, so a shape being
     /// drawn with them is kept.
     fn restore(&self, tool: Tool, label: i64, modes: Modes) {
-        let Modes { oriented, freehand, single_point, diameter, fill, eraser } = modes;
-        for (signal, value) in self.mode_signals().into_iter().zip([oriented, freehand, single_point, diameter, fill, eraser]) {
+        let Modes { oriented, freehand, single_point, ellipse_from_centre, fill, eraser } = modes;
+        for (signal, value) in self.mode_signals().into_iter().zip([oriented, freehand, single_point, ellipse_from_centre, fill, eraser]) {
             if signal.get_untracked() != value {
                 signal.set(value);
             }
@@ -268,7 +272,7 @@ impl Editor {
             freehand: RwSignal::new(false),
             spacing: RwSignal::new(DEFAULT_SPACING),
             single_point: RwSignal::new(false),
-            diameter: RwSignal::new(false),
+            ellipse_from_centre: RwSignal::new(true),
             brush_size: RwSignal::new(DEFAULT_BRUSH_SIZE),
             eraser: RwSignal::new(false),
             fill: RwSignal::new(false),
@@ -429,9 +433,9 @@ enum Gesture {
     Path { points: Vec<Point>, current: Point },
     /// A freehand polyline: vertices are added every `spacing` while the button is down.
     Stroke { points: Vec<Point>, current: Point },
-    /// A circle from `start` (centre, or one end of the diameter); like a rectangle, it is
+    /// An ellipse from `start` (its centre, or a corner of its box); like a rectangle, it is
     /// finished by releasing a drag or by a second click.
-    Circle { start: Point, current: Point, dragged: bool },
+    Ellipse { start: Point, current: Point, dragged: bool, circle: bool, from_centre: bool },
     /// A brush or eraser stroke; its pixels are in the `Stroke` kept beside the gesture.
     Painting,
     /// F with the brush: the outline stays at `centre` (where the pointer was) and the size
@@ -441,8 +445,10 @@ enum Gesture {
     /// A fuzzy fill from `seed`, on the tiles of the viewed level; dragging from `anchor` changes
     /// the threshold from `base`. Once `released`, it is committed as soon as growing is complete.
     Filling { seed: Point, anchor: Point, base: f64, erase: bool, released: bool },
-    /// Dragging a circle's radius handle.
-    Radius { index: usize, centre: Point, radius: f64 },
+    /// Dragging the handle of an ellipse's radius `axis` (0 for rx, 1 for ry).
+    Radius { index: usize, axis: usize, current: Ellipse },
+    /// Turning an ellipse by its rotation handle.
+    Turning { index: usize, before: Ellipse, current: Ellipse },
     /// The selection moved together by (`dx`, `dy`), limited so every shape stays in the image.
     Moving { grab: Point, dx: f64, dy: f64 },
     Resizing { index: usize, handle: Handle, before: Rect, current: Rect },
@@ -456,7 +462,10 @@ enum Gesture {
 /// What is under the pointer on the single selected shape.
 enum Grip {
     Resize(Handle, Rect),
-    Radius(Point),
+    /// An ellipse's radius handle: 0 for rx, 1 for ry.
+    Radius(usize),
+    /// An ellipse's rotation handle.
+    Turn,
     Vertex(usize),
     Midpoint(usize),
     Rotate(OrientedRect),
@@ -530,11 +539,13 @@ pub fn AnnotationLayer(
                     nearest(&shape.vertices(), point, reach).map(Grip::Vertex)
                 }
             }
-            Shape::Circle { centre, radius } => {
-                if Point::new(centre.x + radius, centre.y).distance(point) <= reach {
-                    Some(Grip::Radius(*centre))
+            Shape::Ellipse(ellipse) => {
+                if ellipse.rotation_handle(ROTATION_HANDLE_DISTANCE / scale).distance(point) <= reach {
+                    Some(Grip::Turn)
                 } else {
-                    nearest(&shape.vertices(), point, reach).map(Grip::Vertex)
+                    nearest(&ellipse.radius_handles(), point, reach)
+                        .map(Grip::Radius)
+                        .or_else(|| nearest(&shape.vertices(), point, reach).map(Grip::Vertex))
                 }
             }
             Shape::Mask(_) | Shape::Tag => None,
@@ -574,21 +585,21 @@ pub fn AnnotationLayer(
         }
         add_shape(Shape::Rectangle(rect));
     };
-    // A circle from two points, shrunk if needed so it stays inside the image.
-    let circle_from = move |start: Point, end: Point| {
-        let (centre, radius) = if editor.diameter.get_untracked() {
-            (start.midpoint(end), start.distance(end) / 2.0)
-        } else {
-            (start, start.distance(end))
-        };
-        let room = centre.x.min(centre.y).min(width - centre.x).min(height - centre.y);
-        Shape::Circle { centre, radius: radius.min(room) }
+    // The ellipse filling the box a drag spans (as for rectangles), shrunk around its centre
+    // to stay inside the image.
+    let ellipse_from = move |start: Point, end: Point, circle: bool, from_centre: bool| {
+        let rect = Rect::from_drag(start, end, circle, from_centre);
+        let ellipse = Ellipse::in_box(rect.min, rect.max);
+        // Exactly round: the box's halves can differ in the last bit.
+        let ellipse = if circle { Ellipse { ry: ellipse.rx, ..ellipse } } else { ellipse };
+        ellipse.fitted(image_size.0, image_size.1)
     };
-    let finish_circle = move |start: Point, end: Point, scale: f64| {
-        let circle = circle_from(start, end);
-        match circle {
-            Shape::Circle { radius, .. } if radius * scale >= MIN_SHAPE_SIZE / 2.0 => add_shape(circle),
-            _ => gesture.set(Gesture::Idle),
+    let finish_ellipse = move |start: Point, end: Point, circle: bool, from_centre: bool, scale: f64| {
+        let ellipse = ellipse_from(start, end, circle, from_centre);
+        if ellipse.rx.min(ellipse.ry) * scale >= MIN_SHAPE_SIZE / 2.0 {
+            add_shape(Shape::Ellipse(ellipse));
+        } else {
+            gesture.set(Gesture::Idle);
         }
     };
     // Finishes the polygon, polyline or points being placed.
@@ -898,7 +909,7 @@ pub fn AnnotationLayer(
             tool(Compass::SE, Tool::Points, "."),
             tool(Compass::S, Tool::Polyline, "L"),
             tool(Compass::SW, Tool::Brush, "B"),
-            tool(Compass::W, Tool::Circle, "C"),
+            tool(Compass::W, Tool::Ellipse, "C"),
             tool(Compass::NW, Tool::Tag, "T"),
         ];
         Pie { label: "Tools", items, centre, wide: false, held, opened_at: now() }
@@ -980,13 +991,13 @@ pub fn AnnotationLayer(
                 ];
                 ("Points options", items)
             }
-            Tool::Circle => {
-                let diameter = editor.diameter.get_untracked();
+            Tool::Ellipse => {
+                let from_centre = editor.ellipse_from_centre.get_untracked();
                 let items = vec![
-                    item(Compass::N, "Centre and radius", None, true, !diameter, PieAction::SetDiameter(false)),
-                    item(Compass::S, "Diameter", None, true, diameter, PieAction::SetDiameter(true)),
+                    item(Compass::N, "From center", Some("Alt"), true, from_centre, PieAction::SetEllipseFromCentre(true)),
+                    item(Compass::S, "Across the box", None, true, !from_centre, PieAction::SetEllipseFromCentre(false)),
                 ];
-                ("Circle options", items)
+                ("Ellipse options", items)
             }
             Tool::Brush => {
                 let (eraser, fill) = (editor.eraser.get_untracked(), editor.fill.get_untracked());
@@ -1133,9 +1144,9 @@ pub fn AnnotationLayer(
                 close_pie();
                 editor.single_point.set(on);
             }
-            PieAction::SetDiameter(on) => {
+            PieAction::SetEllipseFromCentre(on) => {
                 close_pie();
-                editor.diameter.set(on);
+                editor.ellipse_from_centre.set(on);
             }
             PieAction::SetEraser(on) => {
                 close_pie();
@@ -1296,12 +1307,13 @@ pub fn AnnotationLayer(
                     }
                 }
                 Grip::Rotate(rect) => gesture.set(Gesture::Rotating { index, before: rect, current: rect }),
-                Grip::Radius(centre) => {
-                    let radius = match shape {
-                        Shape::Circle { radius, .. } => radius,
-                        _ => return,
-                    };
-                    gesture.set(Gesture::Radius { index, centre, radius });
+                Grip::Radius(axis) => {
+                    let Shape::Ellipse(ellipse) = shape else { return };
+                    gesture.set(Gesture::Radius { index, axis, current: ellipse });
+                }
+                Grip::Turn => {
+                    let Shape::Ellipse(ellipse) = shape else { return };
+                    gesture.set(Gesture::Turning { index, before: ellipse, current: ellipse });
                 }
             }
             return;
@@ -1370,8 +1382,14 @@ pub fn AnnotationLayer(
                 square: ev.shift_key() != editor.square.get_untracked(),
                 from_centre: ev.alt_key() != editor.from_centre.get_untracked(),
             }),
-            (Tool::Circle, Gesture::Circle { start, .. }) => finish_circle(start, point, current.scale),
-            (Tool::Circle, _) => gesture.set(Gesture::Circle { start: point, current: point, dragged: false }),
+            (Tool::Ellipse, Gesture::Ellipse { start, circle, from_centre, .. }) => finish_ellipse(start, point, circle, from_centre, current.scale),
+            (Tool::Ellipse, _) => gesture.set(Gesture::Ellipse {
+                start: point,
+                current: point,
+                dragged: false,
+                circle: ev.shift_key(),
+                from_centre: ev.alt_key() != editor.ellipse_from_centre.get_untracked(),
+            }),
             (Tool::Brush, _) if !erasing && !label_allows(editor.label.get_untracked().unwrap_or_default(), ShapeType::Mask) => {
                 let label = label_name(editor.label.get_untracked().unwrap_or_default());
                 editor.notice.set(Some(format!("“{label}” cannot be used for masks.")));
@@ -1466,9 +1484,15 @@ pub fn AnnotationLayer(
                     from_centre: ev.alt_key() != editor.from_centre.get_untracked(),
                 });
             }
-            Gesture::Circle { start, dragged, .. } => {
+            Gesture::Ellipse { start, dragged, .. } => {
                 let moved = current.to_screen(start).distance(screen) > DRAG_THRESHOLD;
-                gesture.set(Gesture::Circle { start, current: inside(point), dragged: dragged || (moved && ev.buttons() & 1 == 1) });
+                gesture.set(Gesture::Ellipse {
+                    start,
+                    current: inside(point),
+                    dragged: dragged || (moved && ev.buttons() & 1 == 1),
+                    circle: ev.shift_key(),
+                    from_centre: ev.alt_key() != editor.ellipse_from_centre.get_untracked(),
+                });
             }
             Gesture::Stroke { mut points, .. } => {
                 let to = inside(point);
@@ -1510,9 +1534,24 @@ pub fn AnnotationLayer(
                 });
                 gesture.set(Gesture::Painting);
             }
-            Gesture::Radius { index, centre, .. } => {
-                let room = centre.x.min(centre.y).min(width - centre.x).min(height - centre.y);
-                gesture.set(Gesture::Radius { index, centre, radius: centre.distance(point).min(room) });
+            // The radius follows the handle, up to the largest that keeps the ellipse in the image.
+            Gesture::Radius { index, axis, current: ellipse } => {
+                let fits = |e: Ellipse| Shape::Ellipse(e).validate(image_size.0, image_size.1).is_ok();
+                let mut resized = ellipse.with_radius(axis, point);
+                if !fits(resized) {
+                    let wanted = ellipse.with_radius(axis, point);
+                    let (mut low, mut high) = (0.0, 1.0);
+                    for _ in 0..24 {
+                        let middle = (low + high) / 2.0;
+                        let towards = |from: f64, to: f64| from + (to - from) * middle;
+                        let between = Ellipse { rx: towards(ellipse.rx, wanted.rx), ry: towards(ellipse.ry, wanted.ry), ..ellipse };
+                        if fits(between) { (low, resized) = (middle, between) } else { high = middle }
+                    }
+                    if low == 0.0 {
+                        resized = ellipse;
+                    }
+                }
+                gesture.set(Gesture::Radius { index, axis, current: resized });
             }
             Gesture::Oriented { points, .. } => {
                 let current = snapped(points.last().copied(), inside(point), ev.shift_key() && points.len() == 1);
@@ -1538,18 +1577,21 @@ pub fn AnnotationLayer(
                 gesture.set(Gesture::Vertex { index, vertex, current: shape.with_vertex(vertex, inside(point)) });
             }
             Gesture::Rotating { index, before, .. } => {
-                let mut angle = before.angle_towards(point);
-                if ev.shift_key() != editor.snap.get_untracked() {
-                    let step = SNAP_DEGREES.to_radians();
-                    angle = (angle / step).round() * step;
-                }
+                let angle = snap_turn(before.angle_towards(point), ev.shift_key() != editor.snap.get_untracked());
                 gesture.set(Gesture::Rotating { index, before, current: before.rotated_to(angle) });
+            }
+            Gesture::Turning { index, before, current: ellipse } => {
+                let turned = before.rotated_to(snap_turn(before.angle_towards(point), ev.shift_key() != editor.snap.get_untracked()));
+                let fits = Shape::Ellipse(turned).validate(image_size.0, image_size.1).is_ok();
+                gesture.set(Gesture::Turning { index, before, current: if fits { turned } else { ellipse } });
             }
             Gesture::Selecting { start, mode, .. } => gesture.set(Gesture::Selecting { start, current: point, mode }),
             Gesture::Idle => cursor.set(match (editor.tool.get_untracked(), grip_at(point, current.scale)) {
                 (Tool::Select, Some((_, Grip::Resize(handle, _)))) => handle.cursor(),
                 (Tool::Select, Some((_, Grip::Rotate(_)))) => "grab",
-                (Tool::Select, Some((_, Grip::Radius(_)))) => "ew-resize",
+                (Tool::Select, Some((_, Grip::Turn))) => "grab",
+                (Tool::Select, Some((_, Grip::Radius(0)))) => "ew-resize",
+                (Tool::Select, Some((_, Grip::Radius(_)))) => "ns-resize",
                 (Tool::Select, Some(_)) => "move",
                 _ => "default",
             }),
@@ -1563,8 +1605,8 @@ pub fn AnnotationLayer(
             Gesture::Drawing { start, current: end, dragged: true, square, from_centre } => {
                 finish_rectangle(start, end, square, from_centre, current.scale)
             }
-            // A click without dragging leaves the circle open for a second click.
-            Gesture::Circle { start, current: end, dragged: true } => finish_circle(start, end, current.scale),
+            // A click without dragging leaves the ellipse open for a second click.
+            Gesture::Ellipse { start, current: end, dragged: true, circle, from_centre } => finish_ellipse(start, end, circle, from_centre, current.scale),
             // Releasing ends a freehand stroke; a stroke too short for two vertices keeps its end.
             Gesture::Stroke { mut points, current: end } => {
                 if points.len() < 2 && points[0].distance(end) * current.scale >= MIN_SHAPE_SIZE {
@@ -1585,11 +1627,15 @@ pub fn AnnotationLayer(
                     commit_fill();
                 }
             }
-            Gesture::Radius { index, centre, radius } => {
+            Gesture::Radius { index, current: ellipse, .. } => {
                 gesture.set(Gesture::Idle);
-                if radius * current.scale >= MIN_SHAPE_SIZE / 2.0 {
-                    editor.reshape(index, Shape::Circle { centre, radius });
+                if ellipse.rx.min(ellipse.ry) * current.scale >= MIN_SHAPE_SIZE / 2.0 {
+                    editor.reshape(index, Shape::Ellipse(ellipse));
                 }
+            }
+            Gesture::Turning { index, current: ellipse, .. } => {
+                gesture.set(Gesture::Idle);
+                editor.reshape(index, Shape::Ellipse(ellipse));
             }
             Gesture::Moving { dx, dy, .. } => {
                 gesture.set(Gesture::Idle);
@@ -1808,7 +1854,7 @@ pub fn AnnotationLayer(
                     Gesture::Resizing { index: i, current, .. } if *i == index => Shape::Rectangle(*current),
                     Gesture::Vertex { index: i, current, .. } if *i == index => current.clone(),
                     Gesture::Rotating { index: i, current, .. } if *i == index => Shape::OrientedRectangle(*current),
-                    Gesture::Radius { index: i, centre, radius } if *i == index => Shape::Circle { centre: *centre, radius: *radius },
+                    Gesture::Radius { index: i, current, .. } | Gesture::Turning { index: i, current, .. } if *i == index => Shape::Ellipse(*current),
                     Gesture::Moving { dx, dy, .. } if selected && !annotation.locked => annotation.shape.translated(*dx, *dy),
                     _ => annotation.shape.clone(),
                 };
@@ -1837,12 +1883,15 @@ pub fn AnnotationLayer(
                         Shape::Rectangle(rect) => draw::rectangle_handles(&context, current, *rect, &color),
                         Shape::OrientedRectangle(rect) => {
                             draw::vertex_handles(&context, current, &shape, &color, false);
-                            draw::rotation_handle(&context, current, *rect, &color);
+                            draw::rotation_handle(&context, current, rect.rotation_handle(0.0), rect.rotation_handle(ROTATION_HANDLE_DISTANCE / current.scale), &color);
                         }
                         Shape::Points { .. } => draw::vertex_handles(&context, current, &shape, &color, false),
-                        Shape::Circle { centre, radius } => {
+                        Shape::Ellipse(ellipse) => {
                             draw::vertex_handles(&context, current, &shape, &color, false);
-                            draw::radius_handle(&context, current, *centre, *radius, &color);
+                            for handle in ellipse.radius_handles() {
+                                draw::radius_handle(&context, current, handle, &color);
+                            }
+                            draw::rotation_handle(&context, current, ellipse.rotation_handle(0.0), ellipse.rotation_handle(ROTATION_HANDLE_DISTANCE / current.scale), &color);
                         }
                         Shape::Polygon { .. } | Shape::Polyline { .. } => {
                             draw::vertex_handles(&context, current, &shape, &color, true)
@@ -1881,12 +1930,11 @@ pub fn AnnotationLayer(
                 draw::path_preview(&context, current, &points, next, tool == Tool::Polygon, tool == Tool::Points, &pen);
             }
             Gesture::Stroke { points, current: next } => draw::path_preview(&context, current, &points, next, false, false, &pen),
-            Gesture::Circle { start, current: end, .. } => {
-                let circle = circle_from(start, end);
-                draw::shape(&context, current, &circle, Look { color: &pen, selected: false, dashed: true });
-                if let Shape::Circle { radius, .. } = circle {
-                    draw::tag(&context, current.to_screen(circle.bounds().min), &format!("r {radius:.0}"), &pen);
-                }
+            Gesture::Ellipse { start, current: end, circle, from_centre, .. } => {
+                let ellipse = ellipse_from(start, end, circle, from_centre);
+                let shape = Shape::Ellipse(ellipse);
+                draw::shape(&context, current, &shape, Look { color: &pen, selected: false, dashed: true });
+                draw::tag(&context, current.to_screen(shape.bounds().min), &side_panel::ellipse_size(&ellipse), &pen);
             }
             _ => {}
         }
@@ -1987,4 +2035,10 @@ fn with_defaults(edit: Edit, defaults: &dyn Fn(i64) -> Attributes) -> Edit {
         Edit::Batch(edits) => Edit::Batch(edits.into_iter().map(|edit| with_defaults(edit, defaults)).collect()),
         other => other,
     }
+}
+
+/// `angle` rounded to whole steps of `SNAP_DEGREES` when `snap` is on.
+fn snap_turn(angle: f64, snap: bool) -> f64 {
+    let step = SNAP_DEGREES.to_radians();
+    if snap { (angle / step).round() * step } else { angle }
 }

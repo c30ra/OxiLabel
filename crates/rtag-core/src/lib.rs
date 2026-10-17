@@ -3,6 +3,7 @@
 pub mod annotation;
 pub mod attribute;
 pub mod edges;
+pub mod ellipse;
 pub mod export;
 pub mod fill;
 pub mod filter;
@@ -61,7 +62,7 @@ pub enum ShapeType {
     Polygon,
     Polyline,
     Points,
-    Circle,
+    Ellipse,
     Mask,
     Tag,
 }
@@ -73,7 +74,7 @@ impl ShapeType {
         ShapeType::Polygon,
         ShapeType::Polyline,
         ShapeType::Points,
-        ShapeType::Circle,
+        ShapeType::Ellipse,
         ShapeType::Mask,
         ShapeType::Tag,
     ];
@@ -86,7 +87,7 @@ impl ShapeType {
             ShapeType::Polygon => "Polygon",
             ShapeType::Polyline => "Polyline",
             ShapeType::Points => "Points",
-            ShapeType::Circle => "Circle",
+            ShapeType::Ellipse => "Ellipse",
             ShapeType::Mask => "Mask",
             ShapeType::Tag => "Tag",
         }

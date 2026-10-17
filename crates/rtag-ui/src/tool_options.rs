@@ -46,8 +46,9 @@ pub fn ToolOptions(editor: Editor) -> impl IntoView {
                 Tool::Points => view! {
                     <Segmented choices=vec![("Multiple", false), ("Single point", true)] value=editor.single_point />
                 }.into_any(),
-                Tool::Circle => view! {
-                    <Segmented choices=vec![("Centre and radius", false), ("Diameter", true)] value=editor.diameter />
+                Tool::Ellipse => view! {
+                    <Segmented choices=vec![("From center", true), ("Across the box", false)] value=editor.ellipse_from_centre />
+                    <span class="muted hint">"Shift: circle · Alt: the other way"</span>
                 }.into_any(),
                 Tool::Brush => view! {
                     <Segmented choices=vec![("Paint", false), ("Fuzzy fill", true)] value=editor.fill />

@@ -3,6 +3,7 @@
 use rtag_core::{
     Label, ShapeType,
     annotation::{Annotation, Shape},
+    ellipse::Ellipse,
     geometry::{Point, Rect, polygon_area},
     mask::Mask,
     oriented::OrientedRect,
@@ -25,11 +26,14 @@ fn label(id: i64, name: &str, ignore: bool, line_width: f64, point_radius: f64) 
     }
 }
 
+/// A 20 × 10 ellipse turned by 45°.
+const ELLIPSE: Ellipse = Ellipse { centre: Point { x: 150.0, y: 30.0 }, rx: 10.0, ry: 5.0, angle: std::f64::consts::FRAC_PI_4 };
+
 fn points(list: &[(f64, f64)]) -> Vec<Point> {
     list.iter().map(|&(x, y)| Point::new(x, y)).collect()
 }
 
-/// One image: a polygon, a box, a turned box, a polyline, a point, a brush mask, a circle, a bent
+/// One image: a polygon, a box, a turned box, a polyline, a point, a brush mask, a turned ellipse, a bent
 /// polyline, two points, a one-pixel mask, a one-point polyline, a tag and an ignore-label polygon.
 fn input() -> ExportInput {
     let annotations = vec![
@@ -39,7 +43,7 @@ fn input() -> ExportInput {
         Annotation::manual(1, Shape::Polyline { points: points(&[(50.0, 80.0), (150.0, 80.0)]) }),
         Annotation::manual(1, Shape::Points { points: points(&[(180.0, 20.0)]) }),
         Annotation::manual(2, Shape::Mask(Mask { left: 190, top: 90, width: 3, height: 2, rle: vec![0, 6] })),
-        Annotation::manual(1, Shape::Circle { centre: Point::new(150.0, 30.0), radius: 10.0 }),
+        Annotation::manual(1, Shape::Ellipse(ELLIPSE)),
         Annotation::manual(2, Shape::Polyline { points: points(&[(20.0, 60.0), (60.0, 90.0), (100.0, 60.0)]) }),
         Annotation::manual(1, Shape::Points { points: points(&[(5.0, 95.0), (15.0, 95.0)]) }),
         Annotation::manual(2, Shape::Mask(Mask { left: 199, top: 0, width: 1, height: 1, rle: vec![0, 1] })),
@@ -115,8 +119,8 @@ fn segment_expands_polylines_and_points_like_cvat_to_masks() {
     assert_eq!((lines[8].0, lines[9].0), (0, 0), "each of the two points is its own object");
     assert!(near(&lines[10].1, &points(&[(199.0, 0.0), (200.0, 0.0), (200.0, 1.0), (199.0, 1.0)])), "a one-pixel mask: {:?}", lines[10].1);
     assert!(polygon_area(&lines[11].1) > 0.0, "a one-point polyline is a dot");
-    let circle = &lines[6].1;
-    assert!(circle.len() >= 16 && circle.iter().all(|p| (p.distance(Point::new(150.0, 30.0)) - 10.0).abs() < 0.01), "circle {circle:?}");
+    let ellipse = &lines[6].1;
+    assert!(ellipse.len() >= 16 && ellipse.iter().all(|p| ELLIPSE.contains(*p, 0.01) && !ELLIPSE.contains(*p, -0.01)), "ellipse {ellipse:?}");
 }
 
 #[test]
@@ -128,8 +132,10 @@ fn obb_writes_four_corners_per_shape() {
     assert!(near(&lines[2].1, &points(&[(80.0, 40.0), (120.0, 40.0), (120.0, 60.0), (80.0, 60.0)])), "turned box");
     let line_box = polygon_area(&lines[3].1);
     assert!((line_box - 525.0).abs() < 25.0, "the polyline's box is about 105 × 5: {line_box}");
-    let circle = polygon_area(&lines[6].1);
-    assert!((circle - 400.0).abs() < 1.0, "the circle's box is its 20 × 20 square: {circle}");
+    // The ellipse's box follows its axes: 20 × 10, turned by 45°.
+    let ellipse = &lines[6].1;
+    assert!((polygon_area(ellipse) - 200.0).abs() < 1.0, "{ellipse:?}");
+    assert!((ellipse[1].distance(ellipse[0]) - 20.0).abs() < 0.01 && ((ellipse[1].y - ellipse[0].y) - (ellipse[1].x - ellipse[0].x)).abs() < 0.01, "{ellipse:?}");
     assert!(near(&lines[10].1, &points(&[(199.0, 0.0), (200.0, 0.0), (200.0, 1.0), (199.0, 1.0)])), "the one-pixel mask's box");
     let triangle = polygon_area(&lines[0].1);
     assert!((triangle - 1600.0).abs() < 1e-6, "the triangle's tightest box is 40 × 40: {triangle} {:?}", lines[0].1);

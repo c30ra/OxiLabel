@@ -127,7 +127,7 @@ export const NINE_LABELS = ['crack', 'finger', 'line', 'surface', 'shunt', 'chip
   name,
   color: ['#e74c3c', '#3498db', '#4fb286', '#f1c40f', '#9b59b6', '#e67e22', '#7c8a99', '#1abc9c', '#ff77aa'][i],
   hotkey: String(i + 1),
-  shapes: name === 'line' ? ['polyline'] : ['rectangle', 'oriented_rectangle', 'polygon', 'points', 'circle', 'mask', 'tag'],
+  shapes: name === 'line' ? ['polyline'] : ['rectangle', 'oriented_rectangle', 'polygon', 'points', 'ellipse', 'mask', 'tag'],
 }));
 
 /**

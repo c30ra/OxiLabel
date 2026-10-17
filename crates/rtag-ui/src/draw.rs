@@ -30,10 +30,10 @@ pub fn shape(context: &CanvasRenderingContext2d, view: View, shape: &Shape, look
                 dot(context, view.to_screen(*point), look.color, if look.selected { POINT_RADIUS + 1.0 } else { POINT_RADIUS });
             }
         }
-        Shape::Circle { centre, radius } => {
-            let at = view.to_screen(*centre);
+        Shape::Ellipse(ellipse) => {
+            let at = view.to_screen(ellipse.centre);
             context.begin_path();
-            context.arc(at.x, at.y, radius * view.scale, 0.0, std::f64::consts::TAU).ok();
+            context.ellipse(at.x, at.y, ellipse.rx * view.scale, ellipse.ry * view.scale, ellipse.angle, 0.0, std::f64::consts::TAU).ok();
             context.set_fill_style_str(look.color);
             context.set_global_alpha(if look.selected { 0.22 } else { 0.12 });
             context.fill();
@@ -102,10 +102,10 @@ pub fn vertex_handles(context: &CanvasRenderingContext2d, view: View, shape: &Sh
     }
 }
 
-/// The round handle above an oriented rectangle that turns it, joined to the rectangle by a line.
-pub fn rotation_handle(context: &CanvasRenderingContext2d, view: View, rect: OrientedRect, color: &str) {
-    let handle = view.to_screen(rect.rotation_handle(ROTATION_HANDLE_DISTANCE / view.scale));
-    let edge = view.to_screen(rect.rotation_handle(0.0));
+/// The round handle beyond a shape that turns it (at `handle`), joined by a line to the point
+/// `edge` on the shape's outline.
+pub fn rotation_handle(context: &CanvasRenderingContext2d, view: View, edge: Point, handle: Point, color: &str) {
+    let (handle, edge) = (view.to_screen(handle), view.to_screen(edge));
     context.begin_path();
     context.move_to(edge.x, edge.y);
     context.line_to(handle.x, handle.y);
@@ -119,9 +119,9 @@ pub fn rotation_handle(context: &CanvasRenderingContext2d, view: View, rect: Ori
     context.stroke();
 }
 
-/// The round handle on a circle's right edge that changes its radius.
-pub fn radius_handle(context: &CanvasRenderingContext2d, view: View, centre: Point, radius: f64, color: &str) {
-    let at = view.to_screen(Point::new(centre.x + radius, centre.y));
+/// A round handle on an ellipse's outline that changes one radius.
+pub fn radius_handle(context: &CanvasRenderingContext2d, view: View, at: Point, color: &str) {
+    let at = view.to_screen(at);
     context.begin_path();
     context.arc(at.x, at.y, 5.0, 0.0, std::f64::consts::TAU).ok();
     context.set_fill_style_str("#ffffff");

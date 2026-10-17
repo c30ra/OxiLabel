@@ -9,6 +9,7 @@ use rtag_core::{
     Label,
     annotation::{Annotation, Shape},
     attribute::{AttributeDefinition, AttributeKind, AttributeValue},
+    ellipse::Ellipse,
     history::Edit,
 };
 
@@ -149,7 +150,7 @@ fn describe(annotation: &Annotation) -> String {
         Shape::Polygon { points } => format!("polygon · {}", count(points.len(), "point")),
         Shape::Polyline { points } => format!("polyline · {}", count(points.len(), "point")),
         Shape::Points { points } => format!("points · {}", points.len()),
-        Shape::Circle { radius, .. } => format!("circle r {radius:.0}"),
+        Shape::Ellipse(ellipse) => format!("{} {}", if ellipse.is_circle() { "circle" } else { "ellipse" }, ellipse_size(ellipse)),
         Shape::Mask(mask) => format!("mask {} × {}", mask.width, mask.height),
         Shape::Tag => "tag".to_owned(),
     };
@@ -254,4 +255,9 @@ fn AttributeEditor(editor: Editor, index: usize, label: Label) -> impl IntoView 
             {label.attributes.into_iter().map(field).collect_view()}
         </section>
     }
+}
+
+/// An ellipse's size: "r 12" for a circle, else its axes, e.g. "24 × 10".
+pub fn ellipse_size(ellipse: &Ellipse) -> String {
+    if ellipse.is_circle() { format!("r {:.0}", ellipse.rx) } else { format!("{:.0} × {:.0}", 2.0 * ellipse.rx, 2.0 * ellipse.ry) }
 }

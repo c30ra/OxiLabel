@@ -94,7 +94,7 @@ impl OrientedRect {
 }
 
 /// Unit vectors along the width side and across it (a quarter turn clockwise on screen).
-fn axes(angle: f64) -> (Point, Point) {
+pub(crate) fn axes(angle: f64) -> (Point, Point) {
     let (sin, cos) = angle.sin_cos();
     (Point::new(cos, sin), Point::new(-sin, cos))
 }

@@ -91,12 +91,9 @@ impl Exporter for YoloObb {
     fn export(&self, input: &ExportInput, sink: &mut dyn ExportSink) -> io::Result<()> {
         export(input, sink, "OBB", &|annotation, label, image| match &annotation.shape {
             Shape::Rectangle(_) | Shape::OrientedRectangle(_) => vec![normalised(&annotation.shape.vertices(), image)],
-            // The square around the circle, not the box of its polygon (which lies inside it).
-            Shape::Circle { .. } => {
-                let bounds = annotation.shape.bounds();
-                let corners = [bounds.min, Point::new(bounds.max.x, bounds.min.y), bounds.max, Point::new(bounds.min.x, bounds.max.y)];
-                vec![normalised(&corners, image)]
-            }
+            // The box around the ellipse along its axes, not the box of its polygon (which lies
+            // inside it).
+            Shape::Ellipse(ellipse) => vec![normalised(&ellipse.bounding_box().corners(), image)],
             // Every corner, so the box encloses every pixel.
             _ => regions(annotation, label, (image.width, image.height), Detail::Exact)
                 .iter()
