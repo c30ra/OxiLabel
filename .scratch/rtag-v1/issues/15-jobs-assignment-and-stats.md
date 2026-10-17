@@ -4,12 +4,12 @@
 
 **Blocked by:** 03, 14
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] I can create a job from selected images or a filter and assign it to an annotator
+- [x] I can create a job from selected images or a filter and assign it to an annotator
 - [x] An annotator sees their assigned jobs and can only edit images in jobs they own
 - [x] Admins can see and edit all jobs and reassign them
-- [ ] The statistics screen shows annotation counts per label, per job and per user
+- [x] The statistics screen shows annotation counts per label, per job and per user
 - [x] API tests cover job ownership enforcement on annotation saves
 
 **Decisions (2026-10-17):** an image is in at most one job; a new job made from images already in jobs moves them (emptied jobs stay, so their numbers keep meaning the same). Annotators see only their jobs: the projects with jobs of theirs (counts cover only those jobs), only those jobs' images in the grid, filmstrip and next/previous, and they open, annotate and set the status of only those images. Statistics count "per user" by the job's current assignee, so reassigning a job moves its counts (annotations do not record who drew them). "Create jobs…" on the grid's selection (Select all takes everything the filter matches) makes one job or splits the selection into jobs of N images in path order, optionally assigned.
