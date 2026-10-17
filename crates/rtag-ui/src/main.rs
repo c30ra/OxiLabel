@@ -8,6 +8,7 @@ mod pages;
 mod pie;
 mod side_panel;
 mod tool_options;
+mod view_filter;
 mod viewer;
 
 use leptos::prelude::*;

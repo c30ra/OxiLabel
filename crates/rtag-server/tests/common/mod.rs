@@ -22,7 +22,7 @@ pub struct TestApp {
     router: Router,
     pub local: Router,
     pub images: TempDir,
-    _cache: TempDir,
+    pub cache: TempDir,
     pub exports: TempDir,
     pub uploads: TempDir,
     pub picked: TempDir,
@@ -58,7 +58,7 @@ pub async fn test_app() -> TestApp {
     .unwrap();
     let local = router.clone().layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 50000))));
     let router = router.layer(MockConnectInfo(SocketAddr::from(([192, 0, 2, 7], 50000))));
-    TestApp { router, local, images, _cache: cache, exports, uploads, picked }
+    TestApp { router, local, images, cache, exports, uploads, picked }
 }
 
 pub async fn call(app: &Router, method: Method, uri: &str, body: Option<Value>) -> (StatusCode, Value) {

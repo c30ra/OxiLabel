@@ -5,6 +5,7 @@ pub mod attribute;
 pub mod edges;
 pub mod export;
 pub mod fill;
+pub mod filter;
 pub mod geometry;
 pub mod history;
 pub mod mask;

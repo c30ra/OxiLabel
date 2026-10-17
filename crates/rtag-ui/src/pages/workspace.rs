@@ -15,6 +15,7 @@ use crate::{
     api,
     side_panel::SidePanel,
     tool_options::ToolOptions,
+    view_filter::{ViewFilter, ViewFilterPanel},
     viewer::TileViewer,
 };
 
@@ -91,6 +92,7 @@ fn Workspace(
     let view = RwSignal::new(None::<View>);
     let size = RwSignal::new((0.0, 0.0));
     let space_held = RwSignal::new(false);
+    let view_filter = ViewFilter::new(project.id);
     // Start with the first label; switching to a tool picks one that allows its shape.
     let editor = Editor::new(conformed(&labels, annotations.annotations), labels.iter().map(|label| label.id).min());
     let labels_for_reload = StoredValue::new(labels.clone());
@@ -230,6 +232,7 @@ fn Workspace(
     };
     let (image_id, image_size) = (image.id, (image.width, image.height));
     let nav = ImageNav::new(project.id, &image);
+    Effect::new(move |_| editor.view_filter.set(view_filter.applied.get()));
 
     view! {
         <div class="workspace">
@@ -246,6 +249,10 @@ fn Workspace(
                     <ImagePosition nav=nav editor=editor />
                     <SaveIndicator state=state on_retry=save on_reload=reload />
                     <LabelPicker labels=picker_labels editor=editor />
+                    <button class="view-chip" title="View filter (hold O for the original)" aria-label="View filter"
+                        on:click=move |_| view_filter.collapsed.update(|c| *c = !*c)>
+                        <span class="muted">"View "</span>{move || view_filter.title()}
+                    </button>
                     <button class="zoom mono" title="Zoom: click for 100% / fit (Home fits, + and − zoom)"
                         on:click=toggle_zoom>{zoom_label}</button>
                 </div>
@@ -253,7 +260,9 @@ fn Workspace(
             <ToolOptions editor=editor />
             <div class="workspace-body">
                 <ToolRail editor=editor />
-                <TileViewer image=image view=view size=size space_held=space_held>
+                <TileViewer image=image view=view size=size space_held=space_held
+                    filter=Signal::derive(move || view_filter.shown()) css_filter=Signal::derive(move || view_filter.css()) loading=view_filter.loading>
+                    <ViewFilterPanel filter=view_filter />
                     <AnnotationLayer editor=editor labels=layer_labels image_id=image_id image_size=image_size view=view size=size space_held=space_held />
                     {move || editor.notice.get().map(|text| view! { <p class="notice" role="status">{text}</p> })}
                 </TileViewer>

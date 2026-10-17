@@ -422,7 +422,7 @@ tests.push(
         l: 'Click* | Freehand | Snap 15°Shift',
         '.': 'Multiple* | Single point',
         c: 'Centre and radius* | Diameter',
-        b: 'Paint* | Fuzzy fill | Brush* | Eraser | Stop at edgesShift',
+        b: 'Paint* | Fuzzy fill | Brush* | Eraser | Stop at edgesShift | Filtered view',
       }, 'options per tool');
     },
   },
@@ -533,7 +533,7 @@ tests.push({
 
     // E erases across every mask; ] makes the eraser bigger, so the second mask goes entirely.
     await t.b.key('e');
-    equal(await toolOptions(t), 'Paint* | Fuzzy fill | Brush | Eraser* | Stop at edgesShift', 'eraser mode');
+    equal(await toolOptions(t), 'Paint* | Fuzzy fill | Brush | Eraser* | Stop at edgesShift | Filtered view', 'eraser mode');
     await t.b.drag(w.at(300, 250), w.at(300, 350));
     list = await saved(t, (list) => !maskHas(list[0].shape, 300, 300), 'the erased gap');
     equal(maskHas(list[0].shape, 250, 300), true, 'pixels beside the gap stay');
@@ -597,7 +597,7 @@ tests.push({
   async run(t) {
     const w = await openWorkspace(t.b, t.base, t.project);
     await t.b.key('u');
-    equal(await toolOptions(t), 'Paint | Fuzzy fill* | Brush* | Eraser | Contiguous* | Global', 'fuzzy fill options');
+    equal(await toolOptions(t), 'Paint | Fuzzy fill* | Brush* | Eraser | Contiguous* | Global | Filtered view', 'fuzzy fill options');
     // The options pie raises the threshold ( ] picks its item); [ lowers it again.
     await t.b.move(...w.at(800, 500));
     await t.b.keyDown('q');
@@ -1040,3 +1040,89 @@ tests.push({
 });
 
 export const LABELS = NINE_LABELS;
+
+// View filters (ticket 13).
+
+/** The gray level the viewer canvas shows at screen point `at`. */
+const viewerGray = (t, at) => t.b.json(`(() => {
+  const canvas = document.querySelector('canvas.viewer');
+  const rect = canvas.getBoundingClientRect();
+  const ratio = canvas.width / rect.width;
+  const [r] = canvas.getContext('2d').getImageData(Math.round((${at[0]} - rect.x) * ratio), Math.round((${at[1]} - rect.y) * ratio), 1, 1).data;
+  return r;
+})()`);
+const openFilterPanel = (t) => t.b.eval(`document.querySelector('.view-filter.collapsed .collapse')?.click(), 1`);
+const pressPreset = (t, name) => t.b.eval(`[...document.querySelectorAll('.view-filter .presets button')].find((b) => b.textContent === ${JSON.stringify(name)}).click(), 1`);
+const tileRequests = (t, kind) => t.b.json(`performance.getEntriesByType('resource').map((e) => e.name).filter((n) => n.includes('/${kind}/'))`);
+
+tests.push({
+  name: 'a view filter preset and its sliders change the image, O shows the original, and the settings are remembered',
+  async run(t) {
+    const w = await openWorkspace(t.b, t.base, t.project);
+    const spot = w.at(1250, 750);
+    // The test image's smooth gradient there is about (1250 + 750) / 2600 × 200 ≈ 154.
+    const original = await t.b.waitFor(async () => { const g = await viewerGray(t, spot); return g > 100 && g; }, 'the original image');
+    near([original], [154], 6, 'original gray');
+    equal(await t.b.eval(`document.querySelector('.view-chip').textContent`), 'View Original', 'header');
+    equal(await t.b.eval(`!!document.querySelector('.view-filter.collapsed')`), true, 'the panel starts collapsed');
+
+    await openFilterPanel(t);
+    await pressPreset(t, 'v2');
+    // enhance_v2 flattens the lighting: the gradient becomes mid gray.
+    const filtered = await t.b.waitFor(async () => { const g = await viewerGray(t, spot); return Math.abs(g - original) > 15 && g; }, 'the filtered image');
+    equal(await t.b.eval(`document.querySelector('.view-chip').textContent`), 'View v2', 'header with a filter');
+    equal((await tileRequests(t, 'tiles')).some((n) => n.includes('?filter=v2_0.030_6.0_0.020_0.50_3.0')), true, 'filtered tiles asked for');
+
+    // Holding O shows the original, releasing it the filter again.
+    await t.b.keyDown('o');
+    await t.b.waitFor(async () => Math.abs((await viewerGray(t, spot)) - original) <= 2, 'the original while O is held');
+    equal(await t.b.eval(`document.querySelector('.view-chip').textContent`), 'View Original', 'header while O is held');
+    await t.b.keyUp('o');
+    await t.b.waitFor(async () => Math.abs((await viewerGray(t, spot)) - filtered) <= 2, 'the filter again');
+
+    // A slider asks for the filter with the new value once it rests.
+    await t.b.eval(`(() => {
+      const gain = [...document.querySelectorAll('.view-filter .slider')].find((s) => s.textContent.startsWith('Gain')).querySelector('input');
+      gain.value = '1.5';
+      gain.dispatchEvent(new Event('input', { bubbles: true }));
+      return 1;
+    })()`);
+    await t.b.waitFor(async () => (await tileRequests(t, 'tiles')).some((n) => n.includes('?filter=v2_0.030_6.0_0.020_1.50_3.0')), 'tiles of the changed gain');
+
+    // Brightness and contrast are applied on screen.
+    await t.b.eval(`(() => {
+      const brightness = [...document.querySelectorAll('.view-filter .slider')].find((s) => s.textContent.startsWith('Brightness')).querySelector('input');
+      brightness.value = '150';
+      brightness.dispatchEvent(new Event('input', { bubbles: true }));
+      return 1;
+    })()`);
+    equal(await t.b.eval(`document.querySelector('canvas.viewer').style.filter`), 'brightness(150%) contrast(100%)', 'CSS filter');
+
+    // Drawing on the filtered view stores original image coordinates.
+    await t.b.key('r');
+    await t.b.drag(w.at(900, 500), w.at(1300, 800));
+    const [annotation] = await saved(t, (list) => list.length === 1, 'the rectangle');
+    near(corners(annotation), [900, 500, 1300, 800], 2 / w.scale, 'rectangle on the filtered view');
+
+    // Remembered for the project in this browser.
+    await t.b.goto(`${t.base}/projects/${t.project.id}/images/${t.project.image}`);
+    await t.b.waitFor(() => t.b.eval(`document.querySelector('.view-chip')?.textContent === 'View v2'`), 'the filter after reloading');
+    equal(await t.b.json(`[...document.querySelectorAll('.view-filter .slider .value')].map((v) => v.textContent)`),
+      ['0.030', '6.0', '0.020', '1.50', '3.0', '150%', '100%'], 'remembered values');
+  },
+}, {
+  name: 'the fuzzy fill can analyse the filtered view',
+  async run(t) {
+    const w = await openWorkspace(t.b, t.base, t.project);
+    await t.b.key('u');
+    const filtered = () => t.b.json(`[...document.querySelectorAll('.tool-options button')].find((b) => b.textContent === 'Filtered view').disabled`);
+    equal(await filtered(), true, 'no filter: the switch is off');
+    await openFilterPanel(t);
+    await pressPreset(t, 'CLAHE');
+    await t.b.waitFor(async () => !(await filtered()), 'the switch with a filter');
+    await clickOption(t, 'Filtered view');
+    await t.b.click(...w.at(1150, 650));
+    await t.b.waitFor(async () => (await tileRequests(t, 'analysis')).some((n) => n.includes('?filter=clahe_0.05_3.0_16')), 'filtered analysis tiles');
+    await saved(t, (list) => list.length === 1 && list[0].shape.type === 'mask', 'the fill');
+  },
+});

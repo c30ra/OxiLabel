@@ -39,6 +39,7 @@ pub fn ToolOptions(editor: Editor) -> impl IntoView {
                         <Show when=move || editor.edge_snap.get()>
                             <NumberOption label="Radius" title="How far from the pointer an edge is looked for, in screen pixels"
                                 value=editor.snap_radius range=(1.0, 100.0) unit="px" keys=false />
+                            <Filtered editor=editor value=editor.snap_filtered />
                         </Show>
                     </Show>
                 }.into_any(),
@@ -64,6 +65,8 @@ pub fn ToolOptions(editor: Editor) -> impl IntoView {
                                 <NumberOption label="Offset" title="Grows (positive) or shrinks (negative) the region the brush may paint, in image pixels"
                                     value=editor.edge_offset range=(-MAX_EDGE_OFFSET, MAX_EDGE_OFFSET) unit="px" keys=false />
                             </Show>
+                            // Shift limits the brush even with "Stop at edges" off.
+                            <Filtered editor=editor value=editor.edges_filtered />
                         }
                     >
                         <NumberOption label="Threshold" title="Largest colour difference from the clicked pixel (0–255); [ and ] or dragging after the click change it"
@@ -73,6 +76,7 @@ pub fn ToolOptions(editor: Editor) -> impl IntoView {
                             value=editor.clean_up range=(0.0, 1_000_000.0) unit="px²" keys=false />
                         <NumberOption label="Max" title="Largest fill, as a share of the image"
                             value=editor.max_fill range=(1.0, 100.0) unit="%" keys=false />
+                        <Filtered editor=editor value=editor.fill_filtered />
                     </Show>
                 }.into_any(),
             }}
@@ -101,6 +105,21 @@ fn Toggle(label: &'static str, key: &'static str, value: RwSignal<bool>, disable
             disabled=move || disabled.get() title=format!("{key} inverts it while drawing")
             on:click=move |_| value.update(|on| *on = !*on)>
             {label}<kbd>{key}</kbd>
+        </button>
+    }
+}
+
+/// Whether the tool looks at the filtered view's pixels instead of the original's; only with a
+/// view filter on.
+#[component]
+fn Filtered(editor: Editor, value: RwSignal<bool>) -> impl IntoView {
+    let no_filter = move || editor.view_filter.get().is_none();
+    view! {
+        <button class="toggle filtered" aria-pressed=move || value.get().to_string() class:active=move || value.get() && !no_filter()
+            disabled=no_filter
+            title=move || if no_filter() { "Choose a view filter to analyse its pixels instead of the original's" } else { "Analyse the filtered view's pixels instead of the original's" }
+            on:click=move |_| value.update(|on| *on = !*on)>
+            "Filtered view"
         </button>
     }
 }

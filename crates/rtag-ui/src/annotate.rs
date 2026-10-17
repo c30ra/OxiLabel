@@ -188,6 +188,13 @@ pub struct Editor {
     /// threshold), grown or shrunk by `edge_offset` image pixels.
     pub stop_at_edges: RwSignal<bool>,
     pub edge_offset: RwSignal<f64>,
+    /// The enhancement filter shown (its key; `None` for the original), set by the view filter.
+    pub view_filter: RwSignal<Option<String>>,
+    /// Whether edge snapping, the edge-limited brush and the fuzzy fill analyse the filtered view
+    /// instead of the original (ADR 0002).
+    pub snap_filtered: RwSignal<bool>,
+    pub edges_filtered: RwSignal<bool>,
+    pub fill_filtered: RwSignal<bool>,
     /// The last drawing tool, label and modes, repeated by a tap of the pie key.
     pub last: RwSignal<Option<(Tool, i64, Modes)>>,
     /// The shape types some label of the project allows; tools for others are disabled.
@@ -273,10 +280,19 @@ impl Editor {
             snap_radius: RwSignal::new(DEFAULT_SNAP_RADIUS),
             stop_at_edges: RwSignal::new(false),
             edge_offset: RwSignal::new(0.0),
+            view_filter: RwSignal::new(None),
+            snap_filtered: RwSignal::new(false),
+            edges_filtered: RwSignal::new(false),
+            fill_filtered: RwSignal::new(false),
             last: RwSignal::new(None),
             usable_shapes: RwSignal::new(ShapeType::ALL.to_vec()),
             busy: RwSignal::new(false),
         }
+    }
+
+    /// The pixels a tool analyses: the shown filter's when the tool's `filtered` switch is on.
+    pub fn analysed(&self, filtered: RwSignal<bool>) -> Option<String> {
+        if filtered.get_untracked() { self.view_filter.get_untracked() } else { None }
     }
 
     /// Replaces everything with `annotations` as loaded from the server; nothing to undo.
@@ -671,8 +687,9 @@ pub fn AnnotationLayer(
             PixelRect { left, top, width: level_pixel(max.x).saturating_sub(left) + 1, height: level_pixel(max.y).saturating_sub(top) + 1 }
         });
         let settings = fill_settings(within, factor);
-        let growth = analysis.with_level(level, |tiles| grow(pyramid, level, tiles, seed, settings));
-        analysis.request(level, &growth.missing);
+        let source = editor.analysed(editor.fill_filtered);
+        let growth = analysis.with_level(&source, level, |tiles| grow(pyramid, level, tiles, seed, settings));
+        analysis.request(&source, level, &growth.missing);
         fill_incomplete.set_value(!growth.missing.is_empty());
         if growth.capped && !fill_capped.get_value() {
             let max = editor.max_fill.get_untracked();
@@ -746,10 +763,11 @@ pub fn AnnotationLayer(
             width: anchor.0.max(target.0) + margin + 1 - left,
             height: anchor.1.max(target.1) + margin + 1 - top,
         };
-        let map = match analysis.with_level(level, |tiles| EdgeMap::new(pyramid, level, tiles, window)) {
+        let source = editor.analysed(editor.snap_filtered);
+        let map = match analysis.with_level(&source, level, |tiles| EdgeMap::new(pyramid, level, tiles, window)) {
             Ok(map) => map,
             Err(missing) => {
-                analysis.request(level, &missing);
+                analysis.request(&source, level, &missing);
                 return None;
             }
         };
@@ -768,8 +786,9 @@ pub fn AnnotationLayer(
         let factor = 1u32 << level;
         let (width, height) = pyramid.level_size(level);
         let seed = ((seed.x as u32 / factor).min(width - 1), (seed.y as u32 / factor).min(height - 1));
-        let growth = analysis.with_level(level, |tiles| grow(pyramid, level, tiles, seed, fill_settings(None, factor)));
-        analysis.request(level, &growth.missing);
+        let source = editor.analysed(editor.edges_filtered);
+        let growth = analysis.with_level(&source, level, |tiles| grow(pyramid, level, tiles, seed, fill_settings(None, factor)));
+        analysis.request(&source, level, &growth.missing);
         let region = growth.region.cropped().scaled_up(factor, image_size);
         // The offset is in image pixels, so it applies at full resolution.
         match editor.edge_offset.get_untracked().round() as i32 {
@@ -809,16 +828,18 @@ pub fn AnnotationLayer(
     });
     // Brush and freehand lines load the view's analysis tiles ahead of the first stroke.
     Effect::new(move |_| {
-        let wanted = match editor.tool.get() {
-            Tool::Brush => true,
-            Tool::Polyline => editor.freehand.get(),
-            _ => false,
+        let switch = match editor.tool.get() {
+            Tool::Brush if editor.fill.get() => Some(editor.fill_filtered),
+            Tool::Brush => Some(editor.edges_filtered),
+            Tool::Polyline if editor.freehand.get() => Some(editor.snap_filtered),
+            _ => None,
         };
         let (Some(current), (w, h)) = (view.get(), size.get()) else { return };
-        if wanted {
+        if let Some(switch) = switch {
+            let source = if switch.get() { editor.view_filter.get() } else { None };
             let (level, _) = level_of(current);
             let visible = Rect::from_corners(current.to_image(Point::new(0.0, 0.0)), current.to_image(Point::new(w, h)));
-            analysis.request(level, &pyramid.tiles_in(level, visible));
+            analysis.request(&source, level, &pyramid.tiles_in(level, visible));
         }
     });
 

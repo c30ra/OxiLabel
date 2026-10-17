@@ -3,6 +3,9 @@
 //!
 //! Navigation follows image editors: scroll to zoom around the cursor, Space-drag or middle-drag
 //! to pan, Home to fit, + and − to zoom around the centre.
+//!
+//! With an enhancement filter the tiles are the filtered pyramid's. While a new filter's tiles
+//! load, the previous filter's stay on screen.
 
 use std::collections::HashMap;
 
@@ -18,18 +21,24 @@ const BACKGROUND: &str = "#0E0E0F";
 const WHEEL_ZOOM_SPEED: f64 = 0.0015;
 const KEY_ZOOM_STEP: f64 = 1.25;
 
-type TileKey = (u32, u32, u32);
+/// The filter (its key, `None` for the original), level, column and row of a tile.
+type TileKey = (Option<String>, u32, u32, u32);
 
 /// `view` is `None` until the canvas has a size; setting it to `None` fits the image again.
 /// `size` reports the canvas size in CSS pixels. `space_held` tells layers drawn on top (the
 /// `children`, e.g. annotations) that a left-drag pans. Pointer events those layers do not use
-/// bubble up here for zooming and panning.
+/// bubble up here for zooming and panning. `filter` is the enhancement filter shown, `css_filter`
+/// a CSS filter (brightness, contrast) for the image, and `loading` tells whether tiles of the
+/// shown filter are still on their way.
 #[component]
 pub fn TileViewer(
     image: Image,
     view: RwSignal<Option<View>>,
     size: RwSignal<(f64, f64)>,
     space_held: RwSignal<bool>,
+    filter: Signal<Option<String>>,
+    css_filter: Signal<String>,
+    loading: RwSignal<bool>,
     children: Children,
 ) -> impl IntoView {
     let stage_ref = NodeRef::<html::Div>::new();
@@ -41,19 +50,42 @@ pub fn TileViewer(
     // Bumped whenever a tile finishes loading, which triggers a redraw.
     let loaded = RwSignal::new(0_u32);
     let dragging = RwSignal::new(None::<(f64, f64)>);
+    // The filter shown before the current one, whose tiles fill in while the current one's load.
+    let previous = StoredValue::new(None::<Option<String>>);
+    // Tiles asked for and not arrived yet.
+    let pending = StoredValue::new(std::collections::HashSet::<TileKey>::new());
+    let settle = move |key: &TileKey| {
+        pending.update_value(|pending| {
+            pending.remove(key);
+        });
+        let current = filter.get_untracked();
+        loading.set(pending.with_value(|pending| pending.iter().any(|k| k.0 == current)));
+        loaded.update(|n| *n = n.wrapping_add(1));
+    };
 
     let request_tile = move |key: TileKey| {
         let Ok(element) = HtmlImageElement::new() else {
             return;
         };
-        let on_load = Closure::once_into_js(move || loaded.update(|n| *n = n.wrapping_add(1)));
+        let (on_load, on_error) = (key.clone(), key.clone());
+        let on_load = Closure::once_into_js(move || settle(&on_load));
+        // A failed tile stays blank (no retry storm); it is asked for again with the next filter.
+        let on_error = Closure::once_into_js(move || settle(&on_error));
         element.set_onload(Some(on_load.unchecked_ref()));
-        let (level, x, y) = key;
-        element.set_src(&format!("/api/images/{id}/tiles/{level}/{x}/{y}"));
+        element.set_onerror(Some(on_error.unchecked_ref()));
+        let (filter, level, x, y) = &key;
+        let query = filter.as_ref().map(|key| format!("?filter={key}")).unwrap_or_default();
+        element.set_src(&format!("/api/images/{id}/tiles/{level}/{x}/{y}{query}"));
+        pending.update_value(|pending| {
+            pending.insert(key.clone());
+        });
+        loading.set(true);
         tiles.update_value(|tiles| {
             tiles.insert(key, element);
         });
     };
+    // The filter drawn last time.
+    let drawn = StoredValue::new(None::<Option<String>>);
 
     let draw = move || {
         let (Some(canvas), Some(current)) = (canvas_ref.get_untracked(), view.get_untracked())
@@ -78,13 +110,30 @@ pub fn TileViewer(
         let visible = current.visible(size.get_untracked());
         let target = pyramid.level_for_scale(current.scale * ratio);
         let coarsest = pyramid.levels() - 1;
-        for level in (target..=coarsest).rev() {
+        let shown = filter.get_untracked();
+        // On a new filter, keep the tiles of the one before (to fill in) and drop the rest.
+        if let Some(last) = drawn.get_value().filter(|last| *last != shown) {
+            tiles.update_value(|tiles| tiles.retain(|key, _| key.0 == last || key.0 == shown));
+            pending.update_value(|pending| pending.retain(|key| key.0 == shown));
+            loading.set(pending.with_value(|pending| !pending.is_empty()));
+            previous.set_value(Some(last));
+        }
+        drawn.set_value(Some(shown.clone()));
+        // The current filter's coarser levels, then the previous filter's sharp tiles where the
+        // current one's have not come yet, then the current filter's sharp tiles.
+        let mut layers: Vec<(Option<String>, u32)> = ((target + 1)..=coarsest).rev().map(|level| (shown.clone(), level)).collect();
+        if let Some(before) = previous.get_value() {
+            layers.push((before, target));
+        }
+        layers.push((shown.clone(), target));
+        for (layer, level) in layers {
             let scale = Pyramid::level_scale(level);
             for (column, row) in pyramid.tiles_in(level, visible) {
-                let key = (level, column, row);
+                let key = (layer.clone(), level, column, row);
                 let Some(element) = tiles.with_value(|tiles| tiles.get(&key).cloned()) else {
-                    // Only the target level and the always-useful coarsest level are fetched.
-                    if level == target || level == coarsest {
+                    // Only the shown filter's target level and the always-useful coarsest level
+                    // are fetched.
+                    if layer == shown && (level == target || level == coarsest) {
                         request_tile(key);
                     }
                     continue;
@@ -130,6 +179,7 @@ pub fn TileViewer(
         view.track();
         size.track();
         loaded.track();
+        filter.track();
         draw();
     });
 
@@ -238,7 +288,7 @@ pub fn TileViewer(
             // Middle-click would otherwise start autoscroll or paste.
             on:mousedown=|ev: ev::MouseEvent| if ev.button() == 1 { ev.prevent_default() }
         >
-            <canvas class="viewer" node_ref=canvas_ref aria-label=format!("Image {}", image.path)></canvas>
+            <canvas class="viewer" node_ref=canvas_ref aria-label=format!("Image {}", image.path) style:filter=move || css_filter.get()></canvas>
             {children()}
         </div>
     }

@@ -1,4 +1,5 @@
 mod annotations;
+pub mod enhance;
 mod error;
 mod exports;
 mod host;
@@ -7,6 +8,8 @@ mod labels;
 mod projects;
 mod thumbnails;
 mod tiles;
+
+pub use tiles::KEPT_FILTERS;
 
 use std::{
     fs,

@@ -168,3 +168,75 @@ async fn analysis_tiles_are_lossless_pngs_of_the_same_pyramid() {
     let (status, _, _) = get_bytes(&app, &format!("/api/images/{image}/analysis/0/2/0")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+/// Imports a 600 × 300 noise-like image; returns its id and pixels.
+async fn noise_image(app: &TestApp) -> (i64, image::RgbImage) {
+    let (_, project) = call(app, Method::POST, "/api/projects", Some(json!({"name": "Filters"}))).await;
+    let source = image::RgbImage::from_fn(600, 300, |x, y| image::Rgb([(x * 7 + y * 13) as u8, (x * x + y) as u8, (x ^ y) as u8]));
+    source.save(app.images.path().join("noise.png")).unwrap();
+    call(app, Method::POST, &format!("/api/projects/{}/imports", project["id"]), Some(json!({"paths": ["noise.png"]}))).await;
+    let (_, page) = call(app, Method::GET, &format!("/api/projects/{}/images", project["id"]), None).await;
+    (page["images"][0]["id"].as_i64().unwrap(), source)
+}
+
+#[tokio::test]
+async fn filtered_tiles_are_the_filtered_image_and_leave_the_original_alone() {
+    use rtag_core::filter::{Filter, Preset};
+    use rtag_server::enhance::{Pixels, apply};
+    let app = test_app().await;
+    let (image, source) = noise_image(&app).await;
+    let filter = Filter::new(Preset::Clahe);
+    let expected = apply(&filter, &Pixels { width: 600, height: 300, channels: 3, data: source.clone().into_raw() });
+
+    // The analysis tiles of a filter are its exact (gray) pixels.
+    let (status, content_type, bytes) = get_bytes(&app, &format!("/api/images/{image}/analysis/0/1/0?filter={}", filter.key())).await;
+    assert_eq!((status, content_type.as_str()), (StatusCode::OK, "image/png"));
+    let tile = image::load_from_memory(&bytes).unwrap();
+    assert!(!tile.color().has_color(), "CLAHE gives gray");
+    let tile = tile.to_luma8();
+    assert_eq!(tile.dimensions(), (88, 300));
+    assert!(tile.enumerate_pixels().all(|(x, y, pixel)| pixel[0] == expected.data[y as usize * 600 + 512 + x as usize]));
+
+    // Viewing tiles too, as JPEG; the original's stay in colour.
+    let (status, content_type, _) = get_bytes(&app, &format!("/api/images/{image}/tiles/0/0/0?filter={}", filter.key())).await;
+    assert_eq!((status, content_type.as_str()), (StatusCode::OK, "image/jpeg"));
+    let (_, _, bytes) = get_bytes(&app, &format!("/api/images/{image}/analysis/0/0/0")).await;
+    assert_eq!(image::load_from_memory(&bytes).unwrap().to_rgb8().get_pixel(5, 3), source.get_pixel(5, 3));
+
+    // Cached: served with the source gone.
+    std::fs::remove_file(app.images.path().join("noise.png")).unwrap();
+    let (status, _, _) = get_bytes(&app, &format!("/api/images/{image}/tiles/1/0/0?filter={}", filter.key())).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn an_unknown_filter_is_a_bad_request() {
+    let app = test_app().await;
+    let (image, _) = noise_image(&app).await;
+    for filter in ["sharpen_1", "clahe_0.05", "flatten_9", "../original"] {
+        let (status, _, _) = get_bytes(&app, &format!("/api/images/{image}/tiles/0/0/0?filter={filter}")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{filter}");
+    }
+}
+
+#[tokio::test]
+async fn only_the_most_recently_used_filters_of_an_image_are_kept() {
+    use rtag_core::filter::{Filter, Preset};
+    let app = test_app().await;
+    let (image, _) = noise_image(&app).await;
+    let keys: Vec<String> = (0..rtag_server::KEPT_FILTERS + 2).map(|i| Filter::with_values(Preset::Flatten, &[0.01 * (i + 1) as f64]).key()).collect();
+    for (i, key) in keys.iter().enumerate() {
+        let (status, _, _) = get_bytes(&app, &format!("/api/images/{image}/tiles/1/0/0?filter={key}")).await;
+        assert_eq!(status, StatusCode::OK);
+        // Asking for the first one again keeps it among the recently used.
+        if i == 5 {
+            get_bytes(&app, &format!("/api/images/{image}/tiles/0/0/0?filter={}", keys[0])).await;
+        }
+    }
+    let filters = std::fs::read_dir(app.cache.path().join("tiles")).unwrap().next().unwrap().unwrap().path().join("filters");
+    let mut kept: Vec<String> = std::fs::read_dir(filters).unwrap().map(|entry| entry.unwrap().file_name().into_string().unwrap()).collect();
+    kept.sort();
+    let mut newest = [&keys[..1], &keys[3..]].concat();
+    newest.sort();
+    assert_eq!(kept, newest);
+}
