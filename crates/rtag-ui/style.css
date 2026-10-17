@@ -386,3 +386,27 @@ select.job-filter { max-width: 14rem; }
 .images-folder label { flex: 1 1 320px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
 .images-folder input { color: var(--text); }
 .images-folder .hint { flex-basis: 100%; margin: 0; font-size: 12px; }
+
+/* Pre-annotation */
+.topbar .pre-annotate { margin-left: auto; }
+.actions + .pre-annotate, .pre-annotate + .account { margin-left: 0; }
+.worker-health { display: flex; align-items: center; gap: 8px; margin: 0 0 16px; }
+.models-table .weights { max-width: 22rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-form label { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; color: var(--muted); font-size: 13px; }
+.model-form input, .model-form textarea { color: var(--text); }
+.model-form textarea { font: 13px/1.4 var(--mono); background: var(--ground); border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 10px; resize: vertical; }
+.side-panel .review, .side-panel .pre-annotate { padding: 8px 12px; border-top: 1px solid var(--border); }
+.side-panel .review h4, .side-panel .pre-annotate h4 { display: flex; gap: 8px; margin: 0 0 6px; }
+.review .threshold { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.review .threshold input { flex: 1; height: auto; padding: 0; }
+.review-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.objects li.pending .detail { font-style: italic; }
+.objects li .accept { color: var(--ok); }
+.run-controls { display: flex; gap: 6px; }
+.run-controls select { flex: 1; min-width: 0; }
+.run-status { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; font-size: 12px; color: var(--muted); }
+.run-status .bar { height: 6px; border-radius: 3px; background: var(--raised); overflow: hidden; }
+.run-status .bar span { display: block; height: 100%; background: var(--accent); }
+.run-dialog { max-width: 560px; }
+.run-dialog .run-job { margin-left: 8px; height: 30px; }
+.objects li .accept { width: 28px; height: 28px; padding: 0; border: 0; flex: none; }

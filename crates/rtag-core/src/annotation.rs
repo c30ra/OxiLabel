@@ -264,20 +264,26 @@ impl Annotation {
     pub fn manual(label: i64, shape: Shape) -> Self {
         Annotation { label, shape, source: None, confidence: None, attributes: Attributes::new(), hidden: false, locked: false, pending: false }
     }
+
+    /// Whether the editor draws it and lets it be picked: not hidden, and not a pending
+    /// pre-annotation less confident than `threshold`.
+    pub fn shown(&self, threshold: f64) -> bool {
+        !self.hidden && !(self.pending && self.confidence.unwrap_or(1.0) < threshold)
+    }
 }
 
 /// Index of the topmost (last drawn) visible annotation under `point`, if any.
-pub fn topmost_at(annotations: &[Annotation], point: Point, margin: f64) -> Option<usize> {
-    annotations.iter().rposition(|annotation| !annotation.hidden && annotation.shape.contains(point, margin))
+pub fn topmost_at(annotations: &[Annotation], point: Point, margin: f64, threshold: f64) -> Option<usize> {
+    annotations.iter().rposition(|annotation| annotation.shown(threshold) && annotation.shape.contains(point, margin))
 }
 
 /// Indices of the visible annotations whose bounds overlap `region` (box selection); tags are
 /// not on the image, so never.
-pub fn overlapping(annotations: &[Annotation], region: Rect) -> Vec<usize> {
+pub fn overlapping(annotations: &[Annotation], region: Rect, threshold: f64) -> Vec<usize> {
     annotations
         .iter()
         .enumerate()
-        .filter(|(_, annotation)| !annotation.hidden && !annotation.shape.is_tag() && annotation.shape.bounds().intersects(&region))
+        .filter(|(_, annotation)| annotation.shown(threshold) && !annotation.shape.is_tag() && annotation.shape.bounds().intersects(&region))
         .map(|(index, _)| index)
         .collect()
 }
@@ -314,17 +320,17 @@ mod tests {
     #[test]
     fn the_topmost_shape_under_the_point_wins() {
         let annotations = [boxed(1, (0.0, 0.0), (100.0, 100.0)), boxed(2, (40.0, 40.0), (60.0, 60.0))];
-        assert_eq!(topmost_at(&annotations, Point::new(50.0, 50.0), 0.0), Some(1));
-        assert_eq!(topmost_at(&annotations, Point::new(10.0, 10.0), 0.0), Some(0));
-        assert_eq!(topmost_at(&annotations, Point::new(150.0, 10.0), 0.0), None);
-        assert_eq!(topmost_at(&annotations, Point::new(102.0, 10.0), 3.0), Some(0));
+        assert_eq!(topmost_at(&annotations, Point::new(50.0, 50.0), 0.0, 0.0), Some(1));
+        assert_eq!(topmost_at(&annotations, Point::new(10.0, 10.0), 0.0, 0.0), Some(0));
+        assert_eq!(topmost_at(&annotations, Point::new(150.0, 10.0), 0.0, 0.0), None);
+        assert_eq!(topmost_at(&annotations, Point::new(102.0, 10.0), 3.0, 0.0), Some(0));
     }
 
     #[test]
     fn box_selection_finds_overlapping_shapes() {
         let annotations = [boxed(1, (0.0, 0.0), (10.0, 10.0)), boxed(2, (20.0, 20.0), (30.0, 30.0)), boxed(3, (50.0, 0.0), (60.0, 10.0))];
-        assert_eq!(overlapping(&annotations, Rect::new(5.0, 5.0, 25.0, 25.0)), vec![0, 1]);
-        assert_eq!(overlapping(&annotations, Rect::new(35.0, 35.0, 45.0, 45.0)), Vec::<usize>::new());
+        assert_eq!(overlapping(&annotations, Rect::new(5.0, 5.0, 25.0, 25.0), 0.0), vec![0, 1]);
+        assert_eq!(overlapping(&annotations, Rect::new(35.0, 35.0, 45.0, 45.0), 0.0), Vec::<usize>::new());
     }
 
     #[test]
@@ -458,8 +464,8 @@ mod tests {
         assert!(!tag.contains(Point::new(0.0, 0.0), 10.0));
         assert_eq!(tag.validate(10, 10), Ok(()));
         let annotations = [Annotation::manual(1, Shape::Tag), boxed(2, (0.0, 0.0), (10.0, 10.0))];
-        assert_eq!(overlapping(&annotations, Rect::new(-5.0, -5.0, 5.0, 5.0)), vec![1], "box selection skips tags");
-        assert_eq!(topmost_at(&annotations, Point::new(0.0, 0.0), 1.0), Some(1));
+        assert_eq!(overlapping(&annotations, Rect::new(-5.0, -5.0, 5.0, 5.0), 0.0), vec![1], "box selection skips tags");
+        assert_eq!(topmost_at(&annotations, Point::new(0.0, 0.0), 1.0, 0.0), Some(1));
     }
 
     #[test]
@@ -467,8 +473,15 @@ mod tests {
         let mut hidden = boxed(1, (0.0, 0.0), (100.0, 100.0));
         hidden.hidden = true;
         let annotations = [boxed(2, (0.0, 0.0), (50.0, 50.0)), hidden];
-        assert_eq!(topmost_at(&annotations, Point::new(10.0, 10.0), 0.0), Some(0), "the hidden one on top is skipped");
-        assert_eq!(overlapping(&annotations, Rect::new(0.0, 0.0, 200.0, 200.0)), vec![0]);
+        assert_eq!(topmost_at(&annotations, Point::new(10.0, 10.0), 0.0, 0.0), Some(0), "the hidden one on top is skipped");
+        assert_eq!(overlapping(&annotations, Rect::new(0.0, 0.0, 200.0, 200.0), 0.0), vec![0]);
+        // A pending pre-annotation below the threshold is skipped like a hidden one.
+        let mut doubtful = annotations[0].clone();
+        (doubtful.pending, doubtful.confidence) = (true, Some(0.3));
+        assert!(doubtful.shown(0.3) && !doubtful.shown(0.5));
+        assert_eq!(topmost_at(&[doubtful.clone()], Point::new(10.0, 10.0), 0.0, 0.5), None);
+        doubtful.pending = false;
+        assert!(doubtful.shown(0.5), "reviewed ones always show");
         let mut locked = boxed(1, (0.0, 0.0), (1.0, 1.0));
         locked.locked = true;
         let json = serde_json::to_value(&locked).unwrap();

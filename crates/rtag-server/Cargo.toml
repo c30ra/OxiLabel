@@ -11,6 +11,8 @@ argon2 = "0.5"
 password-hash = { version = "0.5", features = ["getrandom"] }
 blake3 = "1"
 ashpd = { version = "0.11", default-features = false, features = ["tokio"] }
+# Stops the worker's whole process group on shutdown.
+libc = "0.2"
 image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png", "tiff", "webp"] }
 regex = "1"
 # Calls the pre-annotation worker over local HTTP (ADR 0001).
@@ -23,7 +25,7 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 tower = "0.5"
 tower-http = { version = "0.6", features = ["fs", "set-header"] }
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "fs", "process", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "fs", "process", "signal", "time"] }
 tokio-util = { version = "0.7", features = ["io"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 

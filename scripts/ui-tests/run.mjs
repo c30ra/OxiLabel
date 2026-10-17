@@ -47,7 +47,7 @@ mkdirSync(join(work, 'images'), { recursive: true });
 mkdirSync(join(work, 'failures'), { recursive: true });
 writeTestImage(join(work, 'images', 'test.png'));
 
-const [appPort, browserPort] = [await freePort(), await freePort()];
+const [appPort, browserPort, workerPort] = [await freePort(), await freePort(), await freePort()];
 const base = `http://127.0.0.1:${appPort}`;
 const children = [];
 const start = (command, args, env) => {
@@ -70,6 +70,9 @@ start(server, [], {
   RTAG_UPLOAD_DIR: join(work, 'uploads'),
   // Tests write what the host's folder dialog "picks" here, so no real dialog opens.
   RTAG_FOLDER_DIALOG: `answers:${join(work, 'folder-dialog.txt')}`,
+  // The pre-annotation worker, started by the server; tests register scripts/ui-tests/test_adapter.py.
+  RTAG_WORKER_URL: `http://127.0.0.1:${workerPort}`,
+  RTAG_WORKER_COMMAND: `PYTHONPATH=${join(root, 'worker')} RTAG_WORKER_QUIET=1 exec python3 -m rtag_worker`,
 });
 await until(async () => (await fetch(`${base}/api/session`)).ok, 'the server');
 

@@ -43,6 +43,9 @@ use crate::{
 /// Loading a model can take a while the first time; a prediction on a large photo too.
 const PREDICT_TIMEOUT: Duration = Duration::from_secs(600);
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(3);
+/// Ended runs kept for their status; older ones are forgotten.
+const KEPT_RUNS: usize = 50;
+const NO_WORKER: &str = "no pre-annotation worker is set up: start the server with RTAG_WORKER_URL (or RTAG_WORKER_COMMAND)";
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -67,7 +70,7 @@ impl Worker {
     }
 
     fn url(&self, path: &str) -> Result<String, String> {
-        let base = self.url.as_deref().ok_or("no pre-annotation worker is set up: start the server with RTAG_WORKER_URL (or RTAG_WORKER_COMMAND)")?;
+        let base = self.url.as_deref().ok_or(NO_WORKER)?;
         Ok(format!("{base}{path}"))
     }
 
@@ -75,12 +78,14 @@ impl Worker {
     async fn call(&self, request: reqwest::RequestBuilder) -> Result<Value, String> {
         let response = request.send().await.map_err(|err| format!("the worker did not answer: {err}"))?;
         let status = response.status();
-        let body: Value = response.json().await.map_err(|err| format!("the worker's answer is unreadable: {err}"))?;
+        let text = response.text().await.map_err(|err| format!("the worker's answer is unreadable: {err}"))?;
+        let body = serde_json::from_str::<Value>(&text);
         if !status.is_success() {
-            let message = body["error"].as_str().map(str::to_owned).unwrap_or_else(|| format!("status {status}"));
+            // A proxy or a crash may answer without the worker's JSON.
+            let message = body.ok().and_then(|body| body["error"].as_str().map(str::to_owned)).unwrap_or_else(|| format!("status {status}"));
             return Err(format!("the worker failed: {message}"));
         }
-        Ok(body)
+        body.map_err(|err| format!("the worker's answer is unreadable: {err}"))
     }
 
     async fn health(&self) -> WorkerHealth {
@@ -162,14 +167,22 @@ fn name_taken(err: sqlx::Error, name: &str) -> ApiError {
     }
 }
 
-async fn create_model(_: Admin, State(pool): State<SqlitePool>, Json(definition): Json<ModelDefinition>) -> Result<(StatusCode, Json<Model>), ApiError> {
-    let definition = validated(definition)?;
-    let id = sqlx::query_scalar("INSERT INTO models (name, adapter, weights, options, class_map) VALUES (?, ?, ?, ?, ?) RETURNING id")
-        .bind(&definition.name)
-        .bind(&definition.adapter)
-        .bind(&definition.weights)
+/// Binds a definition's name, adapter, weights, options and class map, in that order.
+fn bind_definition<'q, O>(
+    query: sqlx::query::QueryAs<'q, sqlx::Sqlite, O, sqlx::sqlite::SqliteArguments<'q>>,
+    definition: &ModelDefinition,
+) -> sqlx::query::QueryAs<'q, sqlx::Sqlite, O, sqlx::sqlite::SqliteArguments<'q>> {
+    query
+        .bind(definition.name.clone())
+        .bind(definition.adapter.clone())
+        .bind(definition.weights.clone())
         .bind(serde_json::to_string(&definition.options).expect("options serialise"))
         .bind(serde_json::to_string(&definition.class_map).expect("class maps serialise"))
+}
+
+async fn create_model(_: Admin, State(pool): State<SqlitePool>, Json(definition): Json<ModelDefinition>) -> Result<(StatusCode, Json<Model>), ApiError> {
+    let definition = validated(definition)?;
+    let (id,): (i64,) = bind_definition(sqlx::query_as("INSERT INTO models (name, adapter, weights, options, class_map) VALUES (?, ?, ?, ?, ?) RETURNING id"), &definition)
         .fetch_one(&pool)
         .await
         .map_err(|err| name_taken(err, &definition.name))?;
@@ -178,19 +191,12 @@ async fn create_model(_: Admin, State(pool): State<SqlitePool>, Json(definition)
 
 async fn change_model(_: Admin, State(pool): State<SqlitePool>, Path(id): Path<i64>, Json(definition): Json<ModelDefinition>) -> Result<Json<Model>, ApiError> {
     let definition = validated(definition)?;
-    let changed = sqlx::query("UPDATE models SET name = ?, adapter = ?, weights = ?, options = ?, class_map = ? WHERE id = ?")
-        .bind(&definition.name)
-        .bind(&definition.adapter)
-        .bind(&definition.weights)
-        .bind(serde_json::to_string(&definition.options).expect("options serialise"))
-        .bind(serde_json::to_string(&definition.class_map).expect("class maps serialise"))
+    let changed: Option<(i64,)> = bind_definition(sqlx::query_as("UPDATE models SET name = ?, adapter = ?, weights = ?, options = ?, class_map = ? WHERE id = ? RETURNING id"), &definition)
         .bind(id)
-        .execute(&pool)
+        .fetch_optional(&pool)
         .await
         .map_err(|err| name_taken(err, &definition.name))?;
-    if changed.rows_affected() == 0 {
-        return Err(ApiError::NotFound);
-    }
+    changed.ok_or(ApiError::NotFound)?;
     Ok(Json(Model { id, definition }))
 }
 
@@ -258,7 +264,7 @@ async fn start_run(user: CurrentUser, State(state): State<AppState>, Path(projec
         jobs::ensure_image_access(&mut conn, &user, image).await?;
     }
     if state.worker.url.is_none() {
-        return Err(ApiError::Conflict(state.worker.url("").unwrap_err()));
+        return Err(ApiError::Conflict(NO_WORKER.to_owned()));
     }
     let labels = labels::project_labels(&mut conn, project).await?;
     drop(conn);
@@ -266,6 +272,10 @@ async fn start_run(user: CurrentUser, State(state): State<AppState>, Path(projec
     let cancelled = Arc::new(AtomicBool::new(false));
     let status = {
         let mut table = state.runs.0.lock().expect("runs lock");
+        let ended: Vec<u64> = table.runs.iter().filter(|(_, (status, _))| status.state != RunState::Running).map(|(id, _)| *id).collect();
+        for id in ended.iter().take(ended.len().saturating_sub(KEPT_RUNS)) {
+            table.runs.remove(id);
+        }
         table.next += 1;
         let status = RunStatus {
             id: table.next,
@@ -298,8 +308,11 @@ async fn run(state: AppState, id: u64, project: i64, model: ModelDefinition, lab
         Ok(root) => root,
         Err(_) => return fail("the image folder is not available".into()),
     };
+    // Set when cancelling leaves images undone.
+    let mut stopped = false;
     for image in image_ids {
         if cancelled.load(Ordering::SeqCst) {
+            stopped = true;
             break;
         }
         let row = match sqlx::query("SELECT path, width, height FROM images WHERE id = ?").bind(image).fetch_optional(&state.pool).await {
@@ -321,6 +334,7 @@ async fn run(state: AppState, id: u64, project: i64, model: ModelDefinition, lab
         };
         // A run cancelled while the worker was busy keeps nothing of that image.
         if cancelled.load(Ordering::SeqCst) {
+            stopped = true;
             break;
         }
         let mut made = Vec::new();
@@ -342,24 +356,28 @@ async fn run(state: AppState, id: u64, project: i64, model: ModelDefinition, lab
             }
         }
         match replace_pending(&state.pool, project, image, &model.name, &made).await {
-            Ok(()) => state.runs.update(id, |status| (status.done, status.created) = (status.done + 1, status.created + made.len())),
+            Ok(true) => state.runs.update(id, |status| (status.done, status.created) = (status.done + 1, status.created + made.len())),
+            Ok(false) => skip("images removed meanwhile".into()),
             Err(err) => return fail(format!("saving failed: {}", err.message())),
         }
     }
-    let finished = if cancelled.load(Ordering::SeqCst) { RunState::Cancelled } else { RunState::Finished };
-    state.runs.update(id, |status| status.state = finished);
+    state.runs.update(id, |status| status.state = if stopped { RunState::Cancelled } else { RunState::Finished });
 }
 
-/// Puts `made` on the image in place of the model's unreviewed pre-annotations there.
-async fn replace_pending(pool: &SqlitePool, project: i64, image: i64, model: &str, made: &[Annotation]) -> Result<(), ApiError> {
+/// Puts `made` on the image in place of the model's unreviewed pre-annotations there; false if
+/// the image is gone.
+async fn replace_pending(pool: &SqlitePool, project: i64, image: i64, model: &str, made: &[Annotation]) -> Result<bool, ApiError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    // An editor holding the old version is told to reload.
+    let bumped = sqlx::query("UPDATE images SET version = version + 1 WHERE id = ?").bind(image).execute(&mut *tx).await?;
+    if bumped.rows_affected() == 0 {
+        return Ok(false);
+    }
     sqlx::query("DELETE FROM annotations WHERE image_id = ? AND pending AND source = ?").bind(image).bind(model).execute(&mut *tx).await?;
     let first: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(position) + 1, 0) FROM annotations WHERE image_id = ?").bind(image).fetch_one(&mut *tx).await?;
     insert_annotations(&mut tx, project, image, first, made).await?;
-    // An editor holding the old version is told to reload.
-    sqlx::query("UPDATE images SET version = version + 1 WHERE id = ?").bind(image).execute(&mut *tx).await?;
     tx.commit().await?;
-    Ok(())
+    Ok(true)
 }
 
 async fn visible_run(state: &AppState, user: &CurrentUser, id: u64) -> Result<(RunStatus, Arc<AtomicBool>), ApiError> {

@@ -347,7 +347,7 @@ impl Stroke {
                 let Some(before) = annotations.get(index).cloned() else { continue };
                 match bitmap.to_mask().map(Shape::Mask) {
                     Some(shape) if shape != before.shape => {
-                        changes.push(Edit::Replace { index, after: Annotation { shape, ..before.clone() }, before })
+                        changes.push(Edit::Replace { index, after: Annotation { shape, pending: false, ..before.clone() }, before })
                     }
                     Some(_) => {}
                     None => removals.push(Edit::Remove { index, annotation: before }),
@@ -364,7 +364,7 @@ impl Stroke {
                 }
                 Some((&first, others)) => {
                     let before = annotations.get(first)?.clone();
-                    changes.push(Edit::Replace { index: first, after: Annotation { shape, ..before.clone() }, before });
+                    changes.push(Edit::Replace { index: first, after: Annotation { shape, pending: false, ..before.clone() }, before });
                     for &index in others {
                         if let Some(annotation) = annotations.get(index) {
                             removals.push(Edit::Remove { index, annotation: annotation.clone() });

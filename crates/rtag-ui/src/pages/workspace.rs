@@ -5,6 +5,7 @@ use leptos_router::{components::A, hooks::use_params_map};
 use rtag_core::{
     Image, Label, Project,
     annotation::{Annotation, ImageAnnotations, SaveAnnotations},
+    inference::RunStatus,
     geometry::Point,
     view::View,
 };
@@ -13,6 +14,7 @@ use crate::{
     annotate::{AnnotationLayer, Editor, Tool},
     filmstrip::{Filmstrip, ImageNav, ImagePosition},
     api,
+    pre_annotate::{RunPanel, RunScope},
     side_panel::SidePanel,
     tool_options::ToolOptions,
     view_filter::{ViewFilter, ViewFilterPanel},
@@ -193,7 +195,7 @@ fn Workspace(
     });
     on_cleanup(move || before_unload.remove());
 
-    let reload = move |_| {
+    let reload_annotations = move || {
         spawn_local(async move {
             match api::get::<ImageAnnotations>(&url.get_value()).await {
                 Ok(latest) => {
@@ -201,6 +203,25 @@ fn Workspace(
                     version.set(latest.version);
                     saved_revision.set(editor.revision.get_untracked());
                     state.set(SaveState::Saved);
+                }
+                Err(message) => editor.notice.set(Some(message)),
+            }
+        });
+    };
+    let reload = move |_| reload_annotations();
+    // A finished run's pre-annotations join the editor without losing edits made meanwhile, which
+    // are then saved on top of the run's version of the image.
+    let merge_run = move |run: RunStatus| {
+        spawn_local(async move {
+            match api::get::<ImageAnnotations>(&url.get_value()).await {
+                Ok(latest) => {
+                    editor.merge_pre_annotations(&run.model, &latest.annotations);
+                    version.set(latest.version);
+                    // A save made during the run was refused because of it; this one is not.
+                    if matches!(state.get_untracked(), SaveState::Conflict(_)) {
+                        state.set(SaveState::Unsaved);
+                    }
+                    retry.update(|n| *n += 1);
                 }
                 Err(message) => editor.notice.set(Some(message)),
             }
@@ -266,7 +287,14 @@ fn Workspace(
                     <AnnotationLayer editor=editor labels=layer_labels image_id=image_id image_size=image_size view=view size=size space_held=space_held />
                     {move || editor.notice.get().map(|text| view! { <p class="notice" role="status">{text}</p> })}
                 </TileViewer>
-                <SidePanel editor=editor labels=labels />
+                <SidePanel editor=editor labels=labels>
+                    <section class="pre-annotate" aria-label="Pre-annotate this image">
+                        <h4>"Pre-annotate"</h4>
+                        <RunPanel project=project.id scope=Signal::derive(move || Some(RunScope::Images(vec![image_id])))
+                            ready=Signal::derive(move || state.get() == SaveState::Saved)
+                            on_finished=Callback::new(merge_run) />
+                    </section>
+                </SidePanel>
             </div>
             <Filmstrip nav=nav editor=editor />
         </div>

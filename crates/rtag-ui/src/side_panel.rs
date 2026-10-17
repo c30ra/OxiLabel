@@ -1,6 +1,7 @@
-//! The panel right of the image: the collapsible objects list (select, hide, lock, relabel),
-//! the image's tags, and the attribute editor of the selected annotation or tag, shown when its
-//! label has attributes.
+//! The panel right of the image: the collapsible objects list (select, hide, lock, relabel,
+//! accept a pre-annotation), the review of pre-annotations (confidence threshold, accept or delete
+//! in bulk), the image's tags, the attribute editor of the selected annotation or tag (shown when
+//! its label has attributes), and whatever the workspace adds below (running a model).
 
 use std::collections::BTreeSet;
 
@@ -16,7 +17,7 @@ use rtag_core::{
 use crate::annotate::Editor;
 
 #[component]
-pub fn SidePanel(editor: Editor, labels: Vec<Label>) -> impl IntoView {
+pub fn SidePanel(editor: Editor, labels: Vec<Label>, children: Children) -> impl IntoView {
     let labels = StoredValue::new(labels);
     let label = move |id: i64| labels.with_value(|labels| labels.iter().find(|l| l.id == id).cloned());
     let tags = move || {
@@ -40,7 +41,8 @@ pub fn SidePanel(editor: Editor, labels: Vec<Label>) -> impl IntoView {
     let relabel = move |index: usize, id: i64| {
         let Some(before) = editor.annotations.with_untracked(|list| list.get(index).cloned()) else { return };
         let Some(target) = label(id) else { return };
-        let after = Annotation { label: id, attributes: target.conform_attributes(&before.attributes), ..before.clone() };
+        // Relabelling a pre-annotation reviews it.
+        let after = Annotation { label: id, attributes: target.conform_attributes(&before.attributes), pending: false, ..before.clone() };
         if after != before {
             editor.apply(Edit::Replace { index, before, after });
         }
@@ -51,10 +53,10 @@ pub fn SidePanel(editor: Editor, labels: Vec<Label>) -> impl IntoView {
         let choices = labels.with_value(|labels| labels.iter().filter(|l| l.shape_types.contains(&shape)).cloned().collect::<Vec<_>>());
         let name = label(annotation.label).map(|l| l.name).unwrap_or_default();
         let selected = move || editor.selection.with(|set| set.contains(&index));
-        let (hidden, locked) = (annotation.hidden, annotation.locked);
+        let (hidden, locked, pending) = (annotation.hidden, annotation.locked, annotation.pending);
         view! {
             // Not "hidden"/"locked": the global .hidden class hides elements.
-            <li class:selected=selected class:is-hidden=hidden class:is-locked=locked>
+            <li class:selected=selected class:is-hidden=hidden class:is-locked=locked class:pending=pending>
                 <span class="swatch" style:background=color></span>
                 <select class="relabel" aria-label="Label" on:change:target=move |ev| {
                     if let Ok(id) = ev.target().value().parse() { relabel(index, id) }
@@ -76,6 +78,10 @@ pub fn SidePanel(editor: Editor, labels: Vec<Label>) -> impl IntoView {
                 }>
                     <span class="detail">{describe(&annotation)}</span>
                 </button>
+                {pending.then(|| view! {
+                    <button class="accept" title="Accept this pre-annotation" aria-label=format!("Accept {name}")
+                        on:click=move |_| editor.accept(&[index])>"✓"</button>
+                })}
                 <button class="hide" aria-pressed=hidden.to_string() title=if hidden { "Show" } else { "Hide" }
                     aria-label=format!("{} {name}", if hidden { "Show" } else { "Hide" })
                     on:click=move |_| editor.set_flag(index, Some(!hidden), None)>
@@ -110,6 +116,33 @@ pub fn SidePanel(editor: Editor, labels: Vec<Label>) -> impl IntoView {
                         </Show>
                     </Show>
                 </section>
+                <Show when=move || editor.annotations.with(|list| list.iter().any(|a| a.pending))>
+                    <section class="review" aria-label="Pre-annotations to review">
+                        <h4>
+                            "To review"
+                            <span class="muted mono">{move || { let (shown, below) = editor.pending(); shown.len() + below.len() }}</span>
+                        </h4>
+                        <label class="threshold" title="Pre-annotations less confident than this are hidden">
+                            "Confidence from"
+                            <input type="range" min="0" max="1" step="0.05" prop:value=move || editor.pre_annotation_threshold.get().to_string()
+                                on:input:target={move |ev| if let Ok(value) = ev.target().value().parse::<f64>() {
+                                    editor.pre_annotation_threshold.set(value);
+                                    // What the threshold hides cannot stay selected.
+                                    let hidden: Vec<usize> = editor.annotations.with_untracked(|list| {
+                                        list.iter().enumerate().filter(|(_, a)| !a.shown(value)).map(|(index, _)| index).collect()
+                                    });
+                                    editor.selection.update(|set| set.retain(|index| !hidden.contains(index)));
+                                }} />
+                            <span class="mono">{move || format!("{:.2}", editor.pre_annotation_threshold.get())}</span>
+                        </label>
+                        <div class="review-actions">
+                            <button class="accept-shown" disabled=move || editor.pending().0.is_empty()
+                                on:click=move |_| editor.accept(&editor.pending().0)>{move || format!("Accept {}", editor.pending().0.len())}</button>
+                            <button class="danger delete-below" disabled=move || editor.pending().1.is_empty()
+                                on:click=move |_| editor.remove_all(&editor.pending().1)>{move || format!("Delete {} below", editor.pending().1.len())}</button>
+                        </div>
+                    </section>
+                </Show>
                 <Show when=move || !tags().is_empty()>
                     <section class="tags">
                         <h4>"Tags"</h4>
@@ -131,6 +164,7 @@ pub fn SidePanel(editor: Editor, labels: Vec<Label>) -> impl IntoView {
                     </section>
                 </Show>
                 {move || editing.get().map(|(index, label)| view! { <AttributeEditor editor=editor index=index label=label /> })}
+                {children()}
         </aside>
     }
 }

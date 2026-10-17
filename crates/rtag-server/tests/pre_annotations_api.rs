@@ -261,3 +261,20 @@ async fn annotators_run_models_only_on_images_of_their_jobs() {
     let (status, _) = call(&anna, Method::POST, &format!("/api/projects/{p}/pre-annotations"), Some(json!({"model": m, "image_ids": []}))).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn an_image_removed_during_a_run_is_skipped_and_statistics_wait_for_review() {
+    let worker = FakeWorker { delay: Duration::from_millis(150), ..FakeWorker::default() };
+    let app = test_app_with_worker(Some(worker.start().await)).await;
+    let (p, images) = project(&app, 3).await;
+    let m = model(&app).await;
+    let (_, started) = call(&app, Method::POST, &format!("/api/projects/{p}/pre-annotations"), Some(json!({"model": m, "image_ids": images}))).await;
+    call(&app, Method::POST, &format!("/api/projects/{p}/image-removals"), Some(json!({"ids": [images[2]]}))).await;
+    let status = wait(&app, started["id"].as_u64().unwrap()).await;
+    assert_eq!((&status["state"], &status["done"], &status["created"]), (&json!("finished"), &json!(2), &json!(4)), "{status}");
+    assert!(status["skipped"].as_array().unwrap().iter().any(|s| s["reason"] == "images removed meanwhile"), "{status}");
+
+    // Unreviewed pre-annotations do not count yet.
+    let (_, statistics) = call(&app, Method::GET, &format!("/api/projects/{p}/statistics"), None).await;
+    assert_eq!(statistics["labels"][0]["annotations"], json!(0), "{statistics}");
+}

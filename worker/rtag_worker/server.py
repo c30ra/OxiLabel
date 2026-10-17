@@ -27,6 +27,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 DEFAULT_ADDR = "127.0.0.1:3112"
+# Models kept loaded (on the GPU); loading another drops the one used longest ago.
+KEPT_MODELS = 2
 
 
 class BadRequest(Exception):
@@ -58,8 +60,17 @@ def load_adapter(name):
         raise
 
 
+def modified(path):
+    """When the file was last changed, or None if it is not a file here (e.g. a model name)."""
+    try:
+        return os.stat(path).st_mtime_ns
+    except OSError:
+        return None
+
+
 class Models:
-    """Loaded models by adapter, weights and options; inference runs one at a time."""
+    """Loaded models by adapter, weights and options, the most recently used last; a model whose
+    weights file changed is loaded again. Inference runs one at a time."""
 
     def __init__(self):
         self.loaded = {}
@@ -71,10 +82,16 @@ class Models:
                 raise BadRequest(f"the model needs {key}")
         options = request.get("options") or {}
         key = (request["adapter"], request["weights"], json.dumps(options, sort_keys=True))
-        if key not in self.loaded:
+        stamp = modified(request["weights"])
+        entry = self.loaded.pop(key, None)
+        if entry is None or entry[3] != stamp:
+            entry = None
+            while len(self.loaded) >= KEPT_MODELS:
+                self.loaded.pop(next(iter(self.loaded)))
             adapter = load_adapter(request["adapter"])
-            self.loaded[key] = (adapter, adapter.load(request["weights"], options), options)
-        return self.loaded[key]
+            entry = (adapter, adapter.load(request["weights"], options), options, stamp)
+        self.loaded[key] = entry
+        return entry[:3]
 
     def classes(self, request):
         with self.lock:

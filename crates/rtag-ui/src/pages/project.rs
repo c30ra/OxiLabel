@@ -8,6 +8,7 @@ use super::{cvat_import::CvatImportDialog, export::ExportDialog, images::ImageSe
 use crate::{
     account::{AccountMenu, is_admin},
     api,
+    pre_annotate::PreAnnotateDialog,
 };
 
 #[derive(Clone, Copy, PartialEq)]
@@ -39,6 +40,7 @@ pub fn ProjectPage(tab: Tab) -> impl IntoView {
     let admin = is_admin();
     let importing = RwSignal::new(false);
     let importing_annotations = RwSignal::new(false);
+    let pre_annotating = RwSignal::new(false);
     let exporting = RwSignal::new(false);
     let images_version = RwSignal::new(0_u32);
     // The grid's selection; the export dialog can export just these images.
@@ -76,6 +78,7 @@ pub fn ProjectPage(tab: Tab) -> impl IntoView {
                             <button on:click=move |_| exporting.set(true)>"Export…"</button>
                         </div>
                     })}
+                    <button class="pre-annotate" on:click=move |_| pre_annotating.set(true)>"Pre-annotate…"</button>
                     <AccountMenu />
                 </header>
                 <nav class="tabs" aria-label="Project">
@@ -99,6 +102,11 @@ pub fn ProjectPage(tab: Tab) -> impl IntoView {
                 </main>
                 <Show when=move || exporting.get()>
                     <ExportDialog project=id project_name=export_name.clone() selected=selected on_close=move || exporting.set(false) />
+                </Show>
+                <Show when=move || pre_annotating.get()>
+                    <PreAnnotateDialog project=id selected=selected
+                        on_finished=move || images_version.update(|v| *v += 1)
+                        on_close=move || pre_annotating.set(false) />
                 </Show>
                 <Show when=move || importing_annotations.get()>
                     <CvatImportDialog project=id

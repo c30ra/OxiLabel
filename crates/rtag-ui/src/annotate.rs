@@ -205,6 +205,8 @@ pub struct Editor {
     pub usable_shapes: RwSignal<Vec<ShapeType>>,
     /// Whether a shape, stroke or other gesture is in progress (moving to another image waits).
     pub busy: RwSignal<bool>,
+    /// Pending pre-annotations less confident than this are neither drawn nor picked.
+    pub pre_annotation_threshold: RwSignal<f64>,
 }
 
 /// The tools' drawing modes, remembered with the last tool.
@@ -277,6 +279,7 @@ impl Editor {
             eraser: RwSignal::new(false),
             fill: RwSignal::new(false),
             threshold: RwSignal::new(DEFAULT_THRESHOLD),
+            pre_annotation_threshold: RwSignal::new(0.0),
             contiguous: RwSignal::new(true),
             clean_up: RwSignal::new(0.0),
             max_fill: RwSignal::new(DEFAULT_MAX_FILL_PERCENT),
@@ -342,7 +345,8 @@ impl Editor {
     fn reshape(&self, index: usize, shape: Shape) {
         let Some(before) = self.annotation(index) else { return };
         if before.shape != shape {
-            let after = Annotation { shape, ..before.clone() };
+            // Editing a pre-annotation reviews it.
+            let after = Annotation { shape, pending: false, ..before.clone() };
             self.apply(Edit::Replace { index, before, after });
         }
     }
@@ -368,7 +372,11 @@ impl Editor {
             selection
                 .iter()
                 .rev()
-                .filter_map(|&index| list.get(index).filter(|a| !a.locked && !a.hidden).map(|annotation| Edit::Remove { index, annotation: annotation.clone() }))
+                .filter_map(|&index| {
+                    list.get(index)
+                        .filter(|a| !a.locked && a.shown(self.pre_annotation_threshold.get_untracked()))
+                        .map(|annotation| Edit::Remove { index, annotation: annotation.clone() })
+                })
                 .collect()
         });
         if removals.is_empty() {
@@ -400,15 +408,78 @@ impl Editor {
             selection
                 .iter()
                 .filter_map(|&index| {
-                    // Hidden shapes are left alone (they cannot be selected on purpose).
-                    let before = list.get(index).filter(|a| !a.hidden)?.clone();
-                    let after = change(&before);
+                    // Shapes not shown are left alone (they cannot be selected on purpose);
+                    // changing a pre-annotation reviews it.
+                    let before = list.get(index).filter(|a| a.shown(self.pre_annotation_threshold.get_untracked()))?.clone();
+                    let after = Annotation { pending: false, ..change(&before) };
                     (after != before).then_some(Edit::Replace { index, before, after })
                 })
                 .collect()
         });
         if !edits.is_empty() {
             self.apply(Edit::Batch(edits));
+        }
+    }
+
+    /// Replaces `source`'s pending pre-annotations with those it made in `latest` (the image as the
+    /// server now has it), in one undo step, keeping every other annotation as it is here.
+    pub fn merge_pre_annotations(&self, source: &str, latest: &[Annotation]) {
+        let ours = |a: &Annotation| a.pending && a.source.as_deref() == Some(source);
+        let mut edits: Vec<Edit> = self.annotations.with_untracked(|list| {
+            // Highest index first, so the others keep their positions while removing.
+            list.iter().enumerate().rev().filter(|(_, a)| ours(a)).map(|(index, a)| Edit::Remove { index, annotation: a.clone() }).collect()
+        });
+        let kept = self.annotations.with_untracked(Vec::len) - edits.len();
+        edits.extend(latest.iter().filter(|a| ours(a)).enumerate().map(|(offset, a)| Edit::Add { index: kept + offset, annotation: a.clone() }));
+        if !edits.is_empty() {
+            self.selection.set(BTreeSet::new());
+            self.apply(Edit::Batch(edits));
+        }
+    }
+
+    /// Marks the pending pre-annotations at `indices` reviewed, in one undo step.
+    pub fn accept(&self, indices: &[usize]) {
+        let edits: Vec<Edit> = self.annotations.with_untracked(|list| {
+            indices
+                .iter()
+                .filter_map(|&index| {
+                    let before = list.get(index).filter(|a| a.pending)?.clone();
+                    Some(Edit::Replace { index, after: Annotation { pending: false, ..before.clone() }, before })
+                })
+                .collect()
+        });
+        if !edits.is_empty() {
+            self.apply(Edit::Batch(edits));
+        }
+    }
+
+    /// The pending pre-annotations the user has not hidden: those shown (at or above the
+    /// threshold), and those below it.
+    pub fn pending(&self) -> (Vec<usize>, Vec<usize>) {
+        let threshold = self.pre_annotation_threshold.get();
+        self.annotations.with(|list| {
+            list.iter()
+                .enumerate()
+                .filter(|(_, a)| a.pending && !a.hidden)
+                .map(|(index, _)| index)
+                .partition(|&index| list[index].confidence.unwrap_or(1.0) >= threshold)
+        })
+    }
+
+    /// Removes the annotations at `indices` that are not locked, in one undo step, and clears the
+    /// selection.
+    pub fn remove_all(&self, indices: &[usize]) {
+        let removals: Vec<Edit> = self.annotations.with_untracked(|list| {
+            // Highest index first, so the others keep their positions while removing.
+            indices
+                .iter()
+                .rev()
+                .filter_map(|&index| list.get(index).filter(|a| !a.locked).map(|annotation| Edit::Remove { index, annotation: annotation.clone() }))
+                .collect()
+        });
+        if !removals.is_empty() {
+            self.selection.set(BTreeSet::new());
+            self.apply(Edit::Batch(removals));
         }
     }
 }
@@ -521,14 +592,14 @@ pub fn AnnotationLayer(
         editor.annotations.with_untracked(|list| {
             selection
                 .iter()
-                .filter_map(|&index| list.get(index).filter(|a| !a.shape.is_tag() && !a.locked && !a.hidden).map(|a| a.shape.bounds()))
+                .filter_map(|&index| list.get(index).filter(|a| !a.shape.is_tag() && !a.locked && a.shown(editor.pre_annotation_threshold.get_untracked())).map(|a| a.shape.bounds()))
                 .reduce(|a, b| a.union(&b))
         })
     };
     // The handle of the single selected shape under `point`, if any.
     let grip_at = move |point: Point, scale: f64| -> Option<(usize, Grip)> {
         let index = editor.single_selection()?;
-        let shape = editor.annotation(index).filter(|a| !a.locked && !a.hidden)?.shape;
+        let shape = editor.annotation(index).filter(|a| !a.locked && a.shown(editor.pre_annotation_threshold.get_untracked()))?.shape;
         let reach = HANDLE_REACH / scale;
         let grip = match &shape {
             Shape::Rectangle(rect) => rect.handle_at(point, reach).map(|handle| Grip::Resize(handle, *rect)),
@@ -1318,7 +1389,7 @@ pub fn AnnotationLayer(
             }
             return;
         }
-        let hit = editor.annotations.with_untracked(|list| topmost_at(list, point, PICK_MARGIN / current.scale));
+        let hit = editor.annotations.with_untracked(|list| topmost_at(list, point, PICK_MARGIN / current.scale, editor.pre_annotation_threshold.get_untracked()));
         match hit {
             // Shift+click toggles a shape, Ctrl+click removes it from the selection.
             Some(index) if extend => editor.selection.update(|set| {
@@ -1681,7 +1752,7 @@ pub fn AnnotationLayer(
                 if region.width() * current.scale < DRAG_THRESHOLD && region.height() * current.scale < DRAG_THRESHOLD {
                     return;
                 }
-                let hits = editor.annotations.with_untracked(|list| overlapping(list, region));
+                let hits = editor.annotations.with_untracked(|list| overlapping(list, region, editor.pre_annotation_threshold.get_untracked()));
                 editor.selection.update(|set| match mode {
                     BoxMode::Replace | BoxMode::Extend => set.extend(hits),
                     BoxMode::Subtract => hits.iter().for_each(|hit| {
@@ -1745,7 +1816,8 @@ pub fn AnnotationLayer(
             "a" | "A" if ev.alt_key() => editor.selection.set(BTreeSet::new()),
             // Everything visible: hidden shapes are not picked.
             "a" | "A" if !command => {
-                let visible = editor.annotations.with_untracked(|list| list.iter().enumerate().filter(|(_, a)| !a.hidden).map(|(i, _)| i).collect());
+                let threshold = editor.pre_annotation_threshold.get_untracked();
+                let visible = editor.annotations.with_untracked(|list| list.iter().enumerate().filter(|(_, a)| a.shown(threshold)).map(|(i, _)| i).collect());
                 editor.selection.set(visible);
             }
             _ if command || ev.alt_key() => return,
@@ -1845,7 +1917,7 @@ pub fn AnnotationLayer(
         editor.annotations.with_untracked(|list| {
             for (index, annotation) in list.iter().enumerate() {
                 // Tags are chips over the image, not drawn on it; hidden shapes are not drawn.
-                if annotation.shape.is_tag() || annotation.hidden {
+                if annotation.shape.is_tag() || !annotation.shown(editor.pre_annotation_threshold.get_untracked()) {
                     continue;
                 }
                 let selected = selection.contains(&index);
@@ -1872,7 +1944,8 @@ pub fn AnnotationLayer(
                     }
                     continue;
                 }
-                draw::shape(&context, current, &shape, Look { color: &color, selected, dashed: false });
+                // Pre-annotations not yet reviewed are dashed.
+                draw::shape(&context, current, &shape, Look { color: &color, selected, dashed: annotation.pending });
                 if selected {
                     let name = names.get(&annotation.label).cloned().unwrap_or_default();
                     draw::tag(&context, current.to_screen(shape.bounds().min), &name, &color);
@@ -1944,6 +2017,7 @@ pub fn AnnotationLayer(
         size.track();
         gesture.track();
         editor.annotations.track();
+        editor.pre_annotation_threshold.track();
         editor.selection.track();
         editor.label.track();
         editor.tool.track();

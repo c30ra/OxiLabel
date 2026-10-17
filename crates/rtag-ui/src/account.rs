@@ -33,7 +33,10 @@ pub fn AccountMenu() -> impl IntoView {
     };
     view! {
         <div class="account">
-            {is_admin().then(|| view! { <A href="/users">"Users"</A> })}
+            {is_admin().then(|| view! {
+                <A href="/models">"Models"</A>
+                <A href="/users">"Users"</A>
+            })}
             <span class="username" title=format!("Signed in as {}", account.user.username)>{account.user.username.clone()}</span>
             <button class="log-out" on:click=log_out>"Log out"</button>
         </div>

@@ -58,11 +58,24 @@ class WorkerTest(unittest.TestCase):
     def test_a_model_is_loaded_once_per_weights_and_options(self):
         models = Models()
         first = models.get(self.model(weights="once.pt"))
-        self.assertIs(models.get(self.model(weights="once.pt")), first)
+        self.assertIs(models.get(self.model(weights="once.pt"))[1], first[1])
         other = models.get(self.model(weights="once.pt", options={"conf": 0.1}))
-        self.assertIsNot(other, first)
+        self.assertIsNot(other[1], first[1])
         adapter = first[0]
         self.assertEqual([entry for entry in adapter.loads if entry[0] == "once.pt"], [("once.pt", {"conf": 0.75}), ("once.pt", {"conf": 0.1})])
+
+    def test_at_most_two_models_stay_loaded_and_changed_weights_are_reloaded(self):
+        import tempfile
+
+        models = Models()
+        for weights in ("a.pt", "b.pt", "c.pt"):
+            models.get(self.model(weights=weights))
+        self.assertEqual([key[1] for key in models.loaded], ["b.pt", "c.pt"])
+        with tempfile.NamedTemporaryFile(suffix=".pt") as file:
+            first = models.get(self.model(weights=file.name))
+            self.assertIs(models.get(self.model(weights=file.name))[1], first[1])
+            os.utime(file.name, ns=(1, 1))
+            self.assertIsNot(models.get(self.model(weights=file.name))[1], first[1])
 
     def test_bad_requests_and_failing_adapters_are_answered_with_their_reason(self):
         status, body = self.call("/classes", self.model(adapter="no_such_adapter"))

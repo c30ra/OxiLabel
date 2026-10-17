@@ -2339,6 +2339,7 @@ dependencies = [
  "blake3",
  "http-body-util",
  "image",
+ "libc",
  "password-hash",
  "regex",
  "reqwest",

@@ -7,6 +7,7 @@ mod filmstrip;
 mod masks;
 mod pages;
 mod pie;
+mod pre_annotate;
 mod side_panel;
 mod tool_options;
 mod view_filter;
@@ -19,7 +20,7 @@ use leptos_router::{
 };
 
 use account::{Account, SignIn};
-use pages::{ProjectPage, ProjectsPage, Tab, UsersPage, WorkspacePage};
+use pages::{ModelsPage, ProjectPage, ProjectsPage, Tab, UsersPage, WorkspacePage};
 use rtag_core::user::Session;
 
 /// The pages, once someone is signed in; before that the sign-in (or first account) form.
@@ -43,6 +44,7 @@ fn App() -> impl IntoView {
                         <Routes fallback=|| view! { <p class="page">"Page not found."</p> }>
                             <Route path=path!("/") view=ProjectsPage />
                             <Route path=path!("/users") view=UsersPage />
+                            <Route path=path!("/models") view=ModelsPage />
                             <Route path=path!("/projects/:id") view=|| view! { <ProjectPage tab=Tab::Images /> } />
                             <Route path=path!("/projects/:id/jobs") view=|| view! { <ProjectPage tab=Tab::Jobs /> } />
                             <Route path=path!("/projects/:id/labels") view=|| view! { <ProjectPage tab=Tab::Labels /> } />

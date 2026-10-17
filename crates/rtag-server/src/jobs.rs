@@ -61,7 +61,7 @@ pub async fn ensure_image_access(conn: &mut SqliteConnection, user: &CurrentUser
 const JOB_COLUMNS: &str = "SELECT jobs.id, jobs.number, users.id AS user_id, users.username, users.role, \
      (SELECT COUNT(*) FROM images WHERE images.job_id = jobs.id) AS images, \
      (SELECT COUNT(*) FROM images WHERE images.job_id = jobs.id AND annotated) AS annotated, \
-     (SELECT COUNT(*) FROM annotations JOIN images ON images.id = annotations.image_id WHERE images.job_id = jobs.id) AS annotations \
+     (SELECT COUNT(*) FROM annotations JOIN images ON images.id = annotations.image_id WHERE images.job_id = jobs.id AND NOT annotations.pending) AS annotations \
      FROM jobs LEFT JOIN users ON users.id = jobs.assignee_id";
 
 fn user_from_job_row(row: &SqliteRow) -> Option<User> {
@@ -212,7 +212,7 @@ async fn statistics(_: Admin, State(pool): State<SqlitePool>, Path(project): Pat
     let labels = sqlx::query(
         "SELECT labels.id, labels.name, labels.color, COUNT(annotations.id) AS annotations, \
            COUNT(DISTINCT annotations.image_id) AS images \
-         FROM labels LEFT JOIN annotations ON annotations.project_id = labels.project_id AND annotations.label_id = labels.id \
+         FROM labels LEFT JOIN annotations ON annotations.project_id = labels.project_id AND annotations.label_id = labels.id AND NOT annotations.pending \
          WHERE labels.project_id = ? GROUP BY labels.id ORDER BY labels.id",
     )
     .bind(project)
@@ -232,7 +232,7 @@ async fn statistics(_: Admin, State(pool): State<SqlitePool>, Path(project): Pat
     let users = sqlx::query(
         "SELECT users.id AS user_id, users.username, users.role, COUNT(*) AS images, \
            COALESCE(SUM(images.annotated), 0) AS annotated, \
-           COALESCE(SUM((SELECT COUNT(*) FROM annotations WHERE annotations.image_id = images.id)), 0) AS annotations \
+           COALESCE(SUM((SELECT COUNT(*) FROM annotations WHERE annotations.image_id = images.id AND NOT pending)), 0) AS annotations \
          FROM images LEFT JOIN jobs ON jobs.id = images.job_id LEFT JOIN users ON users.id = jobs.assignee_id \
          WHERE images.project_id = ? GROUP BY users.id ORDER BY users.id IS NULL, users.username",
     )

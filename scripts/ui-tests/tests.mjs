@@ -2,7 +2,8 @@
 // nine labels of NINE_LABELS (only "line", 3, rejects rectangles) and one 1600 × 1000 image.
 
 import { writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { KEY } from './bidi.mjs';
 import { ADMIN, NINE_LABELS, api, box, openWorkspace, signIn, signOut, writeTestImage } from './rtag.mjs';
@@ -1342,5 +1343,83 @@ tests.push({
     const labels = await t.api.call('GET', `/api/projects/${p}/labels`);
     equal(labels.at(-1).name, 'newbie', 'created label');
     equal(annotations[1].label, labels.at(-1).id, 'ellipse label');
+  },
+});
+
+tests.push({
+  name: 'a model registered on the Models screen pre-annotates an image; its results are reviewed by confidence',
+  async run(t) {
+    const p = t.project.id;
+    const adapter = join(dirname(fileURLToPath(import.meta.url)), 'test_adapter.py');
+    const fill = (selector, value) => t.b.eval(`(() => {
+      const input = document.querySelector(${JSON.stringify(selector)});
+      input.value = ${JSON.stringify(value)};
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      return 1;
+    })()`);
+
+    await t.b.goto(`${t.base}/`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.account a[href="/models"]')`), 'the Models link');
+    await t.b.eval(`document.querySelector('.account a[href="/models"]').click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`document.querySelector('.worker-health')?.textContent.includes('Worker ready on')`), 'the worker', 30000);
+    await fill('.model-form input.model-name', 'ui model');
+    await fill('.model-form input.model-adapter', adapter);
+    await fill('.model-form input.model-weights', 'none.pt');
+    await t.b.eval(`document.querySelector('.model-form button.primary').click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.models-table tr[data-model="ui model"]')`), 'the model row');
+    await t.b.eval(`[...document.querySelectorAll('.models-table tr[data-model="ui model"] button')].find((b) => b.textContent === 'Edit').click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.model-form button.read-classes')`), 'the edit form');
+    await t.b.eval(`document.querySelector('.model-form button.read-classes').click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`document.querySelector('.model-form textarea.model-classes').value === 'crack = crack\\nfinger = finger\\n'`), 'the classes');
+    await t.b.eval(`document.querySelector('.model-form button.primary').click(), 1`);
+    await t.b.waitFor(async () => (await t.api.call('GET', '/api/models'))[0]?.class_map?.finger === 'finger', 'the saved class map');
+
+    const w = await openWorkspace(t.b, t.base, t.project);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.pre-annotate button.run:not([disabled])')`), 'the Run button');
+    await t.b.eval(`document.querySelector('.pre-annotate button.run').click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`document.querySelector('.pre-annotate .run-summary')?.textContent === 'Done: 2 pre-annotations.'`), 'the run');
+    await t.b.waitFor(async () => (await w.state()).count === 2, 'the pre-annotations in the editor');
+    equal(await t.b.json(`[...document.querySelectorAll('.objects li.pending')].length`), 2, 'pending rows');
+
+    // From 0.5 up, only the crack shows; the finger is deleted, the crack accepted.
+    await t.b.eval(`(() => { const r = document.querySelector('.review input[type=range]'); r.value = '0.5'; r.dispatchEvent(new Event('input', { bubbles: true })); return 1; })()`);
+    await t.b.waitFor(() => t.b.eval(`document.querySelector('.review .delete-below').textContent === 'Delete 1 below'`), 'the threshold');
+    await t.b.eval(`document.querySelector('.review .delete-below').click(), 1`);
+    await t.b.eval(`document.querySelector('.review .accept-shown').click(), 1`);
+    const [crack] = await saved(t, (list) => list.length === 1 && !list[0].pending, 'the reviewed crack');
+    equal([crack.label, crack.source, crack.confidence], [1, 'ui model', 0.9], 'the accepted crack');
+    equal(await t.b.eval(`!!document.querySelector('.review')`), false, 'nothing left to review');
+
+    // The project's dialog runs it on the grid's selection.
+    await t.b.goto(`${t.base}/projects/${p}`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.grid li')`), 'the grid');
+    await t.b.eval(`[...document.querySelectorAll('.toolbar button')].find((b) => b.textContent === 'Select all').click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.selection-bar')`), 'the selection');
+    await t.b.eval(`document.querySelector('.topbar button.pre-annotate').click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.run-dialog button.run:not([disabled])')`), 'the dialog');
+    equal(await t.b.eval(`document.querySelector('.run-dialog input.scope-selection').checked`), true, 'the selection is the scope');
+    await t.b.eval(`document.querySelector('.run-dialog button.run').click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`document.querySelector('.run-dialog .run-summary')?.textContent === 'Done: 2 pre-annotations.'`), 'the dialog run');
+    const { annotations } = await t.api.annotations(t.project);
+    equal(annotations.map((a) => [a.label, !!a.pending]), [[1, false], [1, true], [2, true]], 'the reviewed crack stays; new pending ones are added');
+  },
+});
+
+tests.push({
+  name: 'a rectangle drawn while a model runs on the image is kept next to its pre-annotations',
+  async run(t) {
+    const adapter = join(dirname(fileURLToPath(import.meta.url)), 'test_adapter.py');
+    await t.api.call('POST', '/api/models', { name: 'slow model', adapter, weights: 'none.pt', options: { delay: 2 } });
+    const w = await openWorkspace(t.b, t.base, t.project);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.pre-annotate button.run:not([disabled])')`), 'the Run button');
+    await t.b.eval(`(() => { const s = document.querySelector('.pre-annotate select.run-model'); s.value = [...s.options].find((o) => o.text === 'slow model').value; s.dispatchEvent(new Event('change', { bubbles: true })); return 1; })()`);
+    await t.b.eval(`document.querySelector('.pre-annotate button.run').click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.pre-annotate button.cancel-run')`), 'the running run');
+    await t.b.key('r');
+    await t.b.drag(w.at(1000, 600), w.at(1200, 800));
+    await t.b.waitFor(() => t.b.eval(`document.querySelector('.pre-annotate .run-summary')?.textContent === 'Done: 2 pre-annotations.'`), 'the run', 15000);
+    const list = await saved(t, (list) => list.length === 3, 'the drawn rectangle and both pre-annotations');
+    equal(list.map((a) => [a.source ?? 'manual', !!a.pending]), [['manual', false], ['slow model', true], ['slow model', true]], 'annotations');
+    equal((await w.state()).save, 'Saved', 'save state');
   },
 });

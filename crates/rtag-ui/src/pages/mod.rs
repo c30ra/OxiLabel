@@ -4,13 +4,16 @@ mod images;
 mod import;
 mod jobs;
 mod labels;
+mod models;
 mod project;
 mod projects;
 mod statistics;
 mod users;
 mod workspace;
 
+pub use jobs::job_name;
 pub use project::{ProjectPage, Tab};
+pub use models::ModelsPage;
 pub use projects::ProjectsPage;
 pub use users::UsersPage;
 pub use workspace::WorkspacePage;
