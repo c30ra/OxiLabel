@@ -180,7 +180,7 @@ fn forget_old_filters(filters_dir: &Path) {
     let used = |dir: &Path| fs::metadata(dir.join(USED_MARKER)).and_then(|m| m.modified()).ok();
     let mut filters: Vec<_> = entries.filter_map(|entry| entry.ok()).map(|entry| entry.path()).map(|dir| (used(&dir), dir)).collect();
     // Most recently used first.
-    filters.sort_by(|a, b| b.0.cmp(&a.0));
+    filters.sort_by_key(|filter| std::cmp::Reverse(filter.0));
     for (_, dir) in filters.into_iter().skip(KEPT_FILTERS) {
         fs::remove_dir_all(dir).ok();
     }
