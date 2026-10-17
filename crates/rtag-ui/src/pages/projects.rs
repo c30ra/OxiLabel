@@ -162,13 +162,12 @@ fn NewProjectDialog(sources: Vec<ProjectSummary>, on_close: impl Fn() + Copy + S
     let browse = move |_| {
         spawn_local(async move {
             // On the server's machine the server shows the desktop's dialog.
-            let local = api::get::<Host>("/api/host").await.is_ok_and(|host| host.local);
-            if !local {
+            if !api::on_server_machine().await {
                 return pick_in_browser();
             }
-            match api::post::<_, Picked>("/api/host/folder-dialog", &()).await {
-                Ok(Picked { path: Some(path) }) => pick.set(Some(Pick::Host(path))),
-                Ok(Picked { path: None }) => {}
+            match api::host_folder_dialog().await {
+                Ok(Some(path)) => pick.set(Some(Pick::Host(path))),
+                Ok(None) => {}
                 // No dialog on this server (e.g. headless): the browser's own, with an upload.
                 Err(_) => pick_in_browser(),
             }
@@ -358,16 +357,6 @@ fn NewProjectDialog(sources: Vec<ProjectSummary>, on_close: impl Fn() + Copy + S
             </form>
         </div>
     }
-}
-
-#[derive(serde::Deserialize)]
-struct Host {
-    local: bool,
-}
-
-#[derive(serde::Deserialize)]
-struct Picked {
-    path: Option<String>,
 }
 
 fn is_image(name: &str) -> bool {

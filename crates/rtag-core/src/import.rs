@@ -29,6 +29,11 @@ pub struct CvatImportPlan {
     /// Write the import; otherwise only report what it would do.
     #[serde(default)]
     pub commit: bool,
+    /// Where to look for export images the project does not have yet (by file name, in any
+    /// subfolder, at the same size); those found are added to the project. A path relative to
+    /// the image root, or absolute from the server's own machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images_folder: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -36,8 +41,11 @@ pub struct CvatImportReport {
     pub labels: Vec<CvatLabelReport>,
     /// Images in the export.
     pub images: usize,
-    /// Images matched to one of the project's by file name and size.
+    /// Images matched to one of the project's by file name and size, or found in the images
+    /// folder.
     pub matched: usize,
+    /// Of those, the ones found in the images folder, added to the project (or that would be).
+    pub added: usize,
     /// Export images with no project image of that file name.
     pub unmatched: Vec<String>,
     /// Export images whose file name several project images have.

@@ -1323,8 +1323,19 @@ tests.push({
     equal(await t.b.eval(`document.querySelector('.cvat-skipped li').textContent`), '1 × label "newbie" is skipped', 'skipped');
     await choose('newbie', 'create');
     await t.b.waitFor(async () => (await importButton()) === 'Import 2 annotations', 'the preview with newbie');
+    // The export's other image is not in the project, but in a folder of the image root.
+    writeTestImage(join(t.work, 'images', 'cvat-extra', 'sub', 'missing.png'), 10, 10);
+    await t.b.eval(`(() => {
+      const input = document.querySelector('.cvat-dialog input.images-folder-path');
+      input.value = 'cvat-extra';
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      return 1;
+    })()`);
+    await t.b.waitFor(() => t.b.eval(`document.querySelector('.cvat-summary')?.textContent === '2 of 2 images match, 1 of them found in the images folder and to be added.'`), 'the folder preview');
     await t.b.eval(`document.querySelector('.cvat-dialog button.import').click(), 1`);
-    await t.b.waitFor(() => t.b.eval(`document.querySelector('.cvat-result')?.textContent === 'Imported 2 annotations into 1 image.'`), 'the result');
+    await t.b.waitFor(() => t.b.eval(`document.querySelector('.cvat-result')?.textContent === 'Imported 2 annotations into 2 images, adding 1 image to the project.'`), 'the result');
+    const page = await t.api.call('GET', `/api/projects/${p}/images`);
+    equal(page.images.map((image) => image.path), ['cvat-extra/sub/missing.png', 'test.png'], 'project images');
 
     const { annotations } = await t.api.annotations(t.project);
     equal(annotations.map((a) => a.shape.type), ['rectangle', 'ellipse'], 'imported shapes');

@@ -326,3 +326,37 @@ async fn attribute_values_are_trimmed_and_left_out_shapes_count_once() {
     let reasons: Vec<_> = report["skipped"].as_array().unwrap().iter().map(|s| s["reason"].as_str().unwrap().to_owned()).collect();
     assert_eq!(reasons.len(), 1, "only the shape outside the image: {reasons:?}");
 }
+
+#[tokio::test]
+async fn export_images_missing_from_the_project_are_added_from_a_folder() {
+    let app = test_app().await;
+    // image2.jpg is in the project; image1.jpg only in photos/, next to a resized copy.
+    let (p, _) = project(&app, &[("image2.jpg", 2048, 960)], &[]).await;
+    for (path, width, height) in [("photos/front/image1.jpg", 2048, 941), ("photos/small/image1.jpg", 512, 235)] {
+        let file = app.images.path().join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        image::RgbImage::from_pixel(width, height, image::Rgb([7, 7, 7])).save(&file).unwrap();
+    }
+    let (_, report) = import(&app, p, "annotations.xml", DEFECT_DETECTION.as_bytes(), json!({})).await;
+    assert_eq!((&report["matched"], &report["unmatched"]), (&json!(1), &json!(["image1.jpg"])));
+
+    let plan = json!({"images_folder": "photos"});
+    let (status, report) = import(&app, p, "annotations.xml", DEFECT_DETECTION.as_bytes(), plan).await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    assert_eq!((&report["matched"], &report["added"], &report["unmatched"]), (&json!(2), &json!(1), &json!([])));
+    assert_eq!(report["annotations"], json!(65));
+    let (_, page) = call(&app, Method::GET, &format!("/api/projects/{p}/images"), None).await;
+    assert_eq!(page["total"], json!(1), "the preview adds nothing");
+
+    let (status, report) = import(&app, p, "annotations.xml", DEFECT_DETECTION.as_bytes(), json!({"images_folder": "photos", "commit": true})).await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    let (_, page) = call(&app, Method::GET, &format!("/api/projects/{p}/images"), None).await;
+    let paths: Vec<_> = page["images"].as_array().unwrap().iter().map(|image| image["path"].as_str().unwrap().to_owned()).collect();
+    assert_eq!(paths, ["image2.jpg", "photos/front/image1.jpg"]);
+    let added = page["images"][1]["id"].as_i64().unwrap();
+    assert_eq!(annotations(&app, p, added).await.len(), 35);
+
+    // A folder outside the image root needs the server's own machine (ADR 0003).
+    let (status, _) = import(&app, p, "annotations.xml", DEFECT_DETECTION.as_bytes(), json!({"images_folder": "/tmp"})).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}

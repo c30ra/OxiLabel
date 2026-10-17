@@ -149,3 +149,24 @@ async fn check(result: Result<Response, gloo_net::Error>) -> Result<Response, St
         Err(_) => format!("Request failed ({})", response.status()),
     })
 }
+
+#[derive(Deserialize)]
+struct Host {
+    local: bool,
+}
+
+/// Whether this browser runs on the server's machine, which may use any folder of it (ADR 0003).
+pub async fn on_server_machine() -> bool {
+    get::<Host>("/api/host").await.is_ok_and(|host| host.local)
+}
+
+#[derive(Deserialize)]
+struct Picked {
+    path: Option<String>,
+}
+
+/// Shows the desktop's folder dialog on the server's machine: the chosen folder's absolute path,
+/// none if cancelled, or an error if the server cannot show one.
+pub async fn host_folder_dialog() -> Result<Option<String>, String> {
+    post::<_, Picked>("/api/host/folder-dialog", &()).await.map(|picked| picked.path)
+}

@@ -21,14 +21,16 @@ use rtag_core::{
     import::{CvatImportPlan, CvatImportReport, CvatLabelReport, LabelChoice, SkipCount},
 };
 use rtag_formats::cvat::{CvatAnnotation, CvatExport, CvatLabel, parse_cvat};
-use sqlx::{Row, SqliteConnection, SqlitePool};
+use sqlx::{Row, SqliteConnection};
 
 use crate::{
     AppState,
     annotations::{check_annotation, insert_annotations},
     auth::Admin,
     error::ApiError,
-    labels,
+    host::Caller,
+    images::{self, NewImage},
+    labels, projects,
 };
 
 /// CVAT exports of a few thousand images run to tens of megabytes of XML.
@@ -42,7 +44,14 @@ pub fn routes() -> Router<AppState> {
 
 /// Reads the `file` part (the export) and the `plan` part (JSON, optional) and previews or runs
 /// the import.
-async fn import(_: Admin, State(pool): State<SqlitePool>, Path(project): Path<i64>, mut multipart: Multipart) -> Result<Json<CvatImportReport>, ApiError> {
+async fn import(
+    _: Admin,
+    State(state): State<AppState>,
+    caller: Caller,
+    Path(project): Path<i64>,
+    mut multipart: Multipart,
+) -> Result<Json<CvatImportReport>, ApiError> {
+    let pool = &state.pool;
     let unreadable = |err: axum::extract::multipart::MultipartError| ApiError::BadRequest(format!("unreadable upload: {err}"));
     let (mut file, mut plan) = (None, CvatImportPlan::default());
     while let Some(field) = multipart.next_field().await.map_err(unreadable)? {
@@ -57,15 +66,72 @@ async fn import(_: Admin, State(pool): State<SqlitePool>, Path(project): Path<i6
     }
     let file = file.ok_or_else(|| ApiError::BadRequest("choose a CVAT export to import".into()))?;
     let export = parse_cvat(&export_xml(&file)?).map_err(ApiError::BadRequest)?;
+    let mut conn = pool.acquire().await?;
+    projects::ensure_exists(&mut conn, project).await?;
+    let found = match plan.images_folder.as_deref().map(str::trim).filter(|folder| !folder.is_empty()) {
+        Some(folder) => find_missing(&state, caller, &mut conn, project, &export, folder, plan.commit).await?,
+        None => Found::new(),
+    };
     if plan.commit {
+        drop(conn);
         // Takes the write lock at once, so a save meanwhile waits instead of failing midway.
         let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-        let report = run(&mut tx, project, &export, &plan).await?;
+        let report = run(&mut tx, project, &export, &plan, found).await?;
         tx.commit().await?;
         Ok(Json(report))
     } else {
-        Ok(Json(run(&mut *pool.acquire().await?, project, &export, &plan).await?))
+        Ok(Json(run(&mut conn, project, &export, &plan, found).await?))
     }
+}
+
+/// Export images the project lacks that the images folder has, by lower-case file name and size:
+/// read and ready to add when committing, otherwise only found.
+type Found = BTreeMap<(String, u32, u32), Option<NewImage>>;
+
+/// Looks in `folder` for the export images that match no project image. This happens before the
+/// import's transaction, so annotators' saves never wait for files being read.
+async fn find_missing(state: &AppState, caller: Caller, conn: &mut SqliteConnection, project: i64, export: &CvatExport, folder: &str, read: bool) -> Result<Found, ApiError> {
+    let root = images::image_root(state)?;
+    let folder = images::resolve_for(caller, &root, folder)?;
+    if !folder.is_dir() {
+        return Err(ApiError::BadRequest("the images folder is not a folder".into()));
+    }
+    let present = project_images(conn, project).await?;
+    let missing: BTreeSet<(String, u32, u32)> = export
+        .images
+        .iter()
+        .map(|image| (file_name(&image.name).to_lowercase(), image.width, image.height))
+        .filter(|(name, width, height)| !present.get(name).is_some_and(|images| images.iter().any(|image| (image.width, image.height) == (*width, *height))))
+        .collect();
+    let names = missing.iter().map(|(name, _, _)| name.clone()).collect();
+    tokio::task::spawn_blocking(move || {
+        let files = images::images_named(&folder, &names);
+        let mut found = Found::new();
+        for key in missing {
+            // Copies with the same name and size are taken to be the same image: the first, by path.
+            let Some(file) = files.get(&key).and_then(|files| files.first()) else { continue };
+            let image = if read { Some(images::read_new_image(&root, file).map_err(|reason| ApiError::BadRequest(format!("cannot read {}: {reason}", file.display())))?) } else { None };
+            found.insert(key, image);
+        }
+        Ok(found)
+    })
+    .await
+    .map_err(|err| ApiError::Internal(err.to_string()))?
+}
+
+/// The project's images by lower-case file name.
+async fn project_images(conn: &mut SqliteConnection, project: i64) -> Result<BTreeMap<String, Vec<ProjectImage>>, ApiError> {
+    let mut by_name: BTreeMap<String, Vec<ProjectImage>> = BTreeMap::new();
+    let rows = sqlx::query("SELECT id, path, width, height, (SELECT COUNT(*) FROM annotations WHERE image_id = images.id) AS annotations FROM images WHERE project_id = ?")
+        .bind(project)
+        .fetch_all(&mut *conn)
+        .await?;
+    for row in rows {
+        let path: String = row.get("path");
+        let image = ProjectImage { id: row.get("id"), width: row.get("width"), height: row.get("height"), annotations: row.get("annotations") };
+        by_name.entry(file_name(&path).to_lowercase()).or_default().push(image);
+    }
+    Ok(by_name)
 }
 
 /// The XML of an export: the file itself, or the XML file inside a zip (its `annotations.xml`,
@@ -120,7 +186,7 @@ impl Skipped {
     }
 }
 
-async fn run(conn: &mut SqliteConnection, project: i64, export: &CvatExport, plan: &CvatImportPlan) -> Result<CvatImportReport, ApiError> {
+async fn run(conn: &mut SqliteConnection, project: i64, export: &CvatExport, plan: &CvatImportPlan, mut found: Found) -> Result<CvatImportReport, ApiError> {
     let existing = labels::project_labels(conn, project).await?;
 
     // Every CVAT label: the listed ones, then any the shapes use without the list naming them.
@@ -175,21 +241,13 @@ async fn run(conn: &mut SqliteConnection, project: i64, export: &CvatExport, pla
         targets.insert(cvat_label.name.clone(), target);
     }
 
-    let mut by_name: BTreeMap<String, Vec<ProjectImage>> = BTreeMap::new();
-    let rows = sqlx::query("SELECT id, path, width, height, (SELECT COUNT(*) FROM annotations WHERE image_id = images.id) AS annotations FROM images WHERE project_id = ?")
-        .bind(project)
-        .fetch_all(&mut *conn)
-        .await?;
-    for row in rows {
-        let path: String = row.get("path");
-        let image = ProjectImage { id: row.get("id"), width: row.get("width"), height: row.get("height"), annotations: row.get("annotations") };
-        by_name.entry(file_name(&path).to_lowercase()).or_default().push(image);
-    }
+    let by_name = project_images(conn, project).await?;
 
     let mut report = CvatImportReport {
         labels: reports,
         images: export.images.len(),
         matched: 0,
+        added: 0,
         unmatched: Vec::new(),
         ambiguous: Vec::new(),
         size_mismatch: Vec::new(),
@@ -200,10 +258,23 @@ async fn run(conn: &mut SqliteConnection, project: i64, export: &CvatExport, pla
     };
     let mut skipped = Skipped::default();
     for cvat_image in &export.images {
-        // Same file name (ignoring case), then same size.
-        let named = by_name.get(&file_name(&cvat_image.name).to_lowercase()).map(Vec::as_slice).unwrap_or_default();
+        // Same file name (ignoring case), then same size; failing that, an image found in the
+        // images folder, added now.
+        let key = (file_name(&cvat_image.name).to_lowercase(), cvat_image.width, cvat_image.height);
+        let named = by_name.get(&key.0).map(Vec::as_slice).unwrap_or_default();
         let sized: Vec<&ProjectImage> = named.iter().filter(|image| (image.width, image.height) == (cvat_image.width, cvat_image.height)).collect();
+        let added;
         let image = match (named, &sized[..]) {
+            (_, []) if let Some(new) = found.remove(&key) => {
+                let id = match new {
+                    Some(new) => images::add_images(conn, project, &[new]).await?[0],
+                    // Previewed, it stands for the image it would become, under an id no image has.
+                    None => -1,
+                };
+                report.added += 1;
+                added = ProjectImage { id, width: cvat_image.width, height: cvat_image.height, annotations: 0 };
+                &added
+            }
             ([], _) => {
                 report.unmatched.push(cvat_image.name.clone());
                 continue;

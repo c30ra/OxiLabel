@@ -86,6 +86,21 @@ pub fn CvatImportDialog(
         send(false);
     };
     let committed = move || report.with(|report| report.as_ref().is_some_and(|report| report.committed));
+    // Where missing images are looked for: typed, or (on the server's machine) picked in its dialog.
+    let local = LocalResource::new(api::on_server_machine);
+    let set_folder = move |folder: String| {
+        plan.update(|plan| plan.images_folder = Some(folder.trim().to_owned()).filter(|folder| !folder.is_empty()));
+        send(false);
+    };
+    let browse = move |_| {
+        spawn_local(async move {
+            match api::host_folder_dialog().await {
+                Ok(Some(folder)) => set_folder(folder),
+                Ok(None) => {}
+                Err(message) => error.set(Some(message)),
+            }
+        });
+    };
 
     view! {
         <div class="backdrop" on:click=move |_| on_close()>
@@ -108,6 +123,19 @@ pub fn CvatImportDialog(
                             report.set(None);
                             send(false);
                         } />
+                    <div class="images-folder">
+                        <label>
+                            "Images folder"
+                            <input class="images-folder-path" type="text"
+                                placeholder={move || if local.get().unwrap_or(false) { "Any folder of this computer" } else { "A folder in the server's image folder" }}
+                                prop:value=move || plan.read().images_folder.clone().unwrap_or_default()
+                                on:change:target=move |ev| set_folder(ev.target().value()) />
+                        </label>
+                        <Show when=move || local.get().unwrap_or(false)>
+                            <button type="button" on:click=browse>"Browse…"</button>
+                        </Show>
+                        <p class="muted hint">"Optional. Export images the project lacks are looked for here by file name, in every subfolder, and added to the project."</p>
+                    </div>
                     {move || error.get().map(|message| view! { <p class="error" role="alert">{message}</p> })}
                     {move || report.get().map(|report| {
                         let existing = labels.get().and_then(Result::ok).unwrap_or_default();
@@ -151,13 +179,23 @@ fn Preview(
     if report.committed {
         return view! {
             <p class="report cvat-result" role="status">
-                {format!("Imported {} into {}.", count(report.annotations, "annotation"), count(report.matched, "image"))}
+                {format!("Imported {} into {}", count(report.annotations, "annotation"), count(report.matched, "image"))}
+                {match report.added {
+                    0 => ".".to_owned(),
+                    added => format!(", adding {} to the project.", count(added, "image")),
+                }}
             </p>
         }
         .into_any();
     }
     view! {
-        <p class="cvat-summary">{format!("{} of {} match.", report.matched, count(report.images, "image"))}</p>
+        <p class="cvat-summary">
+            {format!("{} of {} match", report.matched, count(report.images, "image"))}
+            {match report.added {
+                0 => ".".to_owned(),
+                added => format!(", {added} of them found in the images folder and to be added."),
+            }}
+        </p>
         {problems.into_iter().filter(|(_, list)| !list.is_empty()).map(|(what, list)| view! {
             <details class="cvat-unmatched">
                 <summary>{format!("{} {what}", count(list.len(), "image"))}</summary>

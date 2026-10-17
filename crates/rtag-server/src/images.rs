@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fs,
     io::Cursor,
     path::{Component, Path, PathBuf},
@@ -147,15 +147,18 @@ async fn import_selection(
         .await
         .expect("image scan panicked");
 
-    add_images(&state.pool, project, &new_images).await?;
+    let mut tx = state.pool.begin().await?;
+    add_images(&mut tx, project, &new_images).await?;
+    tx.commit().await?;
     Ok(Json(report))
 }
 
-async fn add_images(pool: &SqlitePool, project: i64, new_images: &[NewImage]) -> Result<(), ApiError> {
-    let mut tx = pool.begin().await?;
+/// Records `new_images` in the project and returns their ids, in order.
+pub(crate) async fn add_images(conn: &mut SqliteConnection, project: i64, new_images: &[NewImage]) -> Result<Vec<i64>, ApiError> {
+    let mut ids = Vec::with_capacity(new_images.len());
     for image in new_images {
-        sqlx::query(
-            "INSERT INTO images (project_id, path, hash, width, height, size, modified_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        let id = sqlx::query_scalar(
+            "INSERT INTO images (project_id, path, hash, width, height, size, modified_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
         )
         .bind(project)
         .bind(&image.path)
@@ -164,11 +167,35 @@ async fn add_images(pool: &SqlitePool, project: i64, new_images: &[NewImage]) ->
         .bind(image.height)
         .bind(image.file.size)
         .bind(image.file.modified_at)
-        .execute(&mut *tx)
+        .fetch_one(&mut *conn)
         .await?;
+        ids.push(id);
     }
-    tx.commit().await?;
-    Ok(())
+    Ok(ids)
+}
+
+/// The images under `folder` (in any subfolder) whose file names, ignoring case, are in `wanted`
+/// (given in lower case), by lower-case file name and size. Only their headers are read.
+pub(crate) fn images_named(folder: &Path, wanted: &BTreeSet<String>) -> BTreeMap<(String, u32, u32), Vec<PathBuf>> {
+    let mut files = BTreeSet::new();
+    collect_files(folder, &mut files);
+    let mut found: BTreeMap<(String, u32, u32), Vec<PathBuf>> = BTreeMap::new();
+    for file in files {
+        let Some(name) = file.file_name().map(|name| name.to_string_lossy().to_lowercase()) else { continue };
+        if !wanted.contains(&name) || !is_supported(&file) {
+            continue;
+        }
+        if let Ok((width, height)) = image::image_dimensions(&file) {
+            found.entry((name, width, height)).or_default().push(file);
+        }
+    }
+    found
+}
+
+/// Reads an image file to add to a project: its path as stored (see `relative_path`), content
+/// hash, size and file details.
+pub(crate) fn read_new_image(root: &Path, file: &Path) -> Result<NewImage, String> {
+    read_image(file).map(|image| NewImage { path: relative_path(root, file), ..image })
 }
 
 async fn remove_images(
@@ -195,7 +222,7 @@ async fn remove_images(
     Ok(Json(RemovalReport { removed }))
 }
 
-fn image_root(state: &AppState) -> Result<PathBuf, ApiError> {
+pub(crate) fn image_root(state: &AppState) -> Result<PathBuf, ApiError> {
     state
         .images_root
         .canonicalize()
@@ -204,7 +231,7 @@ fn image_root(state: &AppState) -> Result<PathBuf, ApiError> {
 
 /// Resolves a folder or file: an absolute path as it is, for requests from the server's own
 /// machine only (ADR 0003), otherwise a path relative to the image root.
-fn resolve_for(caller: Caller, root: &Path, path: &str) -> Result<PathBuf, ApiError> {
+pub(crate) fn resolve_for(caller: Caller, root: &Path, path: &str) -> Result<PathBuf, ApiError> {
     let path = path.trim();
     if !Path::new(path).is_absolute() {
         return resolve(root, path);
@@ -231,7 +258,7 @@ fn resolve(root: &Path, relative: &str) -> Result<PathBuf, ApiError> {
     Ok(path)
 }
 
-struct NewImage {
+pub(crate) struct NewImage {
     path: String,
     hash: String,
     width: u32,
@@ -365,7 +392,9 @@ async fn upload_images(
             fs::remove_file(file).ok();
         }
     }
-    add_images(&state.pool, project, &new_images).await?;
+    let mut tx = state.pool.begin().await?;
+    add_images(&mut tx, project, &new_images).await?;
+    tx.commit().await?;
     Ok(Json(report))
 }
 
