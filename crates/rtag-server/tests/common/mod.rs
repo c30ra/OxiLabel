@@ -42,6 +42,11 @@ impl Deref for TestApp {
 }
 
 pub async fn test_app() -> TestApp {
+    test_app_with_worker(None).await
+}
+
+/// A test server whose pre-annotation worker listens at `worker_url`.
+pub async fn test_app_with_worker(worker_url: Option<String>) -> TestApp {
     let images = TempDir::new().unwrap();
     let cache = TempDir::new().unwrap();
     let exports = TempDir::new().unwrap();
@@ -59,6 +64,7 @@ pub async fn test_app() -> TestApp {
         export_dir: exports.path().to_owned(),
         upload_dir: uploads.path().to_owned(),
         folder_dialog: Some(folder_dialog),
+        worker_url,
     })
     .await
     .unwrap();

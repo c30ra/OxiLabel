@@ -251,6 +251,9 @@ pub struct Annotation {
     /// Cannot be moved, reshaped, painted over or deleted until unlocked.
     #[serde(default, skip_serializing_if = "is_false")]
     pub locked: bool,
+    /// A pre-annotation not yet reviewed: shown apart in the editor and left out of exports.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pending: bool,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -259,7 +262,7 @@ fn is_false(value: &bool) -> bool {
 
 impl Annotation {
     pub fn manual(label: i64, shape: Shape) -> Self {
-        Annotation { label, shape, source: None, confidence: None, attributes: Attributes::new(), hidden: false, locked: false }
+        Annotation { label, shape, source: None, confidence: None, attributes: Attributes::new(), hidden: false, locked: false, pending: false }
     }
 }
 

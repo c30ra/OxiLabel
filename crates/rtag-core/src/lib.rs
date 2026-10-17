@@ -10,6 +10,7 @@ pub mod filter;
 pub mod geometry;
 pub mod history;
 pub mod import;
+pub mod inference;
 pub mod job;
 pub mod mask;
 pub mod oriented;

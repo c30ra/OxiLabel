@@ -78,7 +78,9 @@ async fn create_export(
 
     let mut annotations: HashMap<i64, Vec<Annotation>> = HashMap::new();
     for row in sqlx::query(
-        "SELECT image_id, label_id, shape, source, confidence, attributes, hidden, locked FROM annotations WHERE project_id = ? ORDER BY image_id, position",
+        // Unreviewed pre-annotations do not count yet.
+        "SELECT image_id, label_id, shape, source, confidence, attributes, hidden, locked, pending FROM annotations \
+         WHERE project_id = ? AND NOT pending ORDER BY image_id, position",
     )
     .bind(project)
     .fetch_all(&mut *conn)

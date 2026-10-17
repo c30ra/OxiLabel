@@ -5,6 +5,7 @@ version.workspace = true
 
 [dependencies]
 axum = { version = "0.8", features = ["multipart"] }
+base64 = "0.22"
 argon2 = "0.5"
 # The operating system's random numbers, for salts and session tokens.
 password-hash = { version = "0.5", features = ["getrandom"] }
@@ -12,6 +13,8 @@ blake3 = "1"
 ashpd = { version = "0.11", default-features = false, features = ["tokio"] }
 image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png", "tiff", "webp"] }
 regex = "1"
+# Calls the pre-annotation worker over local HTTP (ADR 0001).
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
 rtag-core = { path = "../rtag-core" }
 rtag-formats = { path = "../rtag-formats" }
 serde = { version = "1", features = ["derive"] }

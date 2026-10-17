@@ -20,6 +20,7 @@ async fn main() {
         export_dir: PathBuf::from(env_or("RTAG_EXPORT_DIR", "data/exports")),
         upload_dir: PathBuf::from(env_or("RTAG_UPLOAD_DIR", "data/uploads")),
         folder_dialog: desktop_folder_dialog(),
+        worker_url: std::env::var("RTAG_WORKER_URL").ok().filter(|url| !url.is_empty()),
     };
     let addr = env_or("RTAG_ADDR", "0.0.0.0:3000");
     let web_root = env_or("RTAG_WEB_ROOT", "crates/rtag-ui/dist");

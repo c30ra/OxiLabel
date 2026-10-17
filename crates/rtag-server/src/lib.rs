@@ -6,6 +6,7 @@ mod error;
 mod exports;
 mod host;
 mod images;
+mod inference;
 mod jobs;
 mod labels;
 mod projects;
@@ -49,6 +50,8 @@ pub struct Config {
     pub cache_dir: PathBuf,
     /// Exports are written into folders here.
     pub export_dir: PathBuf,
+    /// Where the pre-annotation worker listens, e.g. `http://127.0.0.1:3112`; none without one.
+    pub worker_url: Option<String>,
 }
 
 #[derive(Clone)]
@@ -60,6 +63,8 @@ struct AppState {
     cache_dir: PathBuf,
     export_dir: PathBuf,
     pyramid_locks: tiles::GenerationLocks,
+    worker: inference::Worker,
+    runs: inference::Runs,
 }
 
 impl FromRef<AppState> for SqlitePool {
@@ -92,6 +97,8 @@ pub async fn app(config: Config) -> Result<Router, sqlx::Error> {
         cache_dir: config.cache_dir,
         export_dir: config.export_dir,
         pyramid_locks: tiles::GenerationLocks::default(),
+        worker: inference::Worker::new(config.worker_url),
+        runs: inference::Runs::default(),
     };
     let signed_in = Router::new()
         .merge(projects::routes())
@@ -105,6 +112,7 @@ pub async fn app(config: Config) -> Result<Router, sqlx::Error> {
         .merge(users::routes())
         .merge(jobs::routes())
         .merge(cvat::routes())
+        .merge(inference::routes())
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_session));
     Ok(Router::new().merge(signed_in).merge(auth::routes()).with_state(state))
 }

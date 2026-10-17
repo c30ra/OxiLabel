@@ -39,7 +39,7 @@ async fn load_annotations(
     let mut conn = pool.acquire().await?;
     let (_, _, version) = image_in_project(&mut conn, project, image).await?;
     jobs::ensure_image_access(&mut conn, &user, image).await?;
-    let rows = sqlx::query("SELECT label_id, shape, source, confidence, attributes, hidden, locked FROM annotations WHERE image_id = ? ORDER BY position")
+    let rows = sqlx::query("SELECT label_id, shape, source, confidence, attributes, hidden, locked, pending FROM annotations WHERE image_id = ? ORDER BY position")
         .bind(image)
         .fetch_all(&mut *conn)
         .await?;
@@ -48,7 +48,7 @@ async fn load_annotations(
 }
 
 /// Reads an annotation from a row with `label_id`, `shape`, `source`, `confidence`,
-/// `attributes`, `hidden` and `locked`.
+/// `attributes`, `hidden`, `locked` and `pending`.
 pub(crate) fn annotation_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Annotation, ApiError> {
     let unreadable = |what: &str, err: serde_json::Error| ApiError::Internal(format!("stored {what} are unreadable: {err}"));
     let shape = serde_json::from_str(row.get("shape")).map_err(|err| unreadable("shapes", err))?;
@@ -61,6 +61,7 @@ pub(crate) fn annotation_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Annot
         attributes,
         hidden: row.get("hidden"),
         locked: row.get("locked"),
+        pending: row.get("pending"),
     })
 }
 
@@ -126,8 +127,8 @@ pub(crate) async fn insert_annotations(conn: &mut SqliteConnection, project: i64
     for (offset, annotation) in annotations.iter().enumerate() {
         let shape = serde_json::to_string(&annotation.shape).expect("shapes serialize");
         sqlx::query(
-            "INSERT INTO annotations (image_id, project_id, label_id, position, shape, source, confidence, attributes, hidden, locked) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO annotations (image_id, project_id, label_id, position, shape, source, confidence, attributes, hidden, locked, pending) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(image)
         .bind(project)
@@ -139,6 +140,7 @@ pub(crate) async fn insert_annotations(conn: &mut SqliteConnection, project: i64
         .bind(serde_json::to_string(&annotation.attributes).expect("attributes serialize"))
         .bind(annotation.hidden)
         .bind(annotation.locked)
+        .bind(annotation.pending)
         .execute(&mut *conn)
         .await?;
     }

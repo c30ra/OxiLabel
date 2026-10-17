@@ -18,6 +18,17 @@ pub enum ApiError {
     Internal(String),
 }
 
+impl ApiError {
+    /// What went wrong, for a message that is not an HTTP response (e.g. a background run's).
+    pub fn message(&self) -> String {
+        match self {
+            ApiError::BadRequest(message) | ApiError::Unauthorized(message) | ApiError::Forbidden(message) | ApiError::Conflict(message) | ApiError::Internal(message) => message.clone(),
+            ApiError::NotFound => "not found".to_owned(),
+            ApiError::Database(err) => err.to_string(),
+        }
+    }
+}
+
 impl From<sqlx::Error> for ApiError {
     fn from(err: sqlx::Error) -> Self {
         ApiError::Database(err)
