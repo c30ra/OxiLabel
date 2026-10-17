@@ -4,11 +4,11 @@
 
 **Blocked by:** 08, 10
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] Importing an XML creates annotations on matching images, matched by file name
 - [x] CVAT labels are mapped to existing labels or created on request, and attributes are carried over
-- [ ] A preview report lists unmapped labels, unmatched images and unsupported shapes, and nothing is written until I confirm
+- [x] A preview report lists unmapped labels, unmatched images and unsupported shapes, and nothing is written until I confirm
 - [x] Formats tests use sample CVAT exports, including one from the author's `defect_detection` project, and check the resulting model
 
 **Decisions (2026-10-17):** CVAT ellipses needed ellipses in rtag first (ticket 23, done before this). Annotations already on a matched image are kept or replaced as chosen in the preview, which says how many matched images have some. CVAT's `source` (manual, auto, semi-auto) is not kept: imported shapes count as manual work, having been reviewed in CVAT. The fixture from `defect_detection` is two images of `dataset_v2.zip`, renamed image1.jpg and image2.jpg, its meta cut to the label set (no owners, tasks or URLs).
