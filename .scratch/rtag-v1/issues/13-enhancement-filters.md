@@ -4,15 +4,15 @@
 
 **Blocked by:** 04
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Choosing a preset or moving a slider updates the visible image
-- [ ] Holding the toggle key shows the original, releasing it returns to the filtered view
-- [ ] Filter settings persist per project
-- [ ] Filtered views are cached, and switching back to a seen setting is fast
+- [x] Choosing a preset or moving a slider updates the visible image
+- [x] Holding the toggle key shows the original, releasing it returns to the filtered view
+- [x] Filter settings persist per project
+- [x] Filtered views are cached, and switching back to a seen setting is fast
 - [x] Filter output matches the reference implementations in the author's `defect_detection` project on test images, within a small tolerance
 - [x] Drawing on a filtered view still stores coordinates in the original image space
-- [ ] Edge snapping, fuzzy fill and the edge-limited brush (tickets 21, 22) each get a switch to analyse the active filter's view instead of the original, using lossless tiles of the filtered pyramid (ADR 0002)
+- [x] Edge snapping, fuzzy fill and the edge-limited brush (tickets 21, 22) each get a switch to analyse the active filter's view instead of the original, using lossless tiles of the filtered pyramid (ADR 0002)
 
 **Decisions (2026-10-17):** settings are remembered per project in this browser (local storage), not on the server. Sliders apply live, 300 ms after they stop moving. Brightness and contrast are applied in the browser on top of any preset (analysis ignores them). The CLAHE preset is `enhance_for_tagging` (flatten, gray, CLAHE) with its parameters as sliders. The panel starts collapsed.
 
