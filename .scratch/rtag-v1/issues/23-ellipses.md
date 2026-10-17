@@ -4,11 +4,11 @@
 
 **Blocked by:** 08
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] I can draw ellipses from the centre or across their box, and Shift draws a circle
-- [ ] A selected ellipse can be resized along each radius and rotated by its handles
-- [ ] Existing circle annotations and labels' allowed circle shape become ellipses
+- [x] I can draw ellipses from the centre or across their box, and Shift draws a circle
+- [x] A selected ellipse can be resized along each radius and rotated by its handles
+- [x] Existing circle annotations and labels' allowed circle shape become ellipses
 - [x] Exports (YOLO detect, segment, OBB) handle rotated ellipses
 
 **Decisions (2026-10-17):** asked for while planning ticket 16 ("convert circle to ellipses in our program first"): ellipses rotate, with a handle; the tool is renamed Ellipse with Shift for a circle; stored circles migrate to ellipses with equal radii.
