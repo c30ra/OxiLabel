@@ -1067,11 +1067,11 @@ tests.push({
     equal(await t.b.eval(`!!document.querySelector('.view-filter.collapsed')`), true, 'the panel starts collapsed');
 
     await openFilterPanel(t);
-    await pressPreset(t, 'v2');
+    await pressPreset(t, 'LCN');
     // enhance_v2 flattens the lighting: the gradient becomes mid gray.
     const filtered = await t.b.waitFor(async () => { const g = await viewerGray(t, spot); return Math.abs(g - original) > 15 && g; }, 'the filtered image');
-    equal(await t.b.eval(`document.querySelector('.view-chip').textContent`), 'View v2', 'header with a filter');
-    equal((await tileRequests(t, 'tiles')).some((n) => n.includes('?filter=v2_0.030_6.0_0.020_0.50_3.0')), true, 'filtered tiles asked for');
+    equal(await t.b.eval(`document.querySelector('.view-chip').textContent`), 'View LCN', 'header with a filter');
+    equal((await tileRequests(t, 'tiles')).some((n) => n.includes('?filter=lcn_0.030_6.0_0.020_0.50_3.0')), true, 'filtered tiles asked for');
 
     // Holding O shows the original, releasing it the filter again.
     await t.b.keyDown('o');
@@ -1087,7 +1087,7 @@ tests.push({
       gain.dispatchEvent(new Event('input', { bubbles: true }));
       return 1;
     })()`);
-    await t.b.waitFor(async () => (await tileRequests(t, 'tiles')).some((n) => n.includes('?filter=v2_0.030_6.0_0.020_1.50_3.0')), 'tiles of the changed gain');
+    await t.b.waitFor(async () => (await tileRequests(t, 'tiles')).some((n) => n.includes('?filter=lcn_0.030_6.0_0.020_1.50_3.0')), 'tiles of the changed gain');
 
     // Brightness and contrast are applied on screen.
     await t.b.eval(`(() => {
@@ -1106,7 +1106,7 @@ tests.push({
 
     // Remembered for the project in this browser.
     await t.b.goto(`${t.base}/projects/${t.project.id}/images/${t.project.image}`);
-    await t.b.waitFor(() => t.b.eval(`document.querySelector('.view-chip')?.textContent === 'View v2'`), 'the filter after reloading');
+    await t.b.waitFor(() => t.b.eval(`document.querySelector('.view-chip')?.textContent === 'View LCN'`), 'the filter after reloading');
     equal(await t.b.json(`[...document.querySelectorAll('.view-filter .slider .value')].map((v) => v.textContent)`),
       ['0.030', '6.0', '0.020', '1.50', '3.0', '150%', '100%'], 'remembered values');
   },

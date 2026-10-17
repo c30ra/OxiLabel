@@ -10,7 +10,8 @@ pub enum Preset {
     Flatten,
     /// `enhance_for_tagging`: flattened, gray, then CLAHE (local contrast).
     Clahe,
-    /// `enhance_v2`: robust to hot spots and blur; gray.
+    /// `enhance_v2`, shown as LCN: lighting flattened by a large median, then band-pass detail
+    /// normalised by its robust local contrast (local contrast normalisation); gray.
     EnhanceV2,
 }
 
@@ -54,7 +55,7 @@ impl Preset {
         match self {
             Preset::Flatten => "flatten",
             Preset::Clahe => "clahe",
-            Preset::EnhanceV2 => "v2",
+            Preset::EnhanceV2 => "lcn",
         }
     }
 
@@ -62,7 +63,7 @@ impl Preset {
         match self {
             Preset::Flatten => "Flatten",
             Preset::Clahe => "CLAHE",
-            Preset::EnhanceV2 => "v2",
+            Preset::EnhanceV2 => "LCN",
         }
     }
 
@@ -163,7 +164,7 @@ mod tests {
         assert_eq!(filter.key(), "clahe_0.05_3.0_16");
         assert_eq!(Filter::parse(&filter.key()), Some(filter));
         let v2 = Filter::with_values(Preset::EnhanceV2, &[0.03, 6.0, 0.02, 0.1 + 0.2, 3.0]);
-        assert_eq!(v2.key(), "v2_0.030_6.0_0.020_0.30_3.0");
+        assert_eq!(v2.key(), "lcn_0.030_6.0_0.020_0.30_3.0");
         assert_eq!(Filter::parse(&v2.key()).unwrap().value("gain"), 0.3);
         assert_eq!(Filter::new(Preset::Flatten).key(), "flatten_0.08");
     }
@@ -174,7 +175,7 @@ mod tests {
         filter.set(3, 9.0);
         filter.set(1, f64::NAN);
         assert_eq!((filter.value("gain"), filter.value("detail_sigma")), (2.0, 6.0));
-        assert_eq!(Filter::parse("v2_0.030_6.0_0.020_-0.00_3.0").unwrap().key(), "v2_0.030_6.0_0.020_0.00_3.0");
+        assert_eq!(Filter::parse("lcn_0.030_6.0_0.020_-0.00_3.0").unwrap().key(), "lcn_0.030_6.0_0.020_0.00_3.0");
         for key in ["", "sharpen_1", "flatten", "flatten_0.08_1", "flatten_x", "flatten_0.9", "flatten_inf", "clahe_0.05_3.0"] {
             assert_eq!(Filter::parse(key), None, "{key}");
         }
