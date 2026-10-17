@@ -8,6 +8,7 @@ pub mod fill;
 pub mod filter;
 pub mod geometry;
 pub mod history;
+pub mod job;
 pub mod mask;
 pub mod oriented;
 pub mod pie;
@@ -41,6 +42,7 @@ pub struct ProjectSummary {
     pub name: String,
     pub images: i64,
     pub annotated: i64,
+    pub jobs: i64,
     pub label_colors: Vec<String>,
 }
 
@@ -235,6 +237,13 @@ pub struct ImageFilter {
     /// Modification date bounds as `YYYY-MM-DD`, inclusive.
     pub modified_from: Option<String>,
     pub modified_to: Option<String>,
+    /// Only the images of this job.
+    pub job: Option<i64>,
+    /// Only images in no job.
+    #[serde(default)]
+    pub without_job: bool,
+    /// Only images marked annotated (true) or not (false).
+    pub annotated: Option<bool>,
 }
 
 impl ImageFilter {
@@ -255,6 +264,9 @@ impl ImageFilter {
         push("max_size", self.max_size.map(|v| v.to_string()));
         push("modified_from", self.modified_from.clone());
         push("modified_to", self.modified_to.clone());
+        push("job", self.job.map(|v| v.to_string()));
+        push("without_job", self.without_job.then(|| "true".to_owned()));
+        push("annotated", self.annotated.map(|v| v.to_string()));
         pairs
     }
 

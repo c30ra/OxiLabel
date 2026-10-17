@@ -17,7 +17,13 @@ use rtag_core::{
 use serde::Deserialize;
 use sqlx::{QueryBuilder, Row, Sqlite, SqliteConnection, SqlitePool};
 
-use crate::{AppState, auth::Admin, error::ApiError, host::Caller, projects};
+use crate::{
+    AppState,
+    auth::{Admin, CurrentUser},
+    error::ApiError,
+    host::Caller,
+    jobs, projects,
+};
 
 const SUPPORTED_EXTENSIONS: [&str; 7] = ["bmp", "jpeg", "jpg", "png", "tif", "tiff", "webp"];
 const MAX_PAGE_SIZE: i64 = 500;
@@ -431,9 +437,22 @@ fn default_page_size() -> i64 {
     100
 }
 
-/// Appends the conditions selecting the project's images that match `filter`.
-fn push_filter(query: &mut QueryBuilder<'_, Sqlite>, project: i64, filter: &ImageFilter) -> Result<(), ApiError> {
+/// Appends the conditions selecting the project's images that match `filter` and, for an
+/// annotator (`owner`), are in their jobs.
+fn push_filter(query: &mut QueryBuilder<'_, Sqlite>, project: i64, filter: &ImageFilter, owner: Option<i64>) -> Result<(), ApiError> {
     query.push(" WHERE project_id = ").push_bind(project);
+    if let Some(owner) = owner {
+        query.push(" AND job_id IN (SELECT id FROM jobs WHERE assignee_id = ").push_bind(owner).push(")");
+    }
+    if let Some(job) = filter.job {
+        query.push(" AND job_id = ").push_bind(job);
+    }
+    if filter.without_job {
+        query.push(" AND job_id IS NULL");
+    }
+    if let Some(annotated) = filter.annotated {
+        query.push(" AND annotated = ").push_bind(annotated);
+    }
     if let Some(name) = filter.name.as_deref().filter(|name| !name.is_empty()) {
         if let Err(err) = regex::RegexBuilder::new(name).case_insensitive(true).build() {
             // Syntax errors span several lines pointing at the pattern; the last one says what is wrong.
@@ -475,19 +494,20 @@ fn is_date(text: &str) -> bool {
 }
 
 async fn list_images(
+    user: CurrentUser,
     State(pool): State<SqlitePool>,
     UrlPath(project): UrlPath<i64>,
     Query(page): Query<PageQuery>,
     Query(filter): Query<ImageFilter>,
 ) -> Result<Json<ImagePage>, ApiError> {
     let mut conn = pool.acquire().await?;
-    projects::ensure_exists(&mut conn, project).await?;
+    jobs::ensure_project_visible(&mut conn, &user, project).await?;
     let mut count = QueryBuilder::new("SELECT COUNT(*) AS n FROM images");
-    push_filter(&mut count, project, &filter)?;
+    push_filter(&mut count, project, &filter, user.job_owner())?;
     let total: i64 = count.build().fetch_one(&mut *conn).await?.get("n");
 
     let mut select = QueryBuilder::new(IMAGE_COLUMNS);
-    push_filter(&mut select, project, &filter)?;
+    push_filter(&mut select, project, &filter, user.job_owner())?;
     select
         .push(" ORDER BY path LIMIT ")
         .push_bind(page.limit.clamp(1, MAX_PAGE_SIZE))
@@ -515,25 +535,34 @@ fn image_from_row(row: &sqlx::sqlite::SqliteRow) -> Image {
     }
 }
 
-async fn get_image(
-    State(pool): State<SqlitePool>,
-    UrlPath((project, image)): UrlPath<(i64, i64)>,
-) -> Result<Json<Image>, ApiError> {
+/// The image, if it is in the project and `user` may open it.
+async fn visible_image(pool: &SqlitePool, user: &CurrentUser, project: i64, image: i64) -> Result<Image, ApiError> {
     let row = sqlx::query(&format!("{IMAGE_COLUMNS} WHERE id = ? AND project_id = ?"))
         .bind(image)
         .bind(project)
-        .fetch_optional(&pool)
+        .fetch_optional(pool)
         .await?
         .ok_or(ApiError::NotFound)?;
-    Ok(Json(image_from_row(&row)))
+    jobs::ensure_image_access(&mut *pool.acquire().await?, user, image).await?;
+    Ok(image_from_row(&row))
+}
+
+async fn get_image(
+    user: CurrentUser,
+    State(pool): State<SqlitePool>,
+    UrlPath((project, image)): UrlPath<(i64, i64)>,
+) -> Result<Json<Image>, ApiError> {
+    Ok(Json(visible_image(&pool, &user, project, image).await?))
 }
 
 /// Marks an image annotated or not annotated.
 async fn set_status(
+    user: CurrentUser,
     State(pool): State<SqlitePool>,
     UrlPath((project, image)): UrlPath<(i64, i64)>,
     Json(status): Json<ImageStatus>,
 ) -> Result<Json<Image>, ApiError> {
+    visible_image(&pool, &user, project, image).await?;
     let updated = sqlx::query("UPDATE images SET annotated = ? WHERE id = ? AND project_id = ?")
         .bind(status.annotated)
         .bind(image)
@@ -543,7 +572,7 @@ async fn set_status(
     if updated.rows_affected() == 0 {
         return Err(ApiError::NotFound);
     }
-    get_image(State(pool), UrlPath((project, image))).await
+    Ok(Json(visible_image(&pool, &user, project, image).await?))
 }
 
 #[derive(Deserialize)]
@@ -557,34 +586,28 @@ fn default_neighbours() -> i64 {
     6
 }
 
-/// An image's place in its project (by path) and up to `count` images on each side, for the
-/// filmstrip.
+/// An image's place among the project's images the user may open (by path) and up to `count`
+/// of those on each side, for the filmstrip.
 async fn neighbours(
+    user: CurrentUser,
     State(pool): State<SqlitePool>,
     UrlPath((project, image)): UrlPath<(i64, i64)>,
     Query(query): Query<NeighboursQuery>,
 ) -> Result<Json<ImageNeighbours>, ApiError> {
-    let path: String = sqlx::query("SELECT path FROM images WHERE id = ? AND project_id = ?")
-        .bind(image)
-        .bind(project)
-        .fetch_optional(&pool)
-        .await?
-        .ok_or(ApiError::NotFound)?
-        .get("path");
+    let path = visible_image(&pool, &user, project, image).await?.path;
     let count = query.count.clamp(0, 50);
-    let before: i64 = sqlx::query("SELECT COUNT(*) AS n FROM images WHERE project_id = ? AND path < ?")
-        .bind(project)
-        .bind(&path)
-        .fetch_one(&pool)
-        .await?
-        .get("n");
-    let total: i64 = sqlx::query("SELECT COUNT(*) AS n FROM images WHERE project_id = ?").bind(project).fetch_one(&pool).await?.get("n");
-    let rows = sqlx::query(&format!("{IMAGE_COLUMNS} WHERE project_id = ? ORDER BY path LIMIT ? OFFSET ?"))
-        .bind(project)
-        .bind(2 * count + 1)
-        .bind((before - count).max(0))
-        .fetch_all(&pool)
-        .await?;
+    let all = ImageFilter::default();
+    let mut before = QueryBuilder::new("SELECT COUNT(*) AS n FROM images");
+    push_filter(&mut before, project, &all, user.job_owner())?;
+    before.push(" AND path < ").push_bind(&path);
+    let before: i64 = before.build().fetch_one(&pool).await?.get("n");
+    let mut total = QueryBuilder::new("SELECT COUNT(*) AS n FROM images");
+    push_filter(&mut total, project, &all, user.job_owner())?;
+    let total: i64 = total.build().fetch_one(&pool).await?.get("n");
+    let mut select = QueryBuilder::new(IMAGE_COLUMNS);
+    push_filter(&mut select, project, &all, user.job_owner())?;
+    select.push(" ORDER BY path LIMIT ").push_bind(2 * count + 1).push(" OFFSET ").push_bind((before - count).max(0));
+    let rows = select.build().fetch_all(&pool).await?;
     // When fewer than `count` images come before, the window starts at the first and is shorter.
     let images: Vec<Image> = rows.iter().map(image_from_row).take((count + 1 + before.min(count)) as usize).collect();
     Ok(Json(ImageNeighbours { position: before + 1, total, images }))
@@ -592,14 +615,15 @@ async fn neighbours(
 
 /// Ids of every image matching the filter, in path order; used to select all of them at once.
 async fn list_image_ids(
+    user: CurrentUser,
     State(pool): State<SqlitePool>,
     UrlPath(project): UrlPath<i64>,
     Query(filter): Query<ImageFilter>,
 ) -> Result<Json<Vec<i64>>, ApiError> {
     let mut conn = pool.acquire().await?;
-    projects::ensure_exists(&mut conn, project).await?;
+    jobs::ensure_project_visible(&mut conn, &user, project).await?;
     let mut select = QueryBuilder::new("SELECT id FROM images");
-    push_filter(&mut select, project, &filter)?;
+    push_filter(&mut select, project, &filter, user.job_owner())?;
     select.push(" ORDER BY path");
     let rows = select.build().fetch_all(&mut *conn).await?;
     Ok(Json(rows.iter().map(|row| row.get("id")).collect()))

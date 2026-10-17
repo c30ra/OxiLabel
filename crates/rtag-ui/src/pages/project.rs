@@ -4,7 +4,7 @@ use rtag_core::{ImagePage, Label, Project};
 
 use std::collections::BTreeSet;
 
-use super::{export::ExportDialog, images::ImageSet, import::ImportDialog, labels::LabelSet};
+use super::{export::ExportDialog, images::ImageSet, import::ImportDialog, jobs::JobsTab, labels::LabelSet, statistics::StatisticsTab};
 use crate::{
     account::{AccountMenu, is_admin},
     api,
@@ -13,7 +13,9 @@ use crate::{
 #[derive(Clone, Copy, PartialEq)]
 pub enum Tab {
     Images,
+    Jobs,
     Labels,
+    Statistics,
 }
 
 #[component]
@@ -57,6 +59,7 @@ pub fn ProjectPage(tab: Tab) -> impl IntoView {
             let id = project.id;
             let name = project.name.clone();
             let export_name = project.name.clone();
+            let class = move |of: Tab| if of == tab { "tab active" } else { "tab" };
             view! {
                 <header class="topbar">
                     <A href="/" attr:class="brand">"rtag"</A>
@@ -74,8 +77,10 @@ pub fn ProjectPage(tab: Tab) -> impl IntoView {
                     <AccountMenu />
                 </header>
                 <nav class="tabs" aria-label="Project">
-                    <A href=format!("/projects/{id}") attr:class=if tab == Tab::Images { "tab active" } else { "tab" }>"Images"</A>
-                    <A href=format!("/projects/{id}/labels") attr:class=if tab == Tab::Labels { "tab active" } else { "tab" }>"Labels"</A>
+                    <A href=format!("/projects/{id}") attr:class=class(Tab::Images)>"Images"</A>
+                    <A href=format!("/projects/{id}/jobs") attr:class=class(Tab::Jobs)>"Jobs"</A>
+                    <A href=format!("/projects/{id}/labels") attr:class=class(Tab::Labels)>"Labels"</A>
+                    {admin.then(|| view! { <A href=format!("/projects/{id}/statistics") attr:class=class(Tab::Statistics)>"Statistics"</A> })}
                 </nav>
                 <main class="page">
                     {match tab {
@@ -85,7 +90,9 @@ pub fn ProjectPage(tab: Tab) -> impl IntoView {
                                 _ => view! { <ImageSet project=id version=images_version selected=selected /> }.into_any(),
                             }}
                         }.into_any(),
+                        Tab::Jobs => view! { <JobsTab project=id /> }.into_any(),
                         Tab::Labels => view! { <LabelSet project=id /> }.into_any(),
+                        Tab::Statistics => view! { <StatisticsTab project=id /> }.into_any(),
                     }}
                 </main>
                 <Show when=move || exporting.get()>
@@ -151,7 +158,7 @@ fn GetStarted(project: i64, on_import: impl Fn() + Copy + Send + Sync + 'static)
                         <strong>"Jobs " <span class="muted">"· optional"</span></strong>
                         <span class="muted">"Split the images among annotators. Working alone? Skip it."</span>
                     </span>
-                    <button disabled title="Jobs come in a later version">"Create jobs…"</button>
+                    <button disabled title="Import images first; then select them in the grid">"Create jobs…"</button>
                 </li>
             </ol>
         </section>

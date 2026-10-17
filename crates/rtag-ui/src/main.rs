@@ -44,7 +44,9 @@ fn App() -> impl IntoView {
                             <Route path=path!("/") view=ProjectsPage />
                             <Route path=path!("/users") view=UsersPage />
                             <Route path=path!("/projects/:id") view=|| view! { <ProjectPage tab=Tab::Images /> } />
+                            <Route path=path!("/projects/:id/jobs") view=|| view! { <ProjectPage tab=Tab::Jobs /> } />
                             <Route path=path!("/projects/:id/labels") view=|| view! { <ProjectPage tab=Tab::Labels /> } />
+                            <Route path=path!("/projects/:id/statistics") view=|| view! { <ProjectPage tab=Tab::Statistics /> } />
                             <Route path=path!("/projects/:id/images/:image") view=WorkspacePage />
                         </Routes>
                     }.into_any()

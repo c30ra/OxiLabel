@@ -51,6 +51,12 @@ impl CurrentUser {
     pub fn token_hash(&self) -> &str {
         &self.token_hash
     }
+
+    /// The user whose jobs bound what this one sees and edits: an annotator themself; none for
+    /// admins, who see everything.
+    pub fn job_owner(&self) -> Option<i64> {
+        (self.user.role == Role::Annotator).then_some(self.user.id)
+    }
 }
 
 impl<S: Send + Sync> FromRequestParts<S> for CurrentUser {

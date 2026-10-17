@@ -82,6 +82,7 @@ fn ProjectCard(project: ProjectSummary, admin: bool, on_delete: impl Fn(ProjectS
                 <span>{plural(project.images, "image")}</span>
                 <span>{format!("{} annotated", project.annotated)}</span>
                 <span>{plural(project.label_colors.len() as i64, "label")}</span>
+                {(project.jobs > 0).then(|| view! { <span class="jobs">{plural(project.jobs, "job")}</span> })}
             </span>
             <span class="swatches">
                 {project.label_colors.iter().map(|color| view! { <span class="swatch" style:background=color.clone()></span> }).collect_view()}

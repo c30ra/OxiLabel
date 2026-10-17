@@ -5,6 +5,7 @@ mod error;
 mod exports;
 mod host;
 mod images;
+mod jobs;
 mod labels;
 mod projects;
 mod thumbnails;
@@ -101,6 +102,7 @@ pub async fn app(config: Config) -> Result<Router, sqlx::Error> {
         .merge(thumbnails::routes())
         .merge(tiles::routes())
         .merge(users::routes())
+        .merge(jobs::routes())
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_session));
     Ok(Router::new().merge(signed_in).merge(auth::routes()).with_state(state))
 }

@@ -110,6 +110,16 @@ export async function signIn(b, base, { username, password }, { setup = false } 
   await b.waitFor(() => b.eval(`!!document.querySelector('.account .username')`), 'the signed-in page');
 }
 
+/** Logs out, if signed in, and waits for the sign-in form. */
+export async function signOut(b, base) {
+  await b.goto(`${base}/`);
+  const state = () => b.eval(`document.querySelector('.account button.log-out') ? 'in' : document.querySelector('form[aria-label="Sign in"]') ? 'out' : ''`);
+  if ((await b.waitFor(state, 'the page')) === 'in') {
+    await b.eval(`document.querySelector('.account button.log-out').click(), 1`);
+    await b.waitFor(async () => (await state()) === 'out', 'the sign-in form');
+  }
+}
+
 export const box = (label, x0, y0, x1, y1) => ({ label, shape: { type: 'rectangle', min: { x: x0, y: y0 }, max: { x: x1, y: y1 } } });
 
 /** Nine labels: "line" (3) only allows polylines; the others allow every shape but polylines. */

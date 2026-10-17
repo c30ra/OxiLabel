@@ -8,7 +8,12 @@ use rtag_core::{Label, LabelDefinition, annotation::LabelUsage, attribute::Attri
 use serde::Deserialize;
 use sqlx::{Row, SqliteConnection, SqlitePool, sqlite::SqliteRow};
 
-use crate::{AppState, auth::Admin, error::ApiError, projects};
+use crate::{
+    AppState,
+    auth::{Admin, CurrentUser},
+    error::ApiError,
+    jobs, projects,
+};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -55,8 +60,9 @@ async fn create_label(
     Ok((StatusCode::CREATED, Json(label)))
 }
 
-async fn list_labels(State(pool): State<SqlitePool>, Path(project): Path<i64>) -> Result<Json<Vec<Label>>, ApiError> {
+async fn list_labels(user: CurrentUser, State(pool): State<SqlitePool>, Path(project): Path<i64>) -> Result<Json<Vec<Label>>, ApiError> {
     let mut conn = pool.acquire().await?;
+    jobs::ensure_project_visible(&mut conn, &user, project).await?;
     Ok(Json(project_labels(&mut conn, project).await?))
 }
 
@@ -175,10 +181,12 @@ async fn delete_label(
 }
 
 async fn label_usage(
+    user: CurrentUser,
     State(pool): State<SqlitePool>,
     Path((project, id)): Path<(i64, i64)>,
 ) -> Result<Json<LabelUsage>, ApiError> {
     let mut conn = pool.acquire().await?;
+    jobs::ensure_project_visible(&mut conn, &user, project).await?;
     let exists = sqlx::query("SELECT 1 FROM labels WHERE project_id = ? AND id = ?")
         .bind(project)
         .bind(id)

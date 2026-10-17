@@ -1,8 +1,9 @@
 use std::collections::BTreeSet;
 
 use leptos::{ev::MouseEvent, prelude::*, task::spawn_local};
-use rtag_core::{Image, ImageFilter, ImagePage, RemovalReport, RemovalRequest};
+use rtag_core::{Image, ImageFilter, ImagePage, RemovalReport, RemovalRequest, job::Job};
 
+use super::jobs::{CreateJobsDialog, job_name};
 use crate::{account::is_admin, api};
 
 const PAGE_SIZES: [i64; 4] = [30, 60, 120, 240];
@@ -21,6 +22,11 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>, selected: RwSignal<BTreeSe
     let anchor = RwSignal::new(None::<usize>);
     let confirming = RwSignal::new(false);
     let admin = is_admin();
+    let creating_jobs = RwSignal::new(false);
+    let jobs = LocalResource::new(move || {
+        version.track();
+        async move { api::get::<Vec<Job>>(&format!("/api/projects/{project}/jobs")).await }
+    });
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
 
@@ -192,6 +198,21 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>, selected: RwSignal<BTreeSe
                         n => format!("Filters · {n}"),
                     }}
                 </button>
+                <select class="job-filter" aria-label="Job"
+                    on:change:target=move |ev| {
+                        let value = ev.target().value();
+                        set_filter(&|f| {
+                            f.without_job = value == "none";
+                            f.job = value.parse().ok();
+                        })
+                    }>
+                    <option value="" selected=move || filter.read().job.is_none() && !filter.read().without_job>"Any job"</option>
+                    {admin.then(|| view! { <option value="none" selected=move || filter.read().without_job>"No job"</option> })}
+                    {move || jobs.get().and_then(Result::ok).unwrap_or_default().into_iter().map(|job| {
+                        let id = job.id;
+                        view! { <option value=id.to_string() selected=move || filter.read().job == Some(id)>{job_name(&job)}</option> }
+                    }).collect_view()}
+                </select>
                 <button title="Select every image matching the filter (A)" disabled=move || busy.get() || total.get() == 0
                     on:click=move |_| select_all()>"Select all"</button>
                 <Pager offset=offset page_size=page_size total=total anchor=anchor />
@@ -220,6 +241,7 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>, selected: RwSignal<BTreeSe
                                 <button on:click=move |_| selected.update(|set| set.extend(page_ids()))>"Select page"</button>
                                 <button title="Alt+A" on:click=move |_| clear()>"Clear"</button>
                                 {admin.then(|| view! {
+                                    <button class="create-jobs" on:click=move |_| creating_jobs.set(true)>"Create jobs…"</button>
                                     <button class="danger" title="Delete" on:click=move |_| confirming.set(true)>"Remove from project…"</button>
                                 })}
                             }.into_any()
@@ -246,6 +268,11 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>, selected: RwSignal<BTreeSe
                 }
                 .into_any(),
             }}
+            <Show when=move || creating_jobs.get()>
+                <CreateJobsDialog project=project selected=selected
+                    on_created=move || version.update(|v| *v += 1)
+                    on_close=move || creating_jobs.set(false) />
+            </Show>
         </div>
     }
 }
@@ -404,7 +431,7 @@ fn FilterPanel(
                 <input type="date" aria-label="Modified until" prop:value=move || text(&filter.read().modified_to)
                     on:change:target=move |ev| { let v = date(ev.target().value()); set_filter(&|f| f.modified_to = v.clone()) } />
             </fieldset>
-            <button on:click=move |_| set_filter(&|f| *f = ImageFilter { name: f.name.clone(), ..ImageFilter::default() })>"Clear filters"</button>
+            <button on:click=move |_| set_filter(&|f| *f = ImageFilter { name: f.name.clone(), job: f.job, without_job: f.without_job, ..ImageFilter::default() })>"Clear filters"</button>
         </div>
     }
 }

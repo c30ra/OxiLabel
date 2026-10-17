@@ -14,7 +14,7 @@ async fn created_project_appears_in_the_list() {
 
     let (status, list) = call(&app, Method::GET, "/api/projects", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(list, json!([{"id": created["id"], "name": "Cracks", "images": 0, "annotated": 0, "label_colors": []}]));
+    assert_eq!(list, json!([{"id": created["id"], "name": "Cracks", "images": 0, "annotated": 0, "jobs": 0, "label_colors": []}]));
 }
 
 #[tokio::test]
@@ -95,7 +95,7 @@ async fn the_list_summarises_each_projects_images_and_labels() {
 
     // "Annotated" is the image status the annotator sets (ticket 11), not having annotations.
     let (_, list) = call(&app, Method::GET, "/api/projects", None).await;
-    assert_eq!(list, json!([{"id": id, "name": "Cells", "images": 2, "annotated": 0, "label_colors": ["#e74c3c", "#3498db"]}]));
+    assert_eq!(list, json!([{"id": id, "name": "Cells", "images": 2, "annotated": 0, "jobs": 0, "label_colors": ["#e74c3c", "#3498db"]}]));
 }
 
 #[tokio::test]

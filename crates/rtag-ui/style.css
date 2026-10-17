@@ -362,3 +362,14 @@ a.button.primary { background: var(--accent); border-color: var(--accent); color
 .sign-in-card button { margin-top: 6px; }
 .reset-form { display: inline-flex; gap: 6px; }
 .reset-form input { width: 12rem; }
+
+/* Jobs and statistics */
+.progress { display: inline-flex; align-items: center; gap: 10px; }
+.progress .bar { width: 120px; height: 6px; border-radius: 3px; background: var(--raised); overflow: hidden; }
+.progress .bar span { display: block; height: 100%; background: var(--ok); }
+.jobs-dialog { max-width: 520px; }
+.jobs-dialog .per-job { width: 6rem; }
+.statistics { display: flex; flex-direction: column; gap: 28px; max-width: 900px; }
+.statistics h2 { margin: 0 0 10px; font-size: 16px; font-weight: 600; }
+.statistics .hint { margin: -4px 0 10px; font-size: 12px; }
+select.job-filter { max-width: 14rem; }

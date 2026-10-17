@@ -35,8 +35,10 @@ use sqlx::Row;
 
 use crate::{
     AppState,
+    auth::CurrentUser,
     enhance::{self, Pixels},
     error::ApiError,
+    jobs,
     thumbnails::open_image,
     write_atomically,
 };
@@ -51,8 +53,8 @@ const USED_MARKER: &str = "used";
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/api/images/{id}/tiles/{level}/{x}/{y}", get(|state, url, query| tile(state, url, query, Kind::View)))
-        .route("/api/images/{id}/analysis/{level}/{x}/{y}", get(|state, url, query| tile(state, url, query, Kind::Analysis)))
+        .route("/api/images/{id}/tiles/{level}/{x}/{y}", get(|user, state, url, query| tile(user, state, url, query, Kind::View)))
+        .route("/api/images/{id}/analysis/{level}/{x}/{y}", get(|user, state, url, query| tile(user, state, url, query, Kind::Analysis)))
 }
 
 #[derive(Deserialize)]
@@ -106,6 +108,7 @@ impl GenerationLocks {
 }
 
 async fn tile(
+    user: CurrentUser,
     State(state): State<AppState>,
     UrlPath((id, level, x, y)): UrlPath<(i64, u32, u32, u32)>,
     Query(query): Query<TileQuery>,
@@ -120,6 +123,7 @@ async fn tile(
         .fetch_optional(&state.pool)
         .await?
         .ok_or(ApiError::NotFound)?;
+    jobs::ensure_image_access(&mut *state.pool.acquire().await?, &user, id).await?;
     let pyramid = Pyramid::new(row.get("width"), row.get("height"));
     pyramid.tile_bounds(level, x, y).ok_or(ApiError::NotFound)?;
 

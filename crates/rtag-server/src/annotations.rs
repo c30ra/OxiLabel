@@ -8,7 +8,7 @@ use axum::{
 use rtag_core::annotation::{Annotation, ImageAnnotations, SaveAnnotations};
 use sqlx::{Row, SqliteConnection, SqlitePool};
 
-use crate::{AppState, error::ApiError, labels};
+use crate::{AppState, auth::CurrentUser, error::ApiError, jobs, labels};
 
 pub fn routes() -> Router<AppState> {
     Router::new().route(
@@ -29,11 +29,13 @@ async fn image_in_project(conn: &mut SqliteConnection, project: i64, image: i64)
 }
 
 async fn load_annotations(
+    user: CurrentUser,
     State(pool): State<SqlitePool>,
     Path((project, image)): Path<(i64, i64)>,
 ) -> Result<Json<ImageAnnotations>, ApiError> {
     let mut conn = pool.acquire().await?;
     let (_, _, version) = image_in_project(&mut conn, project, image).await?;
+    jobs::ensure_image_access(&mut conn, &user, image).await?;
     let rows = sqlx::query("SELECT label_id, shape, source, confidence, attributes, hidden, locked FROM annotations WHERE image_id = ? ORDER BY position")
         .bind(image)
         .fetch_all(&mut *conn)
@@ -60,12 +62,15 @@ pub(crate) fn annotation_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Annot
 }
 
 async fn save_annotations(
+    user: CurrentUser,
     State(pool): State<SqlitePool>,
     Path((project, image)): Path<(i64, i64)>,
     Json(request): Json<SaveAnnotations>,
 ) -> Result<Json<ImageAnnotations>, ApiError> {
     let mut tx = pool.begin().await?;
     let (width, height, current) = image_in_project(&mut tx, project, image).await?;
+    // Annotators save only in their own jobs.
+    jobs::ensure_image_access(&mut tx, &user, image).await?;
     // A stale editor is told to reload first: that also resolves labels deleted meanwhile.
     if current != request.base_version {
         return Err(stale(current));

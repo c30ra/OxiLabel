@@ -164,8 +164,10 @@ async fn annotators_annotate_but_cannot_reach_admin_actions() {
     let (_, page) = call(&app, Method::GET, &format!("/api/projects/{p}/images"), None).await;
     let image = page["images"][0]["id"].as_i64().unwrap();
 
-    call(&app, Method::POST, "/api/users", Some(json!({"username": "anna", "password": "anna's password", "role": "annotator"}))).await;
+    let (_, user) = call(&app, Method::POST, "/api/users", Some(json!({"username": "anna", "password": "anna's password", "role": "annotator"}))).await;
     let anna = login(&app, "anna", "anna's password").await;
+    // Annotators see the images of their jobs.
+    call(&app, Method::POST, &format!("/api/projects/{p}/jobs"), Some(json!({"image_ids": [image], "assignee": user["id"]}))).await;
 
     let annotations = format!("/api/projects/{p}/images/{image}/annotations");
     for (method, uri, body) in [

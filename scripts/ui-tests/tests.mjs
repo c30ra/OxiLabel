@@ -5,7 +5,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { KEY } from './bidi.mjs';
-import { ADMIN, NINE_LABELS, api, box, openWorkspace, signIn, writeTestImage } from './rtag.mjs';
+import { ADMIN, NINE_LABELS, api, box, openWorkspace, signIn, signOut, writeTestImage } from './rtag.mjs';
 
 function equal(actual, expected, what) {
   const a = JSON.stringify(actual);
@@ -1159,6 +1159,9 @@ tests.push({
     await t.b.waitFor(() => t.b.eval(`document.querySelector('[role=status]')?.textContent.includes("anna's password was reset")`), 'the reset notice');
     anna.password = 'second password';
     await api(t.base, anna);
+    // Annotators see the projects with jobs of theirs.
+    const annaId = (await t.api.call('GET', '/api/users')).find((user) => user.username === 'anna').id;
+    await t.api.call('POST', `/api/projects/${t.project.id}/jobs`, { image_ids: [t.project.image], assignee: annaId });
 
     await logOut();
     try {
@@ -1180,9 +1183,7 @@ tests.push({
       equal(projectHidden, { importExport: false, labelForm: false, labelButtons: 0 }, 'admin controls on the project page');
 
       // A password reset ends anna's session: her next request brings back the sign-in form.
-      const users = await t.api.call('GET', '/api/users');
-      const id = users.find((user) => user.username === 'anna').id;
-      await t.api.call('PUT', `/api/users/${id}`, { password: 'third password' });
+      await t.api.call('PUT', `/api/users/${annaId}`, { password: 'third password' });
       await t.b.eval(`document.querySelector('a.tab[href="/projects/${t.project.id}"]').click(), 1`);
       await t.b.waitFor(() => t.b.eval(`!!document.querySelector('form[aria-label="Sign in"]')`), 'the sign-in form after the reset');
 
@@ -1192,6 +1193,71 @@ tests.push({
       equal(await t.b.eval(`!!document.querySelector('form.new-user')`), false, 'the add-user form for anna');
       await logOut();
     } finally {
+      await signOut(t.b, t.base);
+      await signIn(t.b, t.base, ADMIN);
+    }
+  },
+});
+
+tests.push({
+  name: 'an admin splits the selection into assigned jobs; the annotator sees and annotates only their job',
+  async run(t) {
+    const p = t.project.id;
+    // Different sizes, as an import skips images with the same content.
+    writeTestImage(join(t.work, 'images', 'jobs/b.png'), 200, 100);
+    writeTestImage(join(t.work, 'images', 'jobs/c.png'), 220, 100);
+    await t.api.call('POST', `/api/projects/${p}/imports`, { paths: ['jobs'] });
+    const anna = { username: 'jobs-anna', password: 'anna password' };
+    const user = await t.api.call('POST', '/api/users', { ...anna, role: 'annotator' });
+    const gridCount = () => t.b.eval(`document.querySelectorAll('.grid li').length`);
+    const select = (selector, value) => t.b.eval(`(() => {
+      const s = document.querySelector(${JSON.stringify(selector)});
+      s.value = ${JSON.stringify(String(value))};
+      s.dispatchEvent(new Event('change', { bubbles: true }));
+      return 1;
+    })()`);
+
+    await t.b.goto(`${t.base}/projects/${p}`);
+    await t.b.waitFor(async () => (await gridCount()) === 3, 'three images in the grid');
+    await t.b.eval(`[...document.querySelectorAll('.toolbar button')].find((b) => b.textContent === 'Select all').click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('button.create-jobs')`), 'the Create jobs button');
+    await t.b.eval(`document.querySelector('button.create-jobs').click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.jobs-dialog')`), 'the dialog');
+    await t.b.eval(`document.querySelector('.jobs-dialog input.split').click(), 1`);
+    await t.b.eval(`(() => { const i = document.querySelector('.jobs-dialog input.per-job'); i.value = '2'; i.dispatchEvent(new Event('input', { bubbles: true })); return 1; })()`);
+    await t.b.waitFor(() => t.b.eval(`document.querySelectorAll('.jobs-dialog select.assignee option').length > 1`), 'the users');
+    await select('.jobs-dialog select.assignee', user.id);
+    equal(await t.b.eval(`document.querySelector('.jobs-dialog button.primary').textContent`), 'Create 2 jobs', 'button');
+    await t.b.eval(`document.querySelector('.jobs-dialog button.primary').click(), 1`);
+
+    await t.b.waitFor(() => t.b.eval(`location.pathname === '/projects/${p}/jobs' && document.querySelectorAll('.jobs-table tbody tr').length === 2`), 'the Jobs tab with two jobs');
+    const jobs = await t.api.call('GET', `/api/projects/${p}/jobs`);
+    equal(jobs.map((j) => [j.number, j.images, j.assignee?.username]), [[1, 2, anna.username], [2, 1, anna.username]], 'jobs');
+    // Job 2 goes back to nobody.
+    await select('tr[data-job="2"] select.assignee', '');
+    await t.b.waitFor(async () => (await t.api.call('GET', `/api/projects/${p}/jobs`))[1].assignee === null, 'job 2 unassigned');
+
+    await t.b.eval(`document.querySelector('a.tab[href="/projects/${p}/statistics"]').click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`document.querySelectorAll('.per-job tbody tr').length === 2 && document.querySelectorAll('.per-user tbody tr').length === 2`), 'the statistics');
+
+    await t.b.eval(`document.querySelector('a.tab[href="/projects/${p}"]').click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`document.querySelectorAll('select.job-filter option').length === 4`), 'the job menu');
+    await select('select.job-filter', jobs[0].id);
+    await t.b.waitFor(async () => (await gridCount()) === 2, 'the grid showing job 1');
+
+    await signOut(t.b, t.base);
+    try {
+      await signIn(t.b, t.base, anna);
+      await t.b.waitFor(() => t.b.eval(`document.querySelectorAll('a.project-card').length === 1`), 'only the project with her job');
+      await t.b.goto(`${t.base}/projects/${p}`);
+      await t.b.waitFor(async () => (await gridCount()) === 2, 'only her two images');
+      await t.b.goto(`${t.base}/projects/${p}/jobs`);
+      await t.b.waitFor(() => t.b.eval(`document.querySelectorAll('.jobs-table tbody tr').length === 1`), 'only her job');
+      equal(await t.b.eval(`!!document.querySelector('a.tab[href$="/statistics"]')`), false, 'statistics tab for annotators');
+      await t.b.eval(`document.querySelector('.jobs-table button.annotate').click(), 1`);
+      await t.b.waitFor(() => t.b.eval(`/^\\/projects\\/${p}\\/images\\/\\d+$/.test(location.pathname) && !!document.querySelector('canvas.annotations')`), 'the workspace');
+    } finally {
+      await signOut(t.b, t.base);
       await signIn(t.b, t.base, ADMIN);
     }
   },
