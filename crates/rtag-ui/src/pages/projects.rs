@@ -391,5 +391,7 @@ fn new_label(index: usize, name: String) -> LabelDefinition {
         shape_types: ShapeType::ALL.to_vec(),
         ignore: false,
         attributes: Vec::new(),
+        line_width: rtag_core::DEFAULT_LINE_WIDTH,
+        point_radius: rtag_core::DEFAULT_POINT_RADIUS,
     }
 }

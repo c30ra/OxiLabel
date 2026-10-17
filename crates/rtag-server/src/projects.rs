@@ -46,8 +46,8 @@ async fn copy_labels(conn: &mut SqliteConnection, source: i64, target: i64) -> R
         .ok_or_else(|| ApiError::BadRequest(format!("there is no project {source} to copy labels from")))?
         .get("next_label_id");
     sqlx::query(
-        "INSERT INTO labels (project_id, id, name, color, hotkey, shape_types, is_ignore, attributes) \
-         SELECT ?, id, name, color, hotkey, shape_types, is_ignore, attributes FROM labels WHERE project_id = ?",
+        "INSERT INTO labels (project_id, id, name, color, hotkey, shape_types, is_ignore, attributes, line_width, point_radius) \
+         SELECT ?, id, name, color, hotkey, shape_types, is_ignore, attributes, line_width, point_radius FROM labels WHERE project_id = ?",
     )
     .bind(target)
     .bind(source)

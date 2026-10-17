@@ -8,7 +8,7 @@ I label image datasets for ML (detection, oriented boxes, segmentation) and curr
 
 ## Solution
 
-rtag is a self-hosted web application: a Rust server (with a Python GPU worker alongside it) in one Podman image, used from the browser. I create a **Project** with a **Label** set, add **Images** (referenced from a mounted folder), split them into **Jobs**, and annotate them in a fast canvas workspace driven by a two-layer pie menu and image-editor shortcuts. Large images load as lazily generated tile pyramids, and enhancement filters are view-only so annotations always stay in original-image coordinates. A model can run on my GPU to produce **Pre-annotations** that I review. I import existing CVAT projects, and export through pluggable **Exporters** (YOLO detect/OBB/segment, mask PNG), or move whole projects between rtag instances as a **Project archive**. A small CLI covers import/export and headless pre-annotation.
+rtag is a self-hosted web application: a Rust server (with a Python GPU worker alongside it) in one Podman image, used from the browser. I create a **Project** with a **Label** set, add **Images** (referenced from a mounted folder), split them into **Jobs**, and annotate them in a fast canvas workspace driven by a two-layer pie menu and image-editor shortcuts. Large images load as lazily generated tile pyramids, and enhancement filters are view-only so annotations always stay in original-image coordinates. A model can run on my GPU to produce **Pre-annotations** that I review. I import existing CVAT projects, and export through pluggable **Exporters** (YOLO detect/OBB/segment), or move whole projects between rtag instances as a **Project archive**. A small CLI covers import/export and headless pre-annotation.
 
 ## User Stories
 
@@ -95,7 +95,7 @@ Import and export
 64. As an admin, I want to import a CVAT "for images 1.1" XML export into a project, mapping its labels and shapes, so that my existing work is not lost.
 65. As an admin, I want the import to report unmapped labels and unsupported shapes, so that I can fix them before committing.
 66. As an admin, I want to export YOLO detect, YOLO OBB and YOLO segment, so that I can train Ultralytics models.
-67. As an admin, I want to export label-driven mask PNGs with the ignore value, so that I can train my custom segmentation network.
+67. ~~As an admin, I want to export label-driven mask PNGs with the ignore value, so that I can train my custom segmentation network.~~ Dropped 2026-10-17: the custom pipeline keeps making its masks.
 68. As an admin, I want each export to write a small manifest (timestamp, label set, image count, annotation hash), so that I know exactly what a model was trained on.
 69. As an admin, I want to choose which images (all, annotated only, a job) an export contains, so that I control the dataset.
 70. As an admin, I want a pluggable exporter interface, so that new model formats can be added without touching the core.
@@ -156,7 +156,7 @@ Screens
 Import/export
 
 - Importer: CVAT "for images 1.1" XML (with an unmapped-label and unsupported-shape report).
-- Exporters (pluggable interface): YOLO detect, YOLO OBB, YOLO segment, mask PNG (label ids, ignore value from the ignore label). Each export writes a manifest.
+- Exporters (pluggable interface): YOLO detect, YOLO OBB, YOLO segment (polylines and points expanded with each label's line width and point radius). Each export writes a manifest. (A mask PNG exporter was dropped on 2026-10-17.)
 - Project archive: versioned zip with `project.json` (labels, attributes, jobs, annotations in original coordinates, image references with hashes), optionally including images. It is the only format guaranteed to round-trip.
 
 CLI
@@ -168,7 +168,7 @@ CLI
 - A good test exercises external behavior through a public interface and asserts on outputs and persisted results, never on internal structure.
 - Seams (all four confirmed):
   - Server HTTP API: tests run against an in-memory SQLite and a fake worker, covering projects, labels, jobs, annotation save with versioning, auth and roles, pre-annotation flow, tiles and import/export end to end.
-  - Formats API: fixture-based tests of CVAT XML to model, and model to YOLO/mask PNG/archive and back, including archive round-trips.
+  - Formats API: fixture-based tests of CVAT XML to model, and model to YOLO/archive and back, including archive round-trips.
   - Core geometry API: unit tests of shape math, RLE encode/decode, coordinate transforms and the command history.
   - UI canvas interaction: browser-level tests of the pie menu, drawing and editing flows. These are the heaviest, so keep the set small and focused on the main flows.
 - Prior art: none in this repo. The author's `defect_detection` scripts (`seg_prep/cvat_to_masks.py`, `seg_prep/common.py`) can be used to generate expected outputs for mask and filter fixtures.

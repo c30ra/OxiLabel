@@ -173,6 +173,8 @@ mod tests {
             shape_types: vec![ShapeType::Polygon],
             ignore: false,
             attributes,
+            line_width: crate::DEFAULT_LINE_WIDTH,
+            point_radius: crate::DEFAULT_POINT_RADIUS,
         };
         Label::new(1, definition)
     }

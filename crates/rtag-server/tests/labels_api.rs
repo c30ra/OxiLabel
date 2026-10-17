@@ -36,7 +36,7 @@ async fn created_label_appears_in_the_project_label_set() {
         "hotkey": "1",
         "shape_types": ["polyline", "polygon"],
         "ignore": false,
-        "attributes": []
+        "attributes": [], "line_width": 7.0, "point_radius": 8.0
     });
     assert_eq!(label, expected);
     let (status, labels) = call(&app, Method::GET, &format!("/api/projects/{project}/labels"), None).await;
@@ -82,7 +82,7 @@ async fn editing_a_label_keeps_its_id() {
 
     let expected = json!({
         "id": 1, "name": "micro_crack", "color": "#00ff00", "hotkey": "c", "shape_types": ["polyline"], "ignore": false,
-        "attributes": []
+        "attributes": [], "line_width": 7.0, "point_radius": 8.0
     });
     assert_eq!(edited, expected);
     let (_, labels) = call(&app, Method::GET, &format!("/api/projects/{project}/labels"), None).await;
@@ -188,4 +188,15 @@ async fn labels_keep_their_attribute_definitions_and_reject_bad_ones() {
     let bad = json!([{"name": "severity", "type": "select", "options": ["low"], "default": "high"}]);
     let (status, body) = call(&app, Method::POST, &labels, Some(json!({"name": "chip", "color": "#e67e22", "attributes": bad}))).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}
+
+#[tokio::test]
+async fn labels_keep_their_line_width_and_point_radius() {
+    let app = test_app().await;
+    let project = new_project(&app).await;
+    let (status, label) = add_label(&app, project, json!({"name": "crack", "color": "#e74c3c", "line_width": 4, "point_radius": 3})).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!((label["line_width"].clone(), label["point_radius"].clone()), (json!(4.0), json!(3.0)));
+    let (status, _) = add_label(&app, project, json!({"name": "chip", "color": "#e67e22", "line_width": 0})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }

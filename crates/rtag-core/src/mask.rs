@@ -2,6 +2,8 @@
 //! bounding box, run-length encoded); a `Bitmap` is the decoded form that brushes paint into.
 //! Pixel (x, y) covers the square from (x, y) to (x + 1, y + 1) in image coordinates.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::geometry::{Point, distance_to_segment};
@@ -215,6 +217,77 @@ impl Bitmap {
             }
         }
         scaled
+    }
+
+    /// The outline of each patch of set pixels (pixels touching along an edge), along the pixel
+    /// edges in image coordinates, without holes; corners only, no points along straight runs.
+    pub fn outlines(&self) -> Vec<Vec<Point>> {
+        let area = self.area;
+        let (w, h) = (area.width as i64, area.height as i64);
+        let set = |x: i64, y: i64| x >= 0 && y >= 0 && x < w && y < h && self.pixels[(y * w + x) as usize] != 0;
+        // Boundary edges between pixel corners, with the set pixel on their right (clockwise
+        // round each patch, y pointing down), keyed by their start corner.
+        let mut edges: BTreeMap<(i64, i64), Vec<(i64, i64)>> = BTreeMap::new();
+        for y in 0..h {
+            for x in 0..w {
+                if !set(x, y) {
+                    continue;
+                }
+                let mut edge = |from: (i64, i64), to: (i64, i64)| edges.entry(from).or_default().push(to);
+                if !set(x, y - 1) { edge((x, y), (x + 1, y)) }
+                if !set(x + 1, y) { edge((x + 1, y), (x + 1, y + 1)) }
+                if !set(x, y + 1) { edge((x + 1, y + 1), (x, y + 1)) }
+                if !set(x - 1, y) { edge((x, y + 1), (x, y)) }
+            }
+        }
+        // Link edges into loops. Where two loops touch at a corner, turn right, so each patch
+        // (pixels touching along edges) gets its own loop.
+        let mut loops: Vec<Vec<(i64, i64)>> = Vec::new();
+        while let Some((&start, _)) = edges.iter().next() {
+            let mut path = vec![start];
+            let (mut at, mut heading) = (start, None::<(i64, i64)>);
+            loop {
+                let outgoing = edges.get_mut(&at).expect("every corner on a loop goes on");
+                let pick = match (heading, outgoing.len()) {
+                    (Some((dx, dy)), n) if n > 1 => {
+                        // Right of heading (dx, dy) is (-dy, dx) with y pointing down.
+                        let right = (at.0 - dy, at.1 + dx);
+                        outgoing.iter().position(|&to| to == right).unwrap_or(0)
+                    }
+                    _ => 0,
+                };
+                let next = outgoing.swap_remove(pick);
+                if outgoing.is_empty() {
+                    edges.remove(&at);
+                }
+                heading = Some((next.0 - at.0, next.1 - at.1));
+                at = next;
+                if at == start {
+                    break;
+                }
+                path.push(at);
+            }
+            loops.push(path);
+        }
+        // Outer loops run clockwise (y down), holes the other way: keep the outer ones.
+        let signed = |path: &[(i64, i64)]| {
+            (0..path.len()).map(|i| { let (a, b) = (path[i], path[(i + 1) % path.len()]); a.0 * b.1 - b.0 * a.1 }).sum::<i64>()
+        };
+        loops
+            .into_iter()
+            .filter(|path| signed(path) > 0)
+            .map(|path| {
+                let n = path.len();
+                // Corners only: drop points where the direction does not change.
+                (0..n)
+                    .filter(|&i| {
+                        let (p, c, q) = (path[(i + n - 1) % n], path[i], path[(i + 1) % n]);
+                        (c.0 - p.0, c.1 - p.1) != (q.0 - c.0, q.1 - c.1)
+                    })
+                    .map(|i| Point::new((path[i].0 + i64::from(area.left)) as f64, (path[i].1 + i64::from(area.top)) as f64))
+                    .collect()
+            })
+            .collect()
     }
 
     /// Clears the pixels not set in `other`.
@@ -644,5 +717,31 @@ mod tests {
             "radius 200 across"
         );
         assert!(!big.get(300, 300) && big.get(400, 400), "rounded corners");
+    }
+
+    #[test]
+    fn outlines_trace_each_patch_along_pixel_edges() {
+        // An L of three pixels and a separate single pixel.
+        let bitmap = from_rows(10, 20, &["#..#", "##.."]);
+        let mut outlines = bitmap.outlines();
+        outlines.sort_by_key(|outline| outline.len());
+        assert_eq!(outlines.len(), 2);
+        assert_eq!(polygon_area_of(&outlines[0]), 1.0, "the single pixel");
+        assert_eq!(polygon_area_of(&outlines[1]), 3.0, "the L");
+        assert_eq!(outlines[1].len(), 6, "an L has six corners");
+        let corner = |x: f64, y: f64| outlines[0].iter().any(|p| *p == Point::new(x, y));
+        assert!(corner(13.0, 20.0) && corner(14.0, 21.0), "image coordinates of pixel (13, 20)");
+    }
+
+    #[test]
+    fn a_hole_is_not_an_outline() {
+        let ring = from_rows(0, 0, &["###", "#.#", "###"]);
+        let outlines = ring.outlines();
+        assert_eq!(outlines.len(), 1);
+        assert_eq!(polygon_area_of(&outlines[0]), 9.0, "the outer edge only");
+    }
+
+    fn polygon_area_of(points: &[Point]) -> f64 {
+        crate::geometry::polygon_area(points)
     }
 }

@@ -1,6 +1,6 @@
 use leptos::{prelude::*, task::spawn_local};
 use rtag_core::{
-    Label, LabelDefinition, ShapeType,
+    DEFAULT_LINE_WIDTH, DEFAULT_POINT_RADIUS, Label, LabelDefinition, ShapeType,
     annotation::LabelUsage,
     attribute::{AttributeDefinition, AttributeKind},
 };
@@ -29,6 +29,8 @@ pub fn LabelSet(project: i64) -> impl IntoView {
     let shapes = RwSignal::new(ShapeType::ALL.to_vec());
     let ignore = RwSignal::new(false);
     let attributes: AttributeRows = RwSignal::new(Vec::new());
+    let line_width = RwSignal::new(DEFAULT_LINE_WIDTH);
+    let point_radius = RwSignal::new(DEFAULT_POINT_RADIUS);
     let error = RwSignal::new(None::<String>);
 
     let reset = move || {
@@ -39,6 +41,8 @@ pub fn LabelSet(project: i64) -> impl IntoView {
         shapes.set(ShapeType::ALL.to_vec());
         ignore.set(false);
         attributes.set(Vec::new());
+        line_width.set(DEFAULT_LINE_WIDTH);
+        point_radius.set(DEFAULT_POINT_RADIUS);
         error.set(None);
     };
 
@@ -50,6 +54,8 @@ pub fn LabelSet(project: i64) -> impl IntoView {
         shapes.set(label.shape_types);
         ignore.set(label.ignore);
         attributes.set(attribute_rows(label.attributes));
+        line_width.set(label.line_width);
+        point_radius.set(label.point_radius);
         error.set(None);
     };
 
@@ -67,6 +73,8 @@ pub fn LabelSet(project: i64) -> impl IntoView {
                     .collect(),
                 ignore: ignore.get(),
                 attributes: attributes.get().iter().map(|(_, row)| row.get()).collect(),
+                line_width: line_width.get(),
+                point_radius: point_radius.get(),
             };
             let url = url.clone();
             spawn_local(async move {
@@ -194,6 +202,22 @@ pub fn LabelSet(project: i64) -> impl IntoView {
                         {shape.name()}
                     </label>
                 }).collect_view()}
+            </fieldset>
+            <fieldset class="sizes">
+                <legend>"In exports"</legend>
+                <label title="Polylines become areas this wide in YOLO segment and OBB exports">
+                    "Line width"
+                    <input class="line-width" type="number" min="0.5" step="0.5" prop:value=move || line_width.get().to_string()
+                        on:input:target={move |ev| if let Ok(v) = ev.target().value().parse::<f64>() { line_width.set(v) }} />
+                    "px"
+                </label>
+                <label title="Points become discs of this radius in YOLO segment and OBB exports">
+                    "Point radius"
+                    <input class="point-radius" type="number" min="0.5" step="0.5" prop:value=move || point_radius.get().to_string()
+                        on:input:target={move |ev| if let Ok(v) = ev.target().value().parse::<f64>() { point_radius.set(v) }} />
+                    "px"
+                </label>
+                <span class="muted hint">"in original image pixels"</span>
             </fieldset>
             <AttributeList rows=attributes />
             <label class="check">

@@ -41,7 +41,7 @@ A view-only transformation of an image (e.g. illumination flattening, local cont
 _Avoid_: Preprocessing, effect, enhancement (on its own)
 
 **Exporter**:
-A pluggable component that converts a project's annotations into one external format (e.g. YOLO, mask PNG) for a given model type.
+A pluggable component that converts a project's annotations into one external format (e.g. YOLO detect or segment) for a given model type.
 _Avoid_: Converter, writer
 
 **Project archive**:

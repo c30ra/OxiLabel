@@ -1,16 +1,36 @@
-//! YOLO detect (Ultralytics): `images/<subset>/<image>` and `labels/<subset>/<image>.txt` with one
-//! `class cx cy w h` line per box, normalised to the image size, and `data.yaml` naming the
-//! subsets and classes.
+//! YOLO (Ultralytics) datasets: `images/<subset>/<image>` and `labels/<subset>/<image>.txt`, and
+//! `data.yaml` naming the subsets and classes. Each label file has one line per object, its
+//! coordinates normalised to the image size:
+//!
+//! - detect: `class cx cy w h`, every shape as its bounding box;
+//! - segment: `class x1 y1 x2 y2 …`, the polygon of each area the shape covers (see `regions`);
+//! - OBB: `class x1 y1 … x4 y4`, the corners of a box: exact for (turned) rectangles, otherwise
+//!   the tightest turned box around each area.
 //!
 //! Class numbers are the permanent label ids minus one, so they never shift: a deleted label
-//! leaves a placeholder name in `data.yaml`. Boxes of the ignore label are left out, as detection
-//! has no ignore regions. Every shape is exported as its bounding box; tags are left out.
+//! leaves a placeholder name in `data.yaml`. Shapes of the ignore label are left out, as YOLO has
+//! no ignore regions; tags are left out too.
 
 use std::{collections::BTreeMap, fmt::Write as _, io};
 
-use crate::{ExportInput, ExportSink, Exporter, ImageMode, Subset};
+use rtag_core::{
+    Label,
+    annotation::{Annotation, Shape},
+    geometry::{Point, min_area_rect},
+};
+
+use crate::{
+    ExportImage, ExportInput, ExportSink, Exporter, ImageMode, Subset,
+    regions::{Detail, regions},
+};
 
 pub struct YoloDetect;
+pub struct YoloSegment;
+pub struct YoloObb;
+
+/// Ultralytics finds each label file by replacing `/images/` with `/labels/` in the image path,
+/// so the images must be in the export next to the labels.
+const IMAGE_MODES: &[ImageMode] = &[ImageMode::Symlink, ImageMode::Copy];
 
 impl Exporter for YoloDetect {
     fn id(&self) -> &'static str {
@@ -21,40 +41,110 @@ impl Exporter for YoloDetect {
         "YOLO detect"
     }
 
-    /// Ultralytics finds each label file by replacing `/images/` with `/labels/` in the image path,
-    /// so the images must be in the export next to the labels.
     fn image_modes(&self) -> &'static [ImageMode] {
-        &[ImageMode::Symlink, ImageMode::Copy]
+        IMAGE_MODES
     }
 
     fn export(&self, input: &ExportInput, sink: &mut dyn ExportSink) -> io::Result<()> {
-        let ignored: Vec<i64> = input.labels.iter().filter(|label| label.ignore).map(|label| label.id).collect();
-        for image in &input.images {
+        export(input, sink, "detect", &|annotation, _, image| {
+            let bounds = annotation.shape.bounds();
             let (width, height) = (f64::from(image.width), f64::from(image.height));
-            let mut lines = String::new();
-            // Tags have no box; ignore-label regions are not training targets.
-            let boxes = image.annotations.iter().filter(|annotation| !annotation.shape.is_tag() && !ignored.contains(&annotation.label));
-            for annotation in boxes {
-                let bounds = annotation.shape.bounds();
-                let class = annotation.label - 1;
-                let (cx, cy) = ((bounds.min.x + bounds.max.x) / 2.0 / width, (bounds.min.y + bounds.max.y) / 2.0 / height);
-                let (w, h) = (bounds.width() / width, bounds.height() / height);
-                writeln!(lines, "{class} {cx:.6} {cy:.6} {w:.6} {h:.6}").expect("writing to a string");
-            }
-            // An image without boxes still gets a (empty) label file: YOLO treats it as background.
-            let subset = input.subset(image).name();
-            sink.write(&format!("labels/{subset}/{}.txt", image.flat_stem()), lines.as_bytes())?;
-            sink.image(&format!("images/{subset}/{}", image.flat_name()), &image.source)?;
-        }
-        sink.write("data.yaml", data_yaml(input).as_bytes())
+            let (cx, cy) = ((bounds.min.x + bounds.max.x) / 2.0 / width, (bounds.min.y + bounds.max.y) / 2.0 / height);
+            vec![vec![cx, cy, bounds.width() / width, bounds.height() / height]]
+        })
     }
 }
 
-fn data_yaml(input: &ExportInput) -> String {
+impl Exporter for YoloSegment {
+    fn id(&self) -> &'static str {
+        "yolo-segment"
+    }
+
+    fn name(&self) -> &'static str {
+        "YOLO segment"
+    }
+
+    fn image_modes(&self) -> &'static [ImageMode] {
+        IMAGE_MODES
+    }
+
+    fn export(&self, input: &ExportInput, sink: &mut dyn ExportSink) -> io::Result<()> {
+        export(input, sink, "segment", &|annotation, label, image| {
+            regions(annotation, label, (image.width, image.height), Detail::Simplified).iter().map(|polygon| normalised(polygon, image)).collect()
+        })
+    }
+}
+
+impl Exporter for YoloObb {
+    fn id(&self) -> &'static str {
+        "yolo-obb"
+    }
+
+    fn name(&self) -> &'static str {
+        "YOLO OBB"
+    }
+
+    fn image_modes(&self) -> &'static [ImageMode] {
+        IMAGE_MODES
+    }
+
+    fn export(&self, input: &ExportInput, sink: &mut dyn ExportSink) -> io::Result<()> {
+        export(input, sink, "OBB", &|annotation, label, image| match &annotation.shape {
+            Shape::Rectangle(_) | Shape::OrientedRectangle(_) => vec![normalised(&annotation.shape.vertices(), image)],
+            // The square around the circle, not the box of its polygon (which lies inside it).
+            Shape::Circle { .. } => {
+                let bounds = annotation.shape.bounds();
+                let corners = [bounds.min, Point::new(bounds.max.x, bounds.min.y), bounds.max, Point::new(bounds.min.x, bounds.max.y)];
+                vec![normalised(&corners, image)]
+            }
+            // Every corner, so the box encloses every pixel.
+            _ => regions(annotation, label, (image.width, image.height), Detail::Exact)
+                .iter()
+                .map(|polygon| normalised(&min_area_rect(polygon), image))
+                .collect(),
+        })
+    }
+}
+
+/// The values of each object of an annotation: coordinates normalised to the image.
+type Objects<'a> = &'a dyn Fn(&Annotation, &Label, &ExportImage) -> Vec<Vec<f64>>;
+
+/// Writes a YOLO dataset of `kind` (for `data.yaml`): a label file per image with a line per
+/// object `objects` gives, and the images next to them.
+fn export(input: &ExportInput, sink: &mut dyn ExportSink, kind: &str, objects: Objects) -> io::Result<()> {
+    let labels: BTreeMap<i64, &Label> = input.labels.iter().map(|label| (label.id, label)).collect();
+    for image in &input.images {
+        let mut lines = String::new();
+        for annotation in &image.annotations {
+            // Tags have no area; ignore-label regions are not training targets.
+            let Some(label) = labels.get(&annotation.label).filter(|label| !label.ignore && !annotation.shape.is_tag()) else { continue };
+            for values in objects(annotation, label, image) {
+                write!(lines, "{}", annotation.label - 1).expect("writing to a string");
+                for value in values {
+                    write!(lines, " {value:.6}").expect("writing to a string");
+                }
+                lines.push('\n');
+            }
+        }
+        // An image without objects still gets a (empty) label file: YOLO treats it as background.
+        let subset = input.subset(image).name();
+        sink.write(&format!("labels/{subset}/{}.txt", image.flat_stem()), lines.as_bytes())?;
+        sink.image(&format!("images/{subset}/{}", image.flat_name()), &image.source)?;
+    }
+    sink.write("data.yaml", data_yaml(input, kind).as_bytes())
+}
+
+/// `points` as normalised coordinates, kept inside the image.
+fn normalised(points: &[Point], image: &ExportImage) -> Vec<f64> {
+    let (width, height) = (f64::from(image.width), f64::from(image.height));
+    points.iter().flat_map(|p| [(p.x / width).clamp(0.0, 1.0), (p.y / height).clamp(0.0, 1.0)]).collect()
+}
+
+fn data_yaml(input: &ExportInput, kind: &str) -> String {
     let names: BTreeMap<i64, &str> = input.labels.iter().map(|label| (label.id, label.name.as_str())).collect();
     let highest = names.keys().max().copied().unwrap_or(0);
     let mut yaml = format!(
-        "# YOLO detect dataset exported by rtag from project \"{}\".\n\
+        "# YOLO {kind} dataset exported by rtag from project \"{}\".\n\
          # Class numbers are label ids minus one; unused numbers are placeholders.\n\
          # Paths are relative to this file's folder.\n\
          train: images/train\n",

@@ -56,7 +56,8 @@ async fn the_available_formats_are_listed() {
     let app = test_app().await;
     let (status, formats) = call(&app, Method::GET, "/api/exporters", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(formats, json!([{"id": "yolo-detect", "name": "YOLO detect", "image_modes": ["symlink", "copy"]}]));
+    let yolo = |id: &str, name: &str| json!({"id": id, "name": name, "image_modes": ["symlink", "copy"]});
+    assert_eq!(formats, json!([yolo("yolo-detect", "YOLO detect"), yolo("yolo-segment", "YOLO segment"), yolo("yolo-obb", "YOLO OBB")]));
 }
 
 #[tokio::test]

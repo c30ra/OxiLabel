@@ -3,6 +3,7 @@
 //! tests) and whether images are included. Adding a format means implementing [`Exporter`] and
 //! listing it in [`exporters`]; the server and the core need no changes.
 
+mod regions;
 mod yolo;
 
 use std::{collections::BTreeMap, fs, io, path::{Path, PathBuf}};
@@ -11,11 +12,11 @@ pub use rtag_core::export::{ImageMode, Split, Subset};
 use rtag_core::{Label, annotation::Annotation};
 use serde::{Deserialize, Serialize};
 
-pub use yolo::YoloDetect;
+pub use yolo::{YoloDetect, YoloObb, YoloSegment};
 
 /// Every available exporter.
 pub fn exporters() -> Vec<Box<dyn Exporter>> {
-    vec![Box::new(YoloDetect)]
+    vec![Box::new(YoloDetect), Box::new(YoloSegment), Box::new(YoloObb)]
 }
 
 pub fn exporter(id: &str) -> Option<Box<dyn Exporter>> {

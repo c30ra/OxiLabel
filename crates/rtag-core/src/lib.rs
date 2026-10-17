@@ -100,6 +100,24 @@ pub struct Label {
     pub ignore: bool,
     #[serde(default)]
     pub attributes: Vec<AttributeDefinition>,
+    /// Exports that need areas (YOLO segment, OBB) draw this label's polylines this wide and its
+    /// points as discs of this radius, in original-image pixels.
+    #[serde(default = "default_line_width")]
+    pub line_width: f64,
+    #[serde(default = "default_point_radius")]
+    pub point_radius: f64,
+}
+
+/// The defaults of `cvat_to_masks.py`.
+pub const DEFAULT_LINE_WIDTH: f64 = 7.0;
+pub const DEFAULT_POINT_RADIUS: f64 = 8.0;
+
+fn default_line_width() -> f64 {
+    DEFAULT_LINE_WIDTH
+}
+
+fn default_point_radius() -> f64 {
+    DEFAULT_POINT_RADIUS
 }
 
 /// Everything about a label except its id: what clients send to create or edit one.
@@ -115,6 +133,10 @@ pub struct LabelDefinition {
     pub ignore: bool,
     #[serde(default)]
     pub attributes: Vec<AttributeDefinition>,
+    #[serde(default = "default_line_width")]
+    pub line_width: f64,
+    #[serde(default = "default_point_radius")]
+    pub point_radius: f64,
 }
 
 impl LabelDefinition {
@@ -152,6 +174,9 @@ impl LabelDefinition {
             return Err("a label must allow at least one shape type".into());
         }
         self.attributes = attribute::validated(self.attributes)?;
+        if !(self.line_width.is_finite() && self.line_width > 0.0 && self.point_radius.is_finite() && self.point_radius > 0.0) {
+            return Err("line width and point radius must be above zero".into());
+        }
         Ok(self)
     }
 }
@@ -166,14 +191,14 @@ fn all_shape_types() -> Vec<ShapeType> {
 
 impl Label {
     pub fn new(id: i64, definition: LabelDefinition) -> Self {
-        let LabelDefinition { name, color, hotkey, shape_types, ignore, attributes } = definition;
-        Label { id, name, color, hotkey, shape_types, ignore, attributes }
+        let LabelDefinition { name, color, hotkey, shape_types, ignore, attributes, line_width, point_radius } = definition;
+        Label { id, name, color, hotkey, shape_types, ignore, attributes, line_width, point_radius }
     }
 
     /// Everything but the id.
     pub fn definition(&self) -> LabelDefinition {
-        let Label { name, color, hotkey, shape_types, ignore, attributes, .. } = self.clone();
-        LabelDefinition { name, color, hotkey, shape_types, ignore, attributes }
+        let Label { name, color, hotkey, shape_types, ignore, attributes, line_width, point_radius, .. } = self.clone();
+        LabelDefinition { name, color, hotkey, shape_types, ignore, attributes, line_width, point_radius }
     }
 }
 

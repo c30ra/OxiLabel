@@ -735,8 +735,13 @@ tests.push({
     await press('Add attribute');
     await type('.attribute:nth-of-type(2) input.attribute-name', 'occluded');
     await choose('.attribute:nth-of-type(2) select.attribute-type', 'checkbox');
+    // Replace the default 7 with 4.
+    await t.b.eval(`(() => { const el = document.querySelector('.label-form input.line-width'); el.focus(); el.select(); return 1; })()`);
+    await t.b.key('4');
+    await t.b.key(KEY.tab);
     await press('Add label');
     const label = await t.b.waitFor(async () => (await t.api.call('GET', `/api/projects/${t.project.id}/labels`)).find((l) => l.name === 'stain'), 'the new label');
+    equal([label.line_width, label.point_radius], [4, 8], 'line width set, point radius default');
     equal(label.attributes, [
       { name: 'severity', type: 'select', options: ['low', 'high'], default: 'high' },
       { name: 'occluded', type: 'checkbox', default: false },
@@ -1016,6 +1021,21 @@ tests.push({
     const zip = Buffer.from(await (await fetch(t.base + href)).arrayBuffer());
     equal(zip.subarray(0, 2).toString(), 'PK', 'zip signature');
     if (!zip.includes('images/train/') && !zip.includes('images/val/')) throw new Error('the zip has no images');
+  },
+}, {
+  name: 'the export dialog offers YOLO segment and OBB, and a segment export includes polylines',
+  async run(t) {
+    // "line" (3) allows polylines; it is expanded with the label's line width.
+    await t.api.setAnnotations(t.project, [{ label: 3, shape: { type: 'polyline', points: [{ x: 100, y: 100 }, { x: 300, y: 120 }] } }]);
+    await t.b.goto(`${t.base}/projects/${t.project.id}`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.grid li')`), 'the grid');
+    await t.b.eval(`[...document.querySelectorAll('.actions button')].find((b) => b.textContent.includes('Export')).click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.export-dialog option')`), 'the formats');
+    equal(await t.b.json(`[...document.querySelectorAll('.export-dialog option')].map((o) => o.textContent)`), ['YOLO detect', 'YOLO segment', 'YOLO OBB'], 'formats');
+    await t.b.eval(`(() => { const s = document.querySelector('.export-dialog select'); s.value = 'yolo-segment'; s.dispatchEvent(new Event('change', { bubbles: true })); return 1; })()`);
+    await t.b.eval(`[...document.querySelectorAll('.export-dialog .dialog-foot button')].find((b) => b.textContent.includes('Export')).click(), 1`);
+    const report = await t.b.waitFor(() => t.b.eval(`document.querySelector('.export-dialog .report')?.textContent`), 'the export result');
+    if (!report.includes('1 annotations')) throw new Error(`report: ${report}`);
   },
 });
 

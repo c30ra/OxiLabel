@@ -18,6 +18,8 @@ fn label(id: i64, name: &str, ignore: bool) -> Label {
         shape_types: vec![ShapeType::Rectangle],
         ignore,
         attributes: vec![],
+        line_width: rtag_core::DEFAULT_LINE_WIDTH,
+        point_radius: rtag_core::DEFAULT_POINT_RADIUS,
     }
 }
 
@@ -162,5 +164,5 @@ fn split_percentages_must_add_up() {
 fn exporters_are_found_by_id() {
     assert_eq!(exporter("yolo-detect").unwrap().name(), "YOLO detect");
     assert!(exporter("nope").is_none());
-    assert_eq!(exporters().len(), 1);
+    assert_eq!(exporters().iter().map(|e| e.id()).collect::<Vec<_>>(), ["yolo-detect", "yolo-segment", "yolo-obb"]);
 }

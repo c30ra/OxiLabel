@@ -120,6 +120,87 @@ pub fn polygon_area(vertices: &[Point]) -> f64 {
         / 2.0
 }
 
+/// The convex hull of `points`, counter-clockwise (in y-up terms), without repeated points.
+pub fn convex_hull(points: &[Point]) -> Vec<Point> {
+    let mut sorted = points.to_vec();
+    sorted.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+    sorted.dedup();
+    if sorted.len() < 3 {
+        return sorted;
+    }
+    let cross = |o: Point, a: Point, b: Point| (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+    let mut hull: Vec<Point> = Vec::with_capacity(2 * sorted.len());
+    for pass in [false, true] {
+        let start = hull.len();
+        let ordered: Box<dyn Iterator<Item = &Point>> = if pass { Box::new(sorted.iter().rev()) } else { Box::new(sorted.iter()) };
+        for &point in ordered {
+            while hull.len() >= start + 2 && cross(hull[hull.len() - 2], hull[hull.len() - 1], point) <= 0.0 {
+                hull.pop();
+            }
+            hull.push(point);
+        }
+        hull.pop();
+    }
+    hull
+}
+
+/// The rotated rectangle of least area around `points` (corners in order), found by trying each
+/// edge direction of their convex hull.
+pub fn min_area_rect(points: &[Point]) -> [Point; 4] {
+    let hull = convex_hull(points);
+    let mut best: Option<(f64, [Point; 4], f64)> = None;
+    let edges: Vec<(Point, Point)> = match hull.len() {
+        0 => return [Point::new(0.0, 0.0); 4],
+        1 => vec![(hull[0], Point::new(hull[0].x + 1.0, hull[0].y))],
+        n => (0..n).map(|i| (hull[i], hull[(i + 1) % n])).collect(),
+    };
+    for (a, b) in edges {
+        let length = a.distance(b);
+        if length == 0.0 {
+            continue;
+        }
+        let (ux, uy) = ((b.x - a.x) / length, (b.y - a.y) / length);
+        // Coordinates along the edge and across it.
+        let along = |p: &Point| p.x * ux + p.y * uy;
+        let across = |p: &Point| -p.x * uy + p.y * ux;
+        let range = |f: &dyn Fn(&Point) -> f64| hull.iter().map(f).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| (lo.min(v), hi.max(v)));
+        let ((u0, u1), (v0, v1)) = (range(&along), range(&across));
+        let area = (u1 - u0) * (v1 - v0);
+        // Of boxes with (nearly) the same area, the one closest to upright wins.
+        let tilt = ux.abs().min(uy.abs());
+        let better = best.as_ref().is_none_or(|(least, _, least_tilt)| {
+            let same = (area - least).abs() <= 1e-9 * least.max(1.0);
+            if same { tilt < *least_tilt - 1e-12 } else { area < *least }
+        });
+        if better {
+            let corner = |u: f64, v: f64| Point::new(u * ux - v * uy, u * uy + v * ux);
+            best = Some((area, [corner(u0, v0), corner(u1, v0), corner(u1, v1), corner(u0, v1)], tilt));
+        }
+    }
+    best.map(|(_, rect, _)| rect).unwrap_or([hull[0]; 4])
+}
+
+/// `points` (an open line) with the points dropped that lie within `epsilon` of the line through
+/// their neighbours that remain (Douglas–Peucker); the ends stay.
+pub fn simplify(points: &[Point], epsilon: f64) -> Vec<Point> {
+    if points.len() < 3 {
+        return points.to_vec();
+    }
+    let (first, last) = (points[0], points[points.len() - 1]);
+    let (index, distance) = points[1..points.len() - 1]
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (i + 1, distance_to_segment(*p, first, last)))
+        .fold((0, -1.0), |best, next| if next.1 > best.1 { next } else { best });
+    if distance <= epsilon {
+        return vec![first, last];
+    }
+    let mut left = simplify(&points[..=index], epsilon);
+    left.pop();
+    left.extend(simplify(&points[index..], epsilon));
+    left
+}
+
 /// The smallest axis-aligned rectangle around `points`.
 pub fn bounds_of(points: &[Point]) -> Rect {
     let mut bounds = Rect::new(f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
@@ -459,5 +540,34 @@ mod tests {
             [Point::new(7.0, 0.0), Point::new(10.0, 4.0)]
         );
         assert_eq!(steps_along(&path[..1], 7.0), []);
+    }
+
+    fn area_of(rect: &[Point; 4]) -> f64 {
+        polygon_area(rect)
+    }
+
+    #[test]
+    fn the_minimum_area_rectangle_fits_a_rotated_shape_tightly() {
+        // A 10 × 2 bar turned by 30°, plus a point inside it.
+        let (c, s) = (30f64.to_radians().cos(), 30f64.to_radians().sin());
+        let turn = |x: f64, y: f64| Point::new(50.0 + x * c - y * s, 50.0 + x * s + y * c);
+        let points = [turn(-5.0, -1.0), turn(5.0, -1.0), turn(5.0, 1.0), turn(-5.0, 1.0), turn(0.0, 0.0)];
+        let rect = min_area_rect(&points);
+        assert!((area_of(&rect) - 20.0).abs() < 1e-6, "area {}", area_of(&rect));
+        for corner in [turn(-5.0, -1.0), turn(5.0, 1.0)] {
+            assert!(rect.iter().any(|p| p.distance(corner) < 1e-6), "corner {corner:?} in {rect:?}");
+        }
+        // An isosceles triangle fits several boxes of equal area: the upright one is chosen.
+        let upright = min_area_rect(&[Point::new(20.0, 10.0), Point::new(60.0, 10.0), Point::new(40.0, 50.0)]);
+        assert!(upright.iter().all(|p| (p.x == 20.0 || p.x == 60.0) && (p.y == 10.0 || p.y == 50.0)), "{upright:?}");
+        let flat = min_area_rect(&[Point::new(0.0, 0.0), Point::new(4.0, 0.0)]);
+        assert_eq!(area_of(&flat), 0.0, "a segment has a flat box");
+    }
+
+    #[test]
+    fn simplifying_drops_points_within_the_tolerance() {
+        let staircase = [Point::new(0.0, 0.0), Point::new(1.0, 0.0), Point::new(1.0, 0.4), Point::new(2.0, 0.4), Point::new(2.0, 0.0), Point::new(3.0, 0.0), Point::new(3.0, 3.0)];
+        assert_eq!(simplify(&staircase, 0.5), [Point::new(0.0, 0.0), Point::new(3.0, 0.0), Point::new(3.0, 3.0)]);
+        assert_eq!(simplify(&staircase, 0.1).len(), staircase.len(), "a small tolerance keeps the steps");
     }
 }
