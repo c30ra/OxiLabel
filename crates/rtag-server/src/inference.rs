@@ -9,7 +9,7 @@
 use std::{
     collections::BTreeMap,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -26,7 +26,7 @@ use rtag_core::{
     Label,
     annotation::Annotation,
     import::SkipCount,
-    inference::{Model, ModelDefinition, Prediction, RunRequest, RunState, RunStatus, WorkerHealth},
+    inference::{DEFAULT_WORKER_URL, Model, ModelDefinition, Prediction, RunRequest, RunState, RunStatus, WorkerHealth, WorkerSettings},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -34,6 +34,7 @@ use sqlx::{Row, SqliteConnection, SqlitePool};
 
 use crate::{
     AppState,
+    worker_process::WorkerProcess,
     annotations::{check_annotation, insert_annotations},
     auth::{Admin, CurrentUser},
     error::ApiError,
@@ -45,7 +46,7 @@ const PREDICT_TIMEOUT: Duration = Duration::from_secs(600);
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(3);
 /// Ended runs kept for their status; older ones are forgotten.
 const KEPT_RUNS: usize = 50;
-const NO_WORKER: &str = "no pre-annotation worker is set up: start the server with RTAG_WORKER_URL (or RTAG_WORKER_COMMAND)";
+const NO_WORKER: &str = "no pre-annotation worker is set up: an admin sets one on the Settings screen";
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -55,23 +56,29 @@ pub fn routes() -> Router<AppState> {
         .route("/api/models/{id}/classes", get(model_classes))
         .route("/api/projects/{project}/pre-annotations", post(start_run))
         .route("/api/runs/{id}", get(run_status).delete(cancel_run))
+        .route("/api/settings/worker", get(worker_settings).put(change_worker_settings))
 }
 
-/// The worker's client: where it listens, if anywhere.
-#[derive(Clone)]
+/// The worker's client: where it listens, if anywhere, and the worker the server starts.
+#[derive(Clone, Default)]
 pub struct Worker {
-    url: Option<String>,
+    url: Arc<RwLock<Option<String>>>,
     client: reqwest::Client,
+    process: WorkerProcess,
 }
 
 impl Worker {
-    pub fn new(url: Option<String>) -> Self {
-        Worker { url: url.map(|url| url.trim_end_matches('/').to_owned()), client: reqwest::Client::new() }
+    fn url(&self, path: &str) -> Result<String, String> {
+        let base = self.url.read().expect("worker url lock").clone().ok_or(NO_WORKER)?;
+        Ok(format!("{base}{path}"))
     }
 
-    fn url(&self, path: &str) -> Result<String, String> {
-        let base = self.url.as_deref().ok_or(NO_WORKER)?;
-        Ok(format!("{base}{path}"))
+    /// Uses `settings` from now on: the URL to call, and the command to run (restarted if it was
+    /// running).
+    pub fn apply(&self, settings: &WorkerSettings) {
+        *self.url.write().expect("worker url lock") = settings.url.clone();
+        let addr = settings.url.as_deref().unwrap_or(DEFAULT_WORKER_URL).trim_start_matches("http://").to_owned();
+        self.process.run(settings.command.clone(), addr);
     }
 
     /// Sends a request and reads the JSON answer, or the worker's `{error}`.
@@ -263,9 +270,7 @@ async fn start_run(user: CurrentUser, State(state): State<AppState>, Path(projec
         in_project.ok_or_else(|| ApiError::BadRequest(format!("image {image} is not in this project")))?;
         jobs::ensure_image_access(&mut conn, &user, image).await?;
     }
-    if state.worker.url.is_none() {
-        return Err(ApiError::Conflict(NO_WORKER.to_owned()));
-    }
+    state.worker.url("").map_err(ApiError::Conflict)?;
     let labels = labels::project_labels(&mut conn, project).await?;
     drop(conn);
 
@@ -394,4 +399,32 @@ async fn run_status(user: CurrentUser, State(state): State<AppState>, Path(RunPa
 async fn cancel_run(user: CurrentUser, State(state): State<AppState>, Path(RunPath { id }): Path<RunPath>) -> Result<StatusCode, ApiError> {
     visible_run(&state, &user, id).await?.1.store(true, Ordering::SeqCst);
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The stored worker settings (none set: no worker).
+pub async fn stored_worker_settings(pool: &SqlitePool) -> Result<WorkerSettings, ApiError> {
+    let value: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'worker'").fetch_optional(pool).await?;
+    Ok(value.and_then(|value| serde_json::from_str(&value).ok()).unwrap_or_default())
+}
+
+async fn worker_settings(_: Admin, State(pool): State<SqlitePool>) -> Result<Json<WorkerSettings>, ApiError> {
+    Ok(Json(stored_worker_settings(&pool).await?))
+}
+
+/// Stores the worker settings and applies them at once.
+async fn change_worker_settings(_: Admin, State(state): State<AppState>, Json(settings): Json<WorkerSettings>) -> Result<Json<WorkerSettings>, ApiError> {
+    let given = |text: Option<String>| text.map(|text| text.trim().to_owned()).filter(|text| !text.is_empty());
+    let command = given(settings.command);
+    let url = given(settings.url).map(|url| url.trim_end_matches('/').to_owned());
+    if url.as_deref().is_some_and(|url| !url.starts_with("http://")) {
+        return Err(ApiError::BadRequest("the worker's URL must start with http://".into()));
+    }
+    let url = url.or_else(|| command.is_some().then(|| DEFAULT_WORKER_URL.to_owned()));
+    let settings = WorkerSettings { command, url };
+    sqlx::query("INSERT INTO settings (key, value) VALUES ('worker', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value")
+        .bind(serde_json::to_string(&settings).expect("settings serialise"))
+        .execute(&state.pool)
+        .await?;
+    state.worker.apply(&settings);
+    Ok(Json(settings))
 }

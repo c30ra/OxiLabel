@@ -13,6 +13,9 @@ mod projects;
 mod thumbnails;
 mod tiles;
 mod users;
+mod worker_process;
+
+pub use worker_process::stop_workers;
 
 pub use tiles::KEPT_FILTERS;
 
@@ -50,8 +53,6 @@ pub struct Config {
     pub cache_dir: PathBuf,
     /// Exports are written into folders here.
     pub export_dir: PathBuf,
-    /// Where the pre-annotation worker listens, e.g. `http://127.0.0.1:3112`; none without one.
-    pub worker_url: Option<String>,
 }
 
 #[derive(Clone)]
@@ -97,7 +98,7 @@ pub async fn app(config: Config) -> Result<Router, sqlx::Error> {
         cache_dir: config.cache_dir,
         export_dir: config.export_dir,
         pyramid_locks: tiles::GenerationLocks::default(),
-        worker: inference::Worker::new(config.worker_url),
+        worker: inference::Worker::default(),
         runs: inference::Runs::default(),
     };
     let signed_in = Router::new()
@@ -114,6 +115,11 @@ pub async fn app(config: Config) -> Result<Router, sqlx::Error> {
         .merge(cvat::routes())
         .merge(inference::routes())
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_session));
+    // The worker as an admin set it up (started now, if the server runs it).
+    state.worker.apply(&inference::stored_worker_settings(&state.pool).await.map_err(|err| match err {
+        error::ApiError::Database(err) => err,
+        other => sqlx::Error::Protocol(other.message()),
+    })?);
     Ok(Router::new().merge(signed_in).merge(auth::routes()).with_state(state))
 }
 

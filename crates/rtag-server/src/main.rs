@@ -1,11 +1,4 @@
-use std::{
-    net::SocketAddr,
-    path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicU32, Ordering},
-    },
-};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use axum::http::{HeaderValue, header};
 use tower::Layer;
@@ -18,19 +11,8 @@ fn env_or(name: &str, default: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| default.to_owned())
 }
 
-/// Where the worker listens when the server starts it and no URL is given.
-const DEFAULT_WORKER_URL: &str = "http://127.0.0.1:3112";
-
 #[tokio::main]
 async fn main() {
-    let worker_command = std::env::var("RTAG_WORKER_COMMAND").ok().filter(|command| !command.trim().is_empty());
-    let mut worker_url = std::env::var("RTAG_WORKER_URL").ok().filter(|url| !url.is_empty());
-    // The process group of the worker the server started, if any (0: none running).
-    let worker_group = Arc::new(AtomicU32::new(0));
-    if let Some(command) = worker_command {
-        let url = worker_url.get_or_insert_with(|| DEFAULT_WORKER_URL.to_owned()).clone();
-        tokio::spawn(supervise_worker(command, url, worker_group.clone()));
-    }
     let config = rtag_server::Config {
         database_url: env_or("RTAG_DATABASE", "sqlite://data/rtag.db?mode=rwc"),
         images_root: PathBuf::from(env_or("RTAG_IMAGES_ROOT", "images")),
@@ -38,7 +20,6 @@ async fn main() {
         export_dir: PathBuf::from(env_or("RTAG_EXPORT_DIR", "data/exports")),
         upload_dir: PathBuf::from(env_or("RTAG_UPLOAD_DIR", "data/uploads")),
         folder_dialog: desktop_folder_dialog(),
-        worker_url,
     };
     let addr = env_or("RTAG_ADDR", "0.0.0.0:3000");
     let web_root = env_or("RTAG_WEB_ROOT", "crates/rtag-ui/dist");
@@ -57,11 +38,7 @@ async fn main() {
         .await
         .unwrap();
     // The worker goes with the server, whatever it started below itself.
-    let group = worker_group.load(Ordering::SeqCst);
-    if group != 0 {
-        // SAFETY: kill only sends a signal; a negative pid names the process group.
-        unsafe { libc::kill(-(group as i32), libc::SIGTERM) };
-    }
+    rtag_server::stop_workers();
 }
 
 /// Ctrl+C, or SIGTERM (as Podman and systemd stop a process).
@@ -70,29 +47,6 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {}
         _ = terminate.recv() => {}
-    }
-}
-
-/// Runs the pre-annotation worker (`RTAG_WORKER_COMMAND`, through the shell, in a process group
-/// of its own, kept in `group`) and starts it again whenever it exits. It is told to listen where
-/// `url` points, in `RTAG_WORKER_ADDR`.
-async fn supervise_worker(command: String, url: String, group: Arc<AtomicU32>) {
-    let addr = url.trim_start_matches("http://").trim_end_matches('/').to_owned();
-    loop {
-        println!("starting the worker: {command}");
-        let child = tokio::process::Command::new("sh").arg("-c").arg(&command).env("RTAG_WORKER_ADDR", &addr).process_group(0).spawn();
-        match child {
-            Ok(mut child) => {
-                group.store(child.id().unwrap_or(0), Ordering::SeqCst);
-                let exited = child.wait().await;
-                match exited {
-                    Ok(status) => eprintln!("the worker stopped ({status}); starting it again in 5 s"),
-                    Err(err) => eprintln!("lost the worker: {err}"),
-                }
-            }
-            Err(err) => eprintln!("cannot start the worker: {err}; trying again in 5 s"),
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
 }
 

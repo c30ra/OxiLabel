@@ -8,6 +8,7 @@ use leptos_router::components::A;
 use rtag_core::inference::{Model, ModelDefinition, WorkerHealth};
 use serde_json::{Map, Value};
 
+use super::settings::WorkerHealthLine;
 use crate::{
     account::{AccountMenu, is_admin},
     api,
@@ -137,19 +138,8 @@ fn ModelAdmin() -> impl IntoView {
     };
 
     view! {
-        <p class="worker-health" role="status">
-            {move || match health.get() {
-                None => view! { <span class="muted">"Asking the worker…"</span> }.into_any(),
-                Some(Err(message)) => view! { <span class="error">{message}</span> }.into_any(),
-                Some(Ok(WorkerHealth { reachable: true, device, .. })) => view! {
-                    <span class="status-dot done"></span>{format!("Worker ready on {}", device.unwrap_or_else(|| "an unknown device".to_owned()))}
-                }.into_any(),
-                Some(Ok(WorkerHealth { error, .. })) => view! {
-                    <span class="status-dot"></span><span class="error">{format!("Worker not reachable: {}", error.unwrap_or_default())}</span>
-                }.into_any(),
-            }}
-            <button class="small" on:click=move |_| health.refetch()>"Check again"</button>
-        </p>
+        <WorkerHealthLine health=health />
+        <p class="muted hint">"Where the worker is is set on the Settings screen."</p>
         {move || match models.get() {
             None => view! { <p class="muted">"Loading…"</p> }.into_any(),
             Some(Err(message)) => view! { <p class="error" role="alert">{message}</p> }.into_any(),

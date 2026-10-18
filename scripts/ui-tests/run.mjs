@@ -70,9 +70,6 @@ start(server, [], {
   RTAG_UPLOAD_DIR: join(work, 'uploads'),
   // Tests write what the host's folder dialog "picks" here, so no real dialog opens.
   RTAG_FOLDER_DIALOG: `answers:${join(work, 'folder-dialog.txt')}`,
-  // The pre-annotation worker, started by the server; tests register scripts/ui-tests/test_adapter.py.
-  RTAG_WORKER_URL: `http://127.0.0.1:${workerPort}`,
-  RTAG_WORKER_COMMAND: `PYTHONPATH=${join(root, 'worker')} RTAG_WORKER_QUIET=1 exec python3 -m rtag_worker`,
 });
 await until(async () => (await fetch(`${base}/api/session`)).ok, 'the server');
 
@@ -90,6 +87,11 @@ const b = await connect(browserPort);
 // The first visit asks for the first account; the browser stays signed in as it for every test.
 await signIn(b, base, ADMIN, { setup: true });
 const client = await api(base);
+// The pre-annotation worker, started by the server; tests register scripts/ui-tests/test_adapter.py.
+await client.call('PUT', '/api/settings/worker', {
+  command: `PYTHONPATH=${join(root, 'worker')} RTAG_WORKER_QUIET=1 exec python3 -m rtag_worker`,
+  url: `http://127.0.0.1:${workerPort}`,
+});
 let failed = 0;
 const selected = tests.filter((test) => test.name.includes(filter));
 for (const [index, test] of selected.entries()) {

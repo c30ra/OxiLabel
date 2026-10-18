@@ -35,6 +35,19 @@ pub struct ModelDefinition {
     pub class_map: BTreeMap<String, String>,
 }
 
+/// Where the pre-annotation worker is: the command the server starts it with (through the shell,
+/// told its address in `RTAG_WORKER_ADDR`), and the URL it answers at. With a command and no URL
+/// it listens at `DEFAULT_WORKER_URL`; with neither there is no worker.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerSettings {
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+pub const DEFAULT_WORKER_URL: &str = "http://127.0.0.1:3112";
+
 /// Whether the worker answers, and on what it runs models.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkerHealth {

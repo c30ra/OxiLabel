@@ -1423,3 +1423,30 @@ tests.push({
     equal((await w.state()).save, 'Saved', 'save state');
   },
 });
+
+tests.push({
+  name: 'the Settings screen shows where the worker is and saves a change',
+  async run(t) {
+    const before = await t.api.call('GET', '/api/settings/worker');
+    try {
+      await t.b.goto(`${t.base}/`);
+      await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.account a[href="/settings"]')`), 'the Settings link');
+      await t.b.eval(`document.querySelector('.account a[href="/settings"]').click(), 1`);
+      await t.b.waitFor(() => t.b.eval(`document.querySelector('.worker-settings input.worker-url')?.value === ${JSON.stringify(before.url)}`), 'the stored URL');
+      equal(await t.b.eval(`document.querySelector('.worker-settings input.worker-command').value`), before.command, 'the stored command');
+      await t.b.waitFor(() => t.b.eval(`document.querySelector('.worker-health')?.textContent.includes('Worker ready on')`), 'the worker', 30000);
+      await t.b.eval(`(() => {
+        const set = (selector, value) => { const i = document.querySelector(selector); i.value = value; i.dispatchEvent(new Event('input', { bubbles: true })); };
+        set('.worker-settings input.worker-command', '');
+        set('.worker-settings input.worker-url', 'http://127.0.0.1:9/');
+        document.querySelector('.worker-settings button.primary').click();
+        return 1;
+      })()`);
+      await t.b.waitFor(() => t.b.eval(`document.querySelector('.worker-settings .saved')?.textContent === 'Saved and applied.'`), 'the save');
+      equal(await t.api.call('GET', '/api/settings/worker'), { command: null, url: 'http://127.0.0.1:9' }, 'stored settings');
+      await t.b.waitFor(() => t.b.eval(`document.querySelector('.worker-health')?.textContent.includes('Worker not reachable')`), 'the unreachable worker', 10000);
+    } finally {
+      await t.api.call('PUT', '/api/settings/worker', before);
+    }
+  },
+});

@@ -64,7 +64,6 @@ pub async fn test_app_with_worker(worker_url: Option<String>) -> TestApp {
         export_dir: exports.path().to_owned(),
         upload_dir: uploads.path().to_owned(),
         folder_dialog: Some(folder_dialog),
-        worker_url,
     })
     .await
     .unwrap();
@@ -75,6 +74,10 @@ pub async fn test_app_with_worker(worker_url: Option<String>) -> TestApp {
     let cookie = cookie.unwrap();
     let local = with_cookie(local, &cookie);
     let router = with_cookie(anonymous.clone(), &cookie);
+    if let Some(url) = worker_url {
+        let (status, body) = call(&router, Method::PUT, "/api/settings/worker", Some(serde_json::json!({"url": url}))).await;
+        assert_eq!(status, StatusCode::OK, "setting the worker: {body}");
+    }
     TestApp { router, local, anonymous, images, cache, exports, uploads, picked }
 }
 

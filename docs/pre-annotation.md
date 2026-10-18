@@ -4,28 +4,28 @@ rtag's server sends images to a Python worker (`worker/`, ADR 0001) that runs mo
 adapters and returns pre-annotations. The worker needs the model's Python stack (e.g. PyTorch for
 ROCm and Ultralytics); the server only needs to reach it over HTTP.
 
-## Server and worker on the same machine (development)
+An admin sets where the worker is on the **Settings** screen: a start command, a URL, or both.
+Saving applies it at once; the Settings and Models screens show whether the worker answers and
+on which device.
 
-Let the server start the worker with the Python that has the model's stack:
+## Server and worker on the same machine
 
-    RTAG_WORKER_COMMAND="PYTHONPATH=$PWD/worker exec /path/to/venv/bin/python -m rtag_worker" \
-    target/release/rtag-server
+Give the start command, with the Python that has the model's stack:
 
-It listens on `RTAG_WORKER_URL` (default `http://127.0.0.1:3112`); the server restarts it if it
-exits. The Models screen shows whether it answers and on which device.
+    PYTHONPATH=/path/to/rtag/worker exec /path/to/venv/bin/python -m rtag_worker
+
+The server runs it through the shell, tells it to listen at the URL (default
+`http://127.0.0.1:3112`), starts it again if it exits, and stops it (with anything it started)
+when the settings change or the server stops.
 
 ## Server in a container, worker on the host
 
-A container cannot start processes on the host, so start the worker there yourself and point the
-server at it:
+A container cannot start processes on the host, so start the worker there yourself:
 
     PYTHONPATH=worker /path/to/venv/bin/python -m rtag_worker --addr 0.0.0.0:3112
 
-    podman run -p 3000:3000 -v rtag-data:/data -v /photos:/images:ro \
-        -e RTAG_WORKER_URL=http://host.containers.internal:3112 localhost/rtag
-
-Listen on an address the container can reach, and keep the port closed to other machines (the
-worker runs whatever adapter file a registered model names).
+and on the Settings screen leave the command empty and set the URL to
+`http://host.containers.internal:3112`. Keep that port closed to other machines (see Trust).
 
 ## Worker in its own container with the GPU
 

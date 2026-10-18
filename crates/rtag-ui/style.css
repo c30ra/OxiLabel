@@ -410,3 +410,6 @@ select.job-filter { max-width: 14rem; }
 .run-dialog { max-width: 560px; }
 .run-dialog .run-job { margin-left: 8px; height: 30px; }
 .objects li .accept { width: 28px; height: 28px; padding: 0; border: 0; flex: none; }
+.worker-settings label { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; color: var(--muted); font-size: 13px; }
+.worker-settings input { color: var(--text); font-family: var(--mono); }
+.worker-settings .hint { font-size: 12px; }

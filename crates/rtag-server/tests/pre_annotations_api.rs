@@ -145,7 +145,7 @@ async fn the_worker_health_and_a_models_classes_come_from_the_worker() {
     let lonely = test_app_with_worker(None).await;
     let (_, health) = call(&lonely, Method::GET, "/api/worker", None).await;
     assert_eq!(health["reachable"], json!(false));
-    assert!(health["error"].as_str().unwrap().contains("RTAG_WORKER"), "{health}");
+    assert!(health["error"].as_str().unwrap().contains("Settings screen"), "{health}");
     let unreachable = test_app_with_worker(Some("http://127.0.0.1:9".into())).await;
     assert_eq!(call(&unreachable, Method::GET, "/api/worker", None).await.1["reachable"], json!(false));
 }
@@ -277,4 +277,46 @@ async fn an_image_removed_during_a_run_is_skipped_and_statistics_wait_for_review
     // Unreviewed pre-annotations do not count yet.
     let (_, statistics) = call(&app, Method::GET, &format!("/api/projects/{p}/statistics"), None).await;
     assert_eq!(statistics["labels"][0]["annotations"], json!(0), "{statistics}");
+}
+
+#[tokio::test]
+async fn admins_set_where_the_worker_is_and_it_applies_at_once() {
+    let app = test_app().await;
+    let (_, settings) = call(&app, Method::GET, "/api/settings/worker", None).await;
+    assert_eq!(settings, json!({"command": null, "url": null}));
+    assert_eq!(call(&app, Method::GET, "/api/worker", None).await.1["reachable"], json!(false));
+
+    let url = FakeWorker::default().start().await;
+    let (status, settings) = call(&app, Method::PUT, "/api/settings/worker", Some(json!({"url": format!(" {url}/ ")}))).await;
+    assert_eq!((status, &settings), (StatusCode::OK, &json!({"command": null, "url": url})));
+    assert_eq!(call(&app, Method::GET, "/api/worker", None).await.1["device"], json!("fake gpu"));
+    // A command without a URL listens on the default one.
+    let (_, settings) = call(&app, Method::PUT, "/api/settings/worker", Some(json!({"command": "exit 0"}))).await;
+    assert_eq!(settings, json!({"command": "exit 0", "url": "http://127.0.0.1:3112"}));
+    let (status, _) = call(&app, Method::PUT, "/api/settings/worker", Some(json!({"url": "ftp://x"}))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    call(&app, Method::PUT, "/api/settings/worker", Some(json!({}))).await;
+    assert_eq!(call(&app, Method::GET, "/api/settings/worker", None).await.1, json!({"command": null, "url": null}));
+
+    call(&app, Method::POST, "/api/users", Some(json!({"username": "anna", "password": "anna's password", "role": "annotator"}))).await;
+    let anna = login(&app, "anna", "anna's password").await;
+    assert_eq!(call(&anna, Method::GET, "/api/settings/worker", None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(call(&anna, Method::PUT, "/api/settings/worker", Some(json!({"command": "rm -rf /"}))).await.0, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn the_worker_command_is_started_by_the_server() {
+    let app = test_app().await;
+    let marker = app.cache.path().join("started");
+    let command = format!("touch {} && sleep 30", marker.display());
+    let (status, _) = call(&app, Method::PUT, "/api/settings/worker", Some(json!({"command": command, "url": "http://127.0.0.1:9"}))).await;
+    assert_eq!(status, StatusCode::OK);
+    for _ in 0..50 {
+        if marker.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(marker.exists(), "the command ran");
+    call(&app, Method::PUT, "/api/settings/worker", Some(json!({}))).await;
 }
