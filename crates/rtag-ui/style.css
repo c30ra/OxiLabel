@@ -413,3 +413,11 @@ select.job-filter { max-width: 14rem; }
 .worker-settings label { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; color: var(--muted); font-size: 13px; }
 .worker-settings input { color: var(--text); font-family: var(--mono); }
 .worker-settings .hint { font-size: 12px; }
+
+/* Project archives */
+.archive-dialog, .import-archive-dialog { max-width: 560px; }
+.archive-form { display: flex; flex-direction: column; gap: 12px; padding-top: 16px; }
+.archive-form > label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+.archive-form input { color: var(--text); }
+.archive-report { padding-top: 16px; }
+.page-head .actions { margin-left: 0; }

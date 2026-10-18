@@ -5,6 +5,7 @@ use leptos::{prelude::*, task::spawn_local};
 use leptos_router::{components::A, hooks::use_navigate};
 use rtag_core::{FolderCount, ImportReport, ImportRequest, Label, LabelDefinition, NewProject, Project, ProjectSummary, ShapeType};
 
+use super::archive::ImportArchiveDialog;
 use crate::{
     account::{AccountMenu, is_admin},
     api,
@@ -14,6 +15,7 @@ use crate::{
 pub fn ProjectsPage() -> impl IntoView {
     let projects = LocalResource::new(|| api::get::<Vec<ProjectSummary>>("/api/projects"));
     let creating = RwSignal::new(false);
+    let importing_archive = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let admin = is_admin();
 
@@ -36,7 +38,12 @@ pub fn ProjectsPage() -> impl IntoView {
         <main class="page projects">
             <div class="page-head">
                 <h1>"Projects"</h1>
-                {admin.then(|| view! { <button class="primary new-project" on:click=move |_| creating.set(true)>"New project"</button> })}
+                {admin.then(|| view! {
+                    <div class="actions">
+                        <button class="import-archive" on:click=move |_| importing_archive.set(true)>"Import archive…"</button>
+                        <button class="primary new-project" on:click=move |_| creating.set(true)>"New project"</button>
+                    </div>
+                })}
             </div>
             <Show when=move || error.get().is_some()>
                 <p class="error" role="alert">{move || error.get()}</p>
@@ -57,6 +64,9 @@ pub fn ProjectsPage() -> impl IntoView {
                 }.into_any(),
             }}
         </main>
+        <Show when=move || importing_archive.get()>
+            <ImportArchiveDialog on_imported=move || projects.refetch() on_close=move || importing_archive.set(false) />
+        </Show>
         <Show when=move || creating.get()>
             {move || {
                 let sources = projects.get().and_then(Result::ok).unwrap_or_default();

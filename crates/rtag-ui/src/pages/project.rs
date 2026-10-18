@@ -4,7 +4,7 @@ use rtag_core::{ImagePage, Label, Project};
 
 use std::collections::BTreeSet;
 
-use super::{cvat_import::CvatImportDialog, export::ExportDialog, images::ImageSet, import::ImportDialog, jobs::JobsTab, labels::LabelSet, statistics::StatisticsTab};
+use super::{archive::ArchiveDialog, cvat_import::CvatImportDialog, export::ExportDialog, images::ImageSet, import::ImportDialog, jobs::JobsTab, labels::LabelSet, statistics::StatisticsTab};
 use crate::{
     account::{AccountMenu, is_admin},
     api,
@@ -42,6 +42,7 @@ pub fn ProjectPage(tab: Tab) -> impl IntoView {
     let importing_annotations = RwSignal::new(false);
     let pre_annotating = RwSignal::new(false);
     let exporting = RwSignal::new(false);
+    let archiving = RwSignal::new(false);
     let images_version = RwSignal::new(0_u32);
     // The grid's selection; the export dialog can export just these images.
     let selected = RwSignal::new(BTreeSet::<i64>::new());
@@ -62,6 +63,7 @@ pub fn ProjectPage(tab: Tab) -> impl IntoView {
             let id = project.id;
             let name = project.name.clone();
             let export_name = project.name.clone();
+            let archive_name = project.name.clone();
             let class = move |of: Tab| if of == tab { "tab active" } else { "tab" };
             view! {
                 <header class="topbar">
@@ -76,6 +78,7 @@ pub fn ProjectPage(tab: Tab) -> impl IntoView {
                             <button on:click=move |_| importing.set(true)>"Import images…"</button>
                             <button class="import-annotations" on:click=move |_| importing_annotations.set(true)>"Import annotations…"</button>
                             <button on:click=move |_| exporting.set(true)>"Export…"</button>
+                            <button class="archive" on:click=move |_| archiving.set(true)>"Archive…"</button>
                         </div>
                     })}
                     <button class="pre-annotate" on:click=move |_| pre_annotating.set(true)>"Pre-annotate…"</button>
@@ -100,6 +103,9 @@ pub fn ProjectPage(tab: Tab) -> impl IntoView {
                         Tab::Statistics => view! { <StatisticsTab project=id /> }.into_any(),
                     }}
                 </main>
+                <Show when=move || archiving.get()>
+                    <ArchiveDialog project=id project_name=archive_name.clone() on_close=move || archiving.set(false) />
+                </Show>
                 <Show when=move || exporting.get()>
                     <ExportDialog project=id project_name=export_name.clone() selected=selected on_close=move || exporting.set(false) />
                 </Show>

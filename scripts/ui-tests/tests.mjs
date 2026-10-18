@@ -1450,3 +1450,40 @@ tests.push({
     }
   },
 });
+
+tests.push({
+  name: 'a project archive with its images is downloaded and imported as a new project',
+  async run(t) {
+    const p = t.project.id;
+    await t.api.setAnnotations(t.project, [box(1, 100, 100, 300, 200)]);
+    await t.b.goto(`${t.base}/projects/${p}`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.topbar button.archive')`), 'the Archive button');
+    await t.b.eval(`document.querySelector('.topbar button.archive').click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.archive-dialog')`), 'the dialog');
+    await t.b.eval(`document.querySelector('.archive-dialog input.with-images').click(), 1`);
+    const href = await t.b.eval(`document.querySelector('.archive-dialog a.download-archive').getAttribute('href')`);
+    equal(href, `/api/projects/${p}/archive?images=true`, 'download link');
+    const file = join(t.work, 'project.rtag.zip');
+    writeFileSync(file, await t.api.bytes(href));
+
+    await t.b.goto(`${t.base}/`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('button.import-archive')`), 'the Import archive button');
+    await t.b.eval(`document.querySelector('button.import-archive').click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.import-archive-dialog input.archive-file')`), 'the import dialog');
+    await t.b.setFiles('.import-archive-dialog input.archive-file', [file]);
+    await t.b.eval(`(() => { const i = document.querySelector('.import-archive-dialog input.archive-name'); i.value = 'Restored'; i.dispatchEvent(new Event('input', { bubbles: true })); return 1; })()`);
+    await t.b.waitFor(() => t.b.eval(`!document.querySelector('.import-archive-dialog button.import-archive').disabled`), 'the file');
+    await t.b.eval(`document.querySelector('.import-archive-dialog button.import-archive').click(), 1`);
+    const id = await t.b.waitFor(async () => {
+      const match = /^\/projects\/(\d+)$/.exec(await t.b.eval('location.pathname'));
+      return match && Number(match[1]) !== p && Number(match[1]);
+    }, 'the new project', 15000);
+    const project = await t.api.call('GET', `/api/projects/${id}`);
+    equal(project.name, 'Restored', 'name');
+    const labels = await t.api.call('GET', `/api/projects/${id}/labels`);
+    equal(labels, await t.api.call('GET', `/api/projects/${p}/labels`), 'labels with their ids');
+    const page = await t.api.call('GET', `/api/projects/${id}/images`);
+    const { annotations } = await t.api.call('GET', `/api/projects/${id}/images/${page.images[0].id}/annotations`);
+    equal(annotations, (await t.api.annotations(t.project)).annotations, 'annotations');
+  },
+});

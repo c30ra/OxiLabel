@@ -1,4 +1,5 @@
 mod annotations;
+mod archives;
 mod auth;
 mod cvat;
 pub mod enhance;
@@ -113,6 +114,7 @@ pub async fn app(config: Config) -> Result<Router, sqlx::Error> {
         .merge(users::routes())
         .merge(jobs::routes())
         .merge(cvat::routes())
+        .merge(archives::routes())
         .merge(inference::routes())
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_session));
     // The worker as an admin set it up (started now, if the server runs it).

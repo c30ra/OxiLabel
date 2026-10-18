@@ -48,6 +48,12 @@ pub(crate) async fn insert_label(conn: &mut SqliteConnection, project: i64, defi
     .ok_or(ApiError::NotFound)?
     .get("id");
     let label = Label::new(id, definition);
+    store_label(conn, project, &label).await?;
+    Ok(label)
+}
+
+/// Writes `label` into the project as it is, id included.
+pub(crate) async fn store_label(conn: &mut SqliteConnection, project: i64, label: &Label) -> Result<(), ApiError> {
     sqlx::query(
         "INSERT INTO labels (project_id, id, name, color, hotkey, shape_types, is_ignore, attributes, line_width, point_radius) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
@@ -63,7 +69,7 @@ pub(crate) async fn insert_label(conn: &mut SqliteConnection, project: i64, defi
     .bind(label.point_radius)
     .execute(&mut *conn)
     .await?;
-    Ok(label)
+    Ok(())
 }
 
 async fn list_labels(user: CurrentUser, State(pool): State<SqlitePool>, Path(project): Path<i64>) -> Result<Json<Vec<Label>>, ApiError> {

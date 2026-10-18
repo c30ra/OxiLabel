@@ -73,6 +73,31 @@ pub struct CvatLabelReport {
     pub problem: Option<String>,
 }
 
+/// How to import a project archive: the new project's name (the archive's if none), and where
+/// to look for images the archive only refers to.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ArchiveImportPlan {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub images_folder: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArchiveImportReport {
+    pub project: crate::Project,
+    /// Images added to the new project.
+    pub images: usize,
+    /// Archive images found neither in it, at their path, nor in the images folder (their
+    /// annotations are not imported).
+    pub missing: Vec<String>,
+    pub annotations: usize,
+    /// Annotations that do not fit their image or label.
+    pub skipped: Vec<SkipCount>,
+    /// Numbers of the jobs whose assignee has no account here.
+    pub unassigned_jobs: Vec<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkipCount {
     pub reason: String,

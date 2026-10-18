@@ -259,10 +259,10 @@ fn resolve(root: &Path, relative: &str) -> Result<PathBuf, ApiError> {
 }
 
 pub(crate) struct NewImage {
-    path: String,
-    hash: String,
-    width: u32,
-    height: u32,
+    pub(crate) path: String,
+    pub(crate) hash: String,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
     file: FileInfo,
 }
 
@@ -399,7 +399,7 @@ async fn upload_images(
 }
 
 /// `path`, or `name-2.ext`, `name-3.ext`… if it is taken, so an upload never overwrites a kept image.
-fn free_name(path: &Path) -> PathBuf {
+pub(crate) fn free_name(path: &Path) -> PathBuf {
     let (stem, extension) = (path.file_stem().unwrap_or_default().to_string_lossy(), path.extension().map(|e| e.to_string_lossy()));
     (1..)
         .map(|n| match (n, &extension) {
