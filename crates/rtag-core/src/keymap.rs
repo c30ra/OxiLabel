@@ -148,6 +148,9 @@ actions! {
     Undo => "undo", "Editing", "Undo", [Binding::ctrl("z")];
     Redo => "redo", "Editing", "Redo", [Binding::ctrl("y"), Binding { shift: true, ..Binding::ctrl("z") }];
     Delete => "delete", "Editing", "Delete the selection", [Binding::key("Delete"), Binding::key("x")];
+    Copy => "copy", "Editing", "Copy the selection", [Binding::ctrl("c")];
+    Cut => "cut", "Editing", "Cut the selection", [Binding::ctrl("x")];
+    Paste => "paste", "Editing", "Paste", [Binding::ctrl("v")];
     SelectAll => "select_all", "Editing", "Select all", [Binding::key("a")];
     SelectNone => "select_none", "Editing", "Select nothing", [Binding::alt("a")];
     Cancel => "cancel", "Editing", "Cancel, step back", [Binding::key("Escape")];
@@ -245,6 +248,15 @@ mod tests {
         assert!(keys.matches(Action::ZoomIn, &press("+", false, false, true)));
         assert!(keys.matches(Action::Pan, &press(" ", false, false, false)));
         assert!(keys.is_key(Action::Pie, "Q"));
+    }
+
+    #[test]
+    fn copy_cut_and_paste_are_the_usual_ctrl_keys() {
+        let keys = Keymap::default();
+        assert!(keys.matches(Action::Copy, &press("c", true, false, false)));
+        assert!(keys.matches(Action::Cut, &press("x", true, false, false)));
+        assert!(keys.matches(Action::Paste, &press("v", true, false, false)));
+        assert!(keys.matches(Action::Ellipse, &press("c", false, false, false)), "C alone is still the ellipse");
     }
 
     #[test]

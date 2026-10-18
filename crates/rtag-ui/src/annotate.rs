@@ -17,7 +17,8 @@
 //! polylines can snap to edges (live-wire, `edges`) and the brush can stop at edges (painting
 //! only the similar region around the stroke's start); Shift inverts either while drawing. Esc
 //! first cancels the shape being drawn, then clears the selection, then returns to Select. Ctrl+Z
-//! and Ctrl+Y undo and redo.
+//! and Ctrl+Y undo and redo. Ctrl+C copies the selection and Ctrl+X cuts it; Ctrl+V pastes the
+//! copies on any image of the project at the same place, selected (see `rtag_core::clipboard`).
 //!
 //! Holding Q or the right mouse button opens a pie at the cursor: with Select active the tool pie
 //! (then the label pie), with a drawing tool its options pie, with a shape selected the label pie
@@ -25,13 +26,17 @@
 //! opens only the label pie. Tag (T, or the tool pie) opens the label pie and toggles that label
 //! as a tag of the whole image; tags show as chips over the image.
 
-use std::collections::{BTreeSet, HashMap};
+use std::{
+    cell::RefCell,
+    collections::{BTreeSet, HashMap},
+};
 
 use leptos::{ev, html, prelude::*};
 use rtag_core::{
     Footprint, Label, ShapeType,
     annotation::{Annotation, Shape, overlapping, topmost_at},
     attribute::Attributes,
+    clipboard,
     constraint::ShapeConstraints,
     edges::EdgeMap,
     ellipse::Ellipse,
@@ -90,6 +95,12 @@ pub const DEFAULT_SNAP_RADIUS: f64 = 12.0;
 pub const MAX_EDGE_OFFSET: f64 = 200.0;
 /// `[` and `]` change the spacing and the brush size by this factor.
 const SIZE_STEP: f64 = 1.25;
+
+thread_local! {
+    /// The copied annotations and their project: kept while moving between the project's images,
+    /// not across a reload.
+    static CLIPBOARD: RefCell<Option<(i64, Vec<Annotation>)>> = const { RefCell::new(None) };
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
@@ -555,6 +566,7 @@ enum Grip {
 #[component]
 pub fn AnnotationLayer(
     editor: Editor,
+    project: i64,
     labels: Vec<Label>,
     image_id: i64,
     image_size: (u32, u32),
@@ -1930,6 +1942,37 @@ pub fn AnnotationLayer(
             }
         } else if is(Action::Delete) {
             editor.delete_selected();
+        } else if is(Action::Copy) || is(Action::Cut) {
+            let selected: Vec<Annotation> = editor.selection.with_untracked(|selection| {
+                editor.annotations.with_untracked(|list| selection.iter().filter_map(|&index| list.get(index).cloned()).collect())
+            });
+            let copies = clipboard::copied(&selected);
+            // Tags are not copied, so a selection of tags alone keeps the clipboard as it was.
+            if copies.is_empty() {
+                return;
+            }
+            CLIPBOARD.set(Some((project, copies)));
+            if is(Action::Cut) {
+                // Cut removes only what it copied: tags stay.
+                editor.selection.update(|selection| {
+                    editor.annotations.with_untracked(|list| selection.retain(|&index| list.get(index).is_some_and(|a| !a.shape.is_tag())))
+                });
+                editor.delete_selected();
+            }
+        } else if is(Action::Paste) {
+            let copies = CLIPBOARD.with_borrow(|copied| copied.as_ref().filter(|(of, _)| *of == project).map(|(_, copies)| copies.clone()));
+            let Some(copies) = copies.filter(|copies| !copies.is_empty()) else { return };
+            cancel_gesture();
+            editor.tool.set(Tool::Select);
+            let pasted = all_labels.with_value(|labels| clipboard::paste(&copies, labels, image_size.0, image_size.1));
+            editor.notice.set(pasted.notice());
+            let start = editor.annotations.with_untracked(Vec::len);
+            let count = pasted.annotations.len();
+            if count > 0 {
+                let adds = pasted.annotations.into_iter().enumerate().map(|(offset, annotation)| Edit::Add { index: start + offset, annotation });
+                editor.apply(Edit::Batch(adds.collect()));
+            }
+            editor.selection.set((start..start + count).collect());
         } else if is(Action::Eraser) {
             // The brush in eraser mode (Blender has no eraser tool either).
             if brush_tool(Tool::Brush) {

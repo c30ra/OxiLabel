@@ -1661,3 +1661,73 @@ tests.push({
     await t.b.waitFor(async () => (await t.b.eval(`${width}.value`)) === '7', 'reset to the label');
   },
 });
+
+// Copying and pasting annotations (ticket 25).
+/** Imports a second image of `width` × `height` and returns the annotation helpers for it. */
+const secondImage = async (t, width, height) => {
+  writeTestImage(join(t.work, 'images', 'other', 'other.png'), width, height);
+  await t.api.call('POST', `/api/projects/${t.project.id}/imports`, { paths: ['other'] });
+  const ids = await t.api.call('GET', `/api/projects/${t.project.id}/image-ids`);
+  const image = ids.find((id) => id !== t.project.image);
+  return { id: t.project.id, image, annotations: `/api/projects/${t.project.id}/images/${image}/annotations` };
+};
+/** Opens `image` from the filmstrip, staying in the page (a reload would empty the clipboard). */
+const openFromFilmstrip = async (t, image) => {
+  await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.filmstrip a.thumb[href$="/images/${image.image}"]')`), 'the thumbnail');
+  await clickIn(t, `.filmstrip a.thumb[href$="/images/${image.image}"]`);
+  await t.b.waitFor(async () => (await t.b.eval('location.pathname')).endsWith(`/images/${image.image}`)
+    && (await t.b.eval(`document.querySelector('canvas.annotations')?.dataset.count === '0'`)), 'the other image');
+};
+
+tests.push({
+  name: 'Ctrl+C and Ctrl+V copy shapes to another image at the same place, selected, without tags',
+  async run(t) {
+    const other = await secondImage(t, 800, 500);
+    const severe = { ...box(1, 100, 100, 300, 200), source: 'model', confidence: 0.9, pending: true };
+    await t.api.setAnnotations(t.project, [severe, box(4, 1000, 600, 1500, 900), { label: 1, shape: { type: 'tag' } }]);
+    const w = await openWorkspace(t.b, t.base, t.project);
+    await t.b.key('a');
+    await t.b.key('c', [KEY.ctrl]);
+    await openFromFilmstrip(t, other);
+    await t.b.key('r');
+    await t.b.key('v', [KEY.ctrl]);
+    const list = await saved({ ...t, project: other }, (list) => list.length === 2, 'the pasted shapes');
+    equal(list.map((a) => [a.label, corners(a)]), [[1, [100, 100, 300, 200]], [4, [300, 200, 800, 500]]], 'same place, moved inside the smaller image');
+    equal(list.map((a) => [a.source ?? null, a.pending ?? false]), [[null, false], [null, false]], 'fresh manual work');
+    const state = await w.state();
+    equal([state.selected, state.tool], [[0, 1], 'Select'], 'the copies are selected with the Select tool');
+  },
+}, {
+  name: 'Ctrl+X cuts the unlocked shapes, which paste back unlocked; undo takes the paste away',
+  async run(t) {
+    const tag = { label: 1, shape: { type: 'tag' } };
+    await t.api.setAnnotations(t.project, [box(1, 100, 100, 300, 300), { ...box(2, 500, 100, 700, 300), locked: true }, tag]);
+    const w = await openWorkspace(t.b, t.base, t.project);
+    await t.b.key('a');
+    await t.b.key('x', [KEY.ctrl]);
+    let list = await saved(t, (list) => list.length === 2, 'the cut');
+    equal(list.map((a) => [a.label, a.shape.type]), [[2, 'rectangle'], [1, 'tag']], 'the locked shape and the tag stay');
+    await t.b.key('v', [KEY.ctrl]);
+    list = await saved(t, (list) => list.length === 4, 'the paste');
+    equal(list.map((a) => [a.label, a.locked ?? false]), [[2, true], [1, false], [1, false], [2, false]], 'pasted after the others, unlocked');
+    equal((await w.state()).selected, [2, 3], 'the copies are selected');
+    await t.b.key('z', [KEY.ctrl]);
+    await saved(t, (list) => list.length === 2, 'the paste undone');
+  },
+}, {
+  name: 'copies too big for the image or of a type their label no longer allows are skipped with a notice',
+  async run(t) {
+    const other = await secondImage(t, 300, 200);
+    const line = { label: 3, shape: { type: 'polyline', points: [{ x: 10, y: 10 }, { x: 50, y: 20 }] } };
+    await t.api.setAnnotations(t.project, [box(1, 10, 10, 50, 40), box(1, 0, 0, 400, 100), line]);
+    await openWorkspace(t.b, t.base, t.project);
+    await t.b.key('a');
+    await t.b.key('c', [KEY.ctrl]);
+    await changeLabel(t, 3, { shape_types: ['rectangle'] });
+    await openFromFilmstrip(t, other);
+    await t.b.key('v', [KEY.ctrl]);
+    const list = await saved({ ...t, project: other }, (list) => list.length === 1, 'the pasted shape');
+    equal(corners(list[0]), [10, 10, 50, 40], 'the shape that fits');
+    equal(await t.b.eval(`document.querySelector('.notice')?.textContent ?? null`), '2 shapes not pasted: 1 too big for this image, 1 shape type not allowed by its label.', 'notice');
+  },
+});

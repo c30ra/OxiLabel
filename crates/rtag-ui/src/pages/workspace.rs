@@ -292,7 +292,7 @@ fn Workspace(
                 <TileViewer image=image view=view size=size space_held=space_held
                     filter=Signal::derive(move || view_filter.shown()) css_filter=Signal::derive(move || view_filter.css()) loading=view_filter.loading>
                     <ViewFilterPanel filter=view_filter />
-                    <AnnotationLayer editor=editor labels=layer_labels image_id=image_id image_size=image_size view=view size=size space_held=space_held />
+                    <AnnotationLayer editor=editor project=project.id labels=layer_labels image_id=image_id image_size=image_size view=view size=size space_held=space_held />
                     {move || editor.notice.get().map(|text| view! { <p class="notice" role="status">{text}</p> })}
                 </TileViewer>
                 <SidePanel editor=editor labels=labels>

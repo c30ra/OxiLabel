@@ -2,6 +2,7 @@
 
 pub mod annotation;
 pub mod attribute;
+pub mod clipboard;
 pub mod constraint;
 pub mod edges;
 pub mod ellipse;
