@@ -4,7 +4,12 @@ use leptos::{ev::MouseEvent, prelude::*, task::spawn_local};
 use rtag_core::{Image, ImageFilter, ImagePage, RemovalReport, RemovalRequest, job::Job};
 
 use super::jobs::{CreateJobsDialog, job_name};
-use crate::{account::is_admin, api};
+use crate::{
+    account::is_admin,
+    api,
+    prefs::{prefs, press},
+};
+use rtag_core::keymap::Action;
 
 const PAGE_SIZES: [i64; 4] = [30, 60, 120, 240];
 const BYTES_PER_MB: f64 = 1_000_000.0;
@@ -135,6 +140,7 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>, selected: RwSignal<BTreeSe
 
     // Blender-style keys: A selects all, Alt+A clears, Esc clears, Delete asks to remove,
     // Page Up/Down turn pages. Ignored while a dialog is open or a field has focus.
+    let keymap = prefs().keymap;
     let keys = window_event_listener(leptos::ev::keydown, move |ev| {
         let document = document();
         let typing = document.active_element().is_some_and(|el| {
@@ -147,23 +153,28 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>, selected: RwSignal<BTreeSe
                 .ok()
                 .flatten()
                 .is_some()
-            || ev.ctrl_key()
-            || ev.meta_key()
         {
             return;
         }
         let has_selection = !selected.read_untracked().is_empty();
         let size = page_size.get_untracked();
-        match ev.key().as_str() {
-            "a" | "A" if ev.alt_key() => clear(),
-            "a" | "A" => select_all(),
-            "Escape" if has_selection => clear(),
-            "Delete" if has_selection && admin => confirming.set(true),
-            "PageDown" => offset.update(|o| {
-                *o = (*o + size).min(((total.get_untracked() - 1).max(0) / size) * size)
-            }),
-            "PageUp" => offset.update(|o| *o = (*o - size).max(0)),
-            _ => return,
+        let keys = keymap.get_untracked();
+        let press = press(&ev);
+        let is = |action| keys.matches(action, &press);
+        if is(Action::SelectNone) {
+            clear();
+        } else if is(Action::SelectAll) {
+            select_all();
+        } else if is(Action::Cancel) && has_selection {
+            clear();
+        } else if is(Action::Delete) && has_selection && admin {
+            confirming.set(true);
+        } else if is(Action::NextPage) {
+            offset.update(|o| *o = (*o + size).min(((total.get_untracked() - 1).max(0) / size) * size));
+        } else if is(Action::PreviousPage) {
+            offset.update(|o| *o = (*o - size).max(0));
+        } else {
+            return;
         }
         ev.prevent_default();
     });

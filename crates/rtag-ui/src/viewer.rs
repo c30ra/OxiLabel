@@ -10,9 +10,11 @@
 use std::collections::HashMap;
 
 use leptos::{ev, html, prelude::*};
-use rtag_core::{Image, geometry::Point, pyramid::Pyramid, view::View};
+use rtag_core::{Image, geometry::Point, keymap::Action, pyramid::Pyramid, view::View};
 use wasm_bindgen::{JsCast, closure::Closure};
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, HtmlImageElement};
+
+use crate::prefs::{prefs, press};
 
 /// Free space kept around the image when it is fitted to the canvas, in CSS pixels.
 pub const FIT_MARGIN: f64 = 24.0;
@@ -216,21 +218,28 @@ pub fn TileViewer(
             *view = view.map(|v| v.zoom_at(Point::new(width / 2.0, height / 2.0), factor))
         });
     };
+    let keymap = prefs().keymap;
     let on_key_down = window_event_listener(ev::keydown, move |ev| {
-        if typing_in_a_field() || ev.ctrl_key() || ev.meta_key() || ev.alt_key() {
+        if typing_in_a_field() {
             return;
         }
-        match ev.key().as_str() {
-            " " => space_held.set(true),
-            "Home" => view.set(None),
-            "+" | "=" => zoom_at_centre(KEY_ZOOM_STEP),
-            "-" => zoom_at_centre(1.0 / KEY_ZOOM_STEP),
-            _ => return,
+        let keys = keymap.get_untracked();
+        let press = press(&ev);
+        if keys.matches(Action::Pan, &press) {
+            space_held.set(true);
+        } else if keys.matches(Action::Fit, &press) {
+            view.set(None);
+        } else if keys.matches(Action::ZoomIn, &press) {
+            zoom_at_centre(KEY_ZOOM_STEP);
+        } else if keys.matches(Action::ZoomOut, &press) {
+            zoom_at_centre(1.0 / KEY_ZOOM_STEP);
+        } else {
+            return;
         }
         ev.prevent_default();
     });
     let on_key_up = window_event_listener(ev::keyup, move |ev| {
-        if ev.key() == " " {
+        if keymap.with_untracked(|keys| keys.is_key(Action::Pan, &ev.key())) {
             space_held.set(false);
         }
     });

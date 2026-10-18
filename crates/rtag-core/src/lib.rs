@@ -12,10 +12,12 @@ pub mod history;
 pub mod import;
 pub mod inference;
 pub mod job;
+pub mod keymap;
 pub mod mask;
 pub mod oriented;
 pub mod pie;
 pub mod pyramid;
+pub mod settings;
 pub mod user;
 pub mod view;
 

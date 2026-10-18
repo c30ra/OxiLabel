@@ -7,7 +7,14 @@ use leptos::{ev, prelude::*, task::spawn_local};
 use leptos_router::hooks::use_navigate;
 use rtag_core::{Image, ImageNeighbours, ImageStatus};
 
-use crate::{annotate::Editor, api, viewer::typing_in_a_field};
+use rtag_core::keymap::Action;
+
+use crate::{
+    annotate::Editor,
+    api,
+    prefs::{prefs, press},
+    viewer::typing_in_a_field,
+};
 
 /// Images on each side of the current one in the filmstrip.
 const NEIGHBOURS: usize = 6;
@@ -124,40 +131,41 @@ pub fn ImagePosition(nav: ImageNav, editor: Editor) -> impl IntoView {
 pub fn Filmstrip(nav: ImageNav, editor: Editor) -> impl IntoView {
     let go = move |step: i64| nav.go(step);
     let last_g = StoredValue::new(f64::NEG_INFINITY);
+    let keymap = prefs().keymap;
     let keys = window_event_listener(ev::keydown, move |ev| {
         // Keys the editor took (e.g. a label bound to j), held keys, open dialogs and pies, and
         // shapes being drawn leave the image alone.
         let open = document().query_selector(".backdrop, .pie, .label-search").ok().flatten().is_some();
-        if ev.default_prevented() || ev.repeat() || typing_in_a_field() || open || editor.busy.get_untracked() || ev.alt_key() || ev.meta_key() {
+        if ev.default_prevented() || ev.repeat() || typing_in_a_field() || open || editor.busy.get_untracked() {
             return;
         }
-        if ev.ctrl_key() {
-            if ev.key() == "Enter" {
-                ev.prevent_default();
-                nav.set_annotated(true, true, editor);
-            }
+        let keys = keymap.get_untracked();
+        let press = press(&ev);
+        if keys.matches(Action::MarkAnnotated, &press) {
+            ev.prevent_default();
+            nav.set_annotated(true, true, editor);
             return;
         }
-        match ev.key().as_str() {
-            "j" => go(1),
-            "k" => go(-1),
-            "G" => go(i64::MAX),
-            "g" => {
-                let now = web_sys::js_sys::Date::now();
-                if now - last_g.get_value() <= DOUBLE_KEY {
-                    last_g.set_value(f64::NEG_INFINITY);
-                    go(i64::MIN);
-                } else {
-                    last_g.set_value(now);
-                }
-                ev.prevent_default();
-                return;
-            }
-            _ => {
-                // gg means two g presses in a row.
+        if keys.matches(Action::NextImage, &press) {
+            go(1);
+        } else if keys.matches(Action::PreviousImage, &press) {
+            go(-1);
+        } else if keys.matches(Action::LastImage, &press) {
+            go(i64::MAX);
+        } else if keys.matches(Action::FirstImage, &press) {
+            // Pressed twice in a row (gg).
+            let now = web_sys::js_sys::Date::now();
+            if now - last_g.get_value() <= DOUBLE_KEY {
                 last_g.set_value(f64::NEG_INFINITY);
-                return;
+                go(i64::MIN);
+            } else {
+                last_g.set_value(now);
             }
+            ev.prevent_default();
+            return;
+        } else {
+            last_g.set_value(f64::NEG_INFINITY);
+            return;
         }
         last_g.set_value(f64::NEG_INFINITY);
         ev.prevent_default();

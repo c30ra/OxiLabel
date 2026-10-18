@@ -15,6 +15,7 @@ use crate::{
     filmstrip::{Filmstrip, ImageNav, ImagePosition},
     api,
     pre_annotate::{RunPanel, RunScope},
+    prefs::prefs,
     side_panel::SidePanel,
     tool_options::ToolOptions,
     view_filter::{ViewFilter, ViewFilterPanel},
@@ -391,14 +392,13 @@ fn LabelPicker(labels: Vec<Label>, editor: Editor) -> impl IntoView {
 
 #[component]
 fn ToolRail(editor: Editor) -> impl IntoView {
-    let tool_button = move |tool: Tool,
-                            name: &'static str,
-                            key: &'static str,
-                            icon: &'static str| {
+    let keymap = prefs().keymap;
+    let tool_button = move |tool: Tool, name: &'static str, icon: &'static str| {
+        let key = move || keymap.with(|keys| keys.label(tool.action()));
         view! {
             <button class="tool" class:active=move || editor.tool.get() == tool aria-pressed=move || (editor.tool.get() == tool).to_string()
                 disabled=move || !editor.can_use(tool)
-                title=move || if editor.can_use(tool) { format!("{name} ({key})") } else { format!("{name}: no label allows it") }
+                title=move || if editor.can_use(tool) { format!("{name} ({})", key()) } else { format!("{name}: no label allows it") }
                 aria-label=name on:click=move |_| editor.tool.set(tool)>
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d=icon /></svg>
                 <kbd>{key}</kbd>
@@ -407,13 +407,13 @@ fn ToolRail(editor: Editor) -> impl IntoView {
     };
     view! {
         <nav class="tool-rail" aria-label="Tools">
-            {tool_button(Tool::Select, "Select", "V", "M5 3l13 8-6 1.5L9.5 19z")}
-            {tool_button(Tool::Rectangle, "Rectangle", "R", "M4 6h16v12H4z")}
-            {tool_button(Tool::Polygon, "Polygon", "P", "M12 3l8 6-3 11H7L4 9z")}
-            {tool_button(Tool::Polyline, "Polyline", "L", "M3 18l5-9 5 6 8-11")}
-            {tool_button(Tool::Ellipse, "Ellipse", "C", "M3 12a9 6 0 1 0 18 0a9 6 0 1 0 -18 0")}
-            {tool_button(Tool::Brush, "Brush", "B", "M4 20c3 0 5-1.5 5-4a3 3 0 0 0-3-3c-2 0-3 1.5-3 3.5 0 1.5-.5 2.5-1 3.5z M9 13l10-10 2 2-10 10")}
-            {tool_button(Tool::Points, "Points", ".", "M4.4 7a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0 M15.4 6a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0 M9.9 12.5a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0 M5.4 18a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0 M16.4 17a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0")}
+            {tool_button(Tool::Select, "Select", "M5 3l13 8-6 1.5L9.5 19z")}
+            {tool_button(Tool::Rectangle, "Rectangle", "M4 6h16v12H4z")}
+            {tool_button(Tool::Polygon, "Polygon", "M12 3l8 6-3 11H7L4 9z")}
+            {tool_button(Tool::Polyline, "Polyline", "M3 18l5-9 5 6 8-11")}
+            {tool_button(Tool::Ellipse, "Ellipse", "M3 12a9 6 0 1 0 18 0a9 6 0 1 0 -18 0")}
+            {tool_button(Tool::Brush, "Brush", "M4 20c3 0 5-1.5 5-4a3 3 0 0 0-3-3c-2 0-3 1.5-3 3.5 0 1.5-.5 2.5-1 3.5z M9 13l10-10 2 2-10 10")}
+            {tool_button(Tool::Points, "Points", "M4.4 7a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0 M15.4 6a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0 M9.9 12.5a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0 M5.4 18a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0 M16.4 17a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0")}
         </nav>
     }
 }

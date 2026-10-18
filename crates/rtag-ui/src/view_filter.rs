@@ -9,7 +9,12 @@ use leptos::{ev, prelude::*};
 use rtag_core::filter::{Filter, Preset};
 use serde::{Deserialize, Serialize};
 
-use crate::viewer::typing_in_a_field;
+use rtag_core::keymap::Action;
+
+use crate::{
+    prefs::{prefs, press},
+    viewer::typing_in_a_field,
+};
 
 /// How long the parameters must rest before the server is asked for the filtered view.
 const APPLY_DELAY: Duration = Duration::from_millis(300);
@@ -180,15 +185,16 @@ impl ViewFilter {
 
 #[component]
 pub fn ViewFilterPanel(filter: ViewFilter) -> impl IntoView {
-    // Hold O for the original.
+    // Hold O (or the user's key) for the original.
+    let keymap = prefs().keymap;
     let down = window_event_listener(ev::keydown, move |ev| {
-        if ev.key().eq_ignore_ascii_case("o") && !typing_in_a_field() && !ev.ctrl_key() && !ev.meta_key() && !ev.alt_key() {
+        if !typing_in_a_field() && keymap.with_untracked(|keys| keys.matches(Action::Original, &press(&ev))) {
             filter.original.set(true);
             ev.prevent_default();
         }
     });
     let up = window_event_listener(ev::keyup, move |ev| {
-        if ev.key().eq_ignore_ascii_case("o") {
+        if keymap.with_untracked(|keys| keys.is_key(Action::Original, &ev.key())) {
             filter.original.set(false);
         }
     });

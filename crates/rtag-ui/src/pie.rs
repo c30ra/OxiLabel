@@ -23,6 +23,8 @@ pub enum PieAction {
     Label(i64),
     /// Opens the searchable list of all labels.
     MoreLabels,
+    /// Opens the label pie (the options pie's Label slice).
+    Labels,
     ToggleSquare,
     ToggleFromCentre,
     /// Rectangle: three points for an oriented rectangle (true) or two for a box (false).

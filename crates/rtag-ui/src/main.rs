@@ -7,6 +7,7 @@ mod filmstrip;
 mod masks;
 mod pages;
 mod pie;
+mod prefs;
 mod pre_annotate;
 mod side_panel;
 mod tool_options;
@@ -21,25 +22,34 @@ use leptos_router::{
 
 use account::{Account, SignIn};
 use pages::{ModelsPage, ProjectPage, ProjectsPage, SettingsPage, Tab, UsersPage, WorkspacePage};
-use rtag_core::user::Session;
+use rtag_core::{settings::UserSettings, user::Session};
 
 /// The pages, once someone is signed in; before that the sign-in (or first account) form.
 #[component]
 fn App() -> impl IntoView {
-    let session = LocalResource::new(|| api::get::<Session>("/api/session"));
+    // The session, with the signed-in user's own settings (the defaults if they cannot be read).
+    let session = LocalResource::new(|| async {
+        let session = api::get::<Session>("/api/session").await?;
+        let settings = match session.user {
+            Some(_) => api::get::<UserSettings>("/api/me/settings").await.unwrap_or_default(),
+            None => UserSettings::default(),
+        };
+        Ok::<_, String>((session, settings))
+    });
     let refresh = Callback::new(move |()| session.refetch());
     view! {
         <Router>
             {move || match session.get() {
                 None => view! { <p class="page muted">"Loading…"</p> }.into_any(),
                 Some(Err(message)) => view! { <p class="page error" role="alert">{message}</p> }.into_any(),
-                Some(Ok(Session { setup, user: None })) => {
+                Some(Ok((Session { setup, user: None }, _))) => {
                     api::on_signed_out(None);
                     view! { <SignIn setup=setup on_signed_in=refresh /> }.into_any()
                 }
-                Some(Ok(Session { user: Some(user), .. })) => {
+                Some(Ok((Session { user: Some(user), .. }, settings))) => {
                     api::on_signed_out(Some(refresh));
                     provide_context(Account { user, refresh });
+                    prefs::Prefs::provide(settings);
                     view! {
                         <Routes fallback=|| view! { <p class="page">"Page not found."</p> }>
                             <Route path=path!("/") view=ProjectsPage />

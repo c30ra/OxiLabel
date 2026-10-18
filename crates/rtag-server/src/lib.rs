@@ -13,6 +13,7 @@ mod labels;
 mod projects;
 mod thumbnails;
 mod tiles;
+mod user_settings;
 mod users;
 mod worker_process;
 
@@ -115,6 +116,7 @@ pub async fn app(config: Config) -> Result<Router, sqlx::Error> {
         .merge(jobs::routes())
         .merge(cvat::routes())
         .merge(archives::routes())
+        .merge(user_settings::routes())
         .merge(inference::routes())
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_session));
     // The worker as an admin set it up (started now, if the server runs it).

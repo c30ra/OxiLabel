@@ -40,7 +40,9 @@ use rtag_core::{
     pyramid::Pyramid,
     history::{Edit, History},
     oriented::OrientedRect,
-    pie::{Compass, FLICK_DISTANCE, is_tap},
+    keymap::Action,
+    pie::{Compass, is_tap},
+    settings::LabelStyle,
     view::View,
 };
 
@@ -49,6 +51,7 @@ use crate::{
     analysis::Analysis,
     masks::{FillPreview, SpriteCache, Stroke},
     pie::{LabelSearch, Pie, PieAction, PieItem, PieMenu, SearchEntry, now},
+    prefs::{prefs, press},
     side_panel,
     viewer::{context_2d, typing_in_a_field},
 };
@@ -129,20 +132,23 @@ impl Tool {
         }
     }
 
-    /// The tool a key switches to.
-    fn for_key(key: &str) -> Option<Tool> {
-        match key {
-            "v" | "V" => Some(Tool::Select),
-            "r" | "R" => Some(Tool::Rectangle),
-            "p" | "P" => Some(Tool::Polygon),
-            "l" | "L" => Some(Tool::Polyline),
-            "." => Some(Tool::Points),
-            "c" | "C" => Some(Tool::Ellipse),
-            "b" | "B" => Some(Tool::Brush),
-            _ => None,
+    /// The action that switches to the tool.
+    pub fn action(self) -> Action {
+        match self {
+            Tool::Select => Action::Select,
+            Tool::Rectangle => Action::Rectangle,
+            Tool::Polygon => Action::Polygon,
+            Tool::Polyline => Action::Polyline,
+            Tool::Points => Action::Points,
+            Tool::Ellipse => Action::Ellipse,
+            Tool::Brush => Action::Brush,
+            Tool::Tag => Action::Tag,
         }
     }
 }
+
+/// The tools a key selects directly (Tag opens its label pie instead).
+const KEY_TOOLS: [Tool; 7] = [Tool::Select, Tool::Rectangle, Tool::Polygon, Tool::Polyline, Tool::Points, Tool::Ellipse, Tool::Brush];
 
 /// The annotations of the open image and everything that changes them. All changes go through
 /// the undo history.
@@ -553,6 +559,10 @@ pub fn AnnotationLayer(
     space_held: RwSignal<bool>,
 ) -> impl IntoView {
     let canvas_ref = NodeRef::<html::Canvas>::new();
+    let prefs = prefs();
+    let keymap = prefs.keymap;
+    // A key's label in the user's keymap, for the pies.
+    let key_of = move |action: Action| Some(keymap.with_untracked(|keys| keys.label(action))).filter(|label| !label.is_empty());
     let gesture = RwSignal::new(Gesture::Idle);
     let cursor = RwSignal::new("default");
     let colors: StoredValue<HashMap<i64, String>> =
@@ -960,10 +970,10 @@ pub fn AnnotationLayer(
     };
     let allows = |label: &Label, shapes: &[ShapeType]| shapes.iter().all(|shape| label.shape_types.contains(shape));
 
-    let item = |slot, name: &str, key: Option<&str>, enabled, current, action| PieItem {
+    let item = |slot, name: &str, key: Option<String>, enabled, current, action| PieItem {
         slot,
         name: name.to_owned(),
-        key: key.map(str::to_owned),
+        key,
         swatch: None,
         enabled,
         current,
@@ -971,17 +981,17 @@ pub fn AnnotationLayer(
     };
     let tool_pie = move |centre: Point, held: bool| {
         let current = editor.tool.get_untracked();
-        let tool = |slot, tool: Tool, key: &str| item(slot, tool.name(), Some(key), editor.can_use(tool), tool == current, PieAction::Tool(tool));
+        let tool = |slot, tool: Tool| item(slot, tool.name(), key_of(tool.action()), editor.can_use(tool), tool == current, PieAction::Tool(tool));
         // The approved layout.
         let items = vec![
-            tool(Compass::N, Tool::Select, "V"),
-            tool(Compass::NE, Tool::Rectangle, "R"),
-            tool(Compass::E, Tool::Polygon, "P"),
-            tool(Compass::SE, Tool::Points, "."),
-            tool(Compass::S, Tool::Polyline, "L"),
-            tool(Compass::SW, Tool::Brush, "B"),
-            tool(Compass::W, Tool::Ellipse, "C"),
-            tool(Compass::NW, Tool::Tag, "T"),
+            tool(Compass::N, Tool::Select),
+            tool(Compass::NE, Tool::Rectangle),
+            tool(Compass::E, Tool::Polygon),
+            tool(Compass::SE, Tool::Points),
+            tool(Compass::S, Tool::Polyline),
+            tool(Compass::SW, Tool::Brush),
+            tool(Compass::W, Tool::Ellipse),
+            tool(Compass::NW, Tool::Tag),
         ];
         Pie { label: "Tools", items, centre, wide: false, held, opened_at: now() }
     };
@@ -1007,7 +1017,7 @@ pub fn AnnotationLayer(
                 .collect()
         });
         if all_labels.with_value(|labels| labels.len() > slots.len()) {
-            items.push(item(Compass::NW, "More…", Some("/"), true, false, PieAction::MoreLabels));
+            items.push(item(Compass::NW, "More…", Some("/".to_owned()), true, false, PieAction::MoreLabels));
         }
         // Not an empty ring: say why there is nothing to pick.
         if items.is_empty() {
@@ -1017,38 +1027,38 @@ pub fn AnnotationLayer(
     };
     let options_pie = move |centre: Point, held: bool| {
         let drawing = matches!(gesture.get_untracked(), Gesture::Path { .. });
-        let (label, items) = match editor.tool.get_untracked() {
+        let (label, mut items) = match editor.tool.get_untracked() {
             Tool::Rectangle => {
                 let oriented = editor.oriented.get_untracked();
                 let items = vec![
                     item(Compass::N, "2-point", None, true, !oriented, PieAction::SetOriented(false)),
                     item(Compass::E, "3-point oriented", None, true, oriented, PieAction::SetOriented(true)),
-                    item(Compass::S, "From center", Some("Alt"), !oriented, editor.from_centre.get_untracked(), PieAction::ToggleFromCentre),
-                    item(Compass::W, "Square", Some("Shift"), !oriented, editor.square.get_untracked(), PieAction::ToggleSquare),
+                    item(Compass::S, "From center", Some("Alt".to_owned()), !oriented, editor.from_centre.get_untracked(), PieAction::ToggleFromCentre),
+                    item(Compass::W, "Square", Some("Shift".to_owned()), !oriented, editor.square.get_untracked(), PieAction::ToggleSquare),
                 ];
                 ("Rectangle options", items)
             }
             Tool::Polygon => {
                 let items = vec![
-                    item(Compass::N, "Snap 15°", Some("Shift"), true, editor.snap.get_untracked(), PieAction::ToggleSnap),
-                    item(Compass::E, "Finish shape", Some("Enter"), drawing, false, PieAction::FinishShape),
-                    item(Compass::W, "Remove last point", Some("Backspace"), drawing, false, PieAction::UndoPoint),
+                    item(Compass::N, "Snap 15°", Some("Shift".to_owned()), true, editor.snap.get_untracked(), PieAction::ToggleSnap),
+                    item(Compass::E, "Finish shape", key_of(Action::Finish), drawing, false, PieAction::FinishShape),
+                    item(Compass::W, "Remove last point", key_of(Action::RemoveLastPoint), drawing, false, PieAction::UndoPoint),
                 ];
                 ("Polygon options", items)
             }
             Tool::Polyline => {
                 let freehand = editor.freehand.get_untracked();
                 let snap = if freehand {
-                    item(Compass::NE, "Snap to edges", Some("Shift"), true, editor.edge_snap.get_untracked(), PieAction::ToggleEdgeSnap)
+                    item(Compass::NE, "Snap to edges", Some("Shift".to_owned()), true, editor.edge_snap.get_untracked(), PieAction::ToggleEdgeSnap)
                 } else {
-                    item(Compass::NE, "Snap 15°", Some("Shift"), true, editor.snap.get_untracked(), PieAction::ToggleSnap)
+                    item(Compass::NE, "Snap 15°", Some("Shift".to_owned()), true, editor.snap.get_untracked(), PieAction::ToggleSnap)
                 };
                 let items = vec![
                     item(Compass::N, "Click", None, true, !freehand, PieAction::SetFreehand(false)),
                     item(Compass::S, "Freehand", None, true, freehand, PieAction::SetFreehand(true)),
                     snap,
-                    item(Compass::E, "Finish shape", Some("Enter"), drawing, false, PieAction::FinishShape),
-                    item(Compass::W, "Remove last point", Some("Backspace"), drawing, false, PieAction::UndoPoint),
+                    item(Compass::E, "Finish shape", key_of(Action::Finish), drawing, false, PieAction::FinishShape),
+                    item(Compass::W, "Remove last point", key_of(Action::RemoveLastPoint), drawing, false, PieAction::UndoPoint),
                 ];
                 ("Polyline options", items)
             }
@@ -1057,15 +1067,15 @@ pub fn AnnotationLayer(
                 let items = vec![
                     item(Compass::N, "Multiple", None, true, !single, PieAction::SetSinglePoint(false)),
                     item(Compass::S, "Single point", None, true, single, PieAction::SetSinglePoint(true)),
-                    item(Compass::E, "Finish shape", Some("Enter"), drawing, false, PieAction::FinishShape),
-                    item(Compass::W, "Remove last point", Some("Backspace"), drawing, false, PieAction::UndoPoint),
+                    item(Compass::E, "Finish shape", key_of(Action::Finish), drawing, false, PieAction::FinishShape),
+                    item(Compass::W, "Remove last point", key_of(Action::RemoveLastPoint), drawing, false, PieAction::UndoPoint),
                 ];
                 ("Points options", items)
             }
             Tool::Ellipse => {
                 let from_centre = editor.ellipse_from_centre.get_untracked();
                 let items = vec![
-                    item(Compass::N, "From center", Some("Alt"), true, from_centre, PieAction::SetEllipseFromCentre(true)),
+                    item(Compass::N, "From center", Some("Alt".to_owned()), true, from_centre, PieAction::SetEllipseFromCentre(true)),
                     item(Compass::S, "Across the box", None, true, !from_centre, PieAction::SetEllipseFromCentre(false)),
                 ];
                 ("Ellipse options", items)
@@ -1075,26 +1085,35 @@ pub fn AnnotationLayer(
                 // Both modes of each pair, the current one marked; then the mode's own options.
                 let mut items = vec![
                     item(Compass::N, "Paint", None, true, !fill, PieAction::SetFill(false)),
-                    item(Compass::NE, "Fuzzy fill", Some("U"), true, fill, PieAction::SetFill(true)),
-                    item(Compass::S, "Brush", Some("B"), true, !eraser, PieAction::SetEraser(false)),
-                    item(Compass::SE, "Eraser", Some("E"), true, eraser, PieAction::SetEraser(true)),
+                    item(Compass::NE, "Fuzzy fill", key_of(Action::FuzzyFill), true, fill, PieAction::SetFill(true)),
+                    item(Compass::S, "Brush", key_of(Action::Brush), true, !eraser, PieAction::SetEraser(false)),
+                    item(Compass::SE, "Eraser", key_of(Action::Eraser), true, eraser, PieAction::SetEraser(true)),
                 ];
                 if fill {
                     items.extend([
-                        item(Compass::E, "Higher threshold", Some("]"), true, false, PieAction::Threshold(true)),
-                        item(Compass::W, "Lower threshold", Some("["), true, false, PieAction::Threshold(false)),
+                        item(Compass::E, "Higher threshold", key_of(Action::Larger), true, false, PieAction::Threshold(true)),
+                        item(Compass::W, "Lower threshold", key_of(Action::Smaller), true, false, PieAction::Threshold(false)),
                     ]);
                 } else {
                     items.extend([
-                        item(Compass::E, "Larger", Some("]"), true, false, PieAction::BrushSize(true)),
-                        item(Compass::W, "Smaller", Some("["), true, false, PieAction::BrushSize(false)),
-                        item(Compass::NW, "Stop at edges", Some("Shift"), true, editor.stop_at_edges.get_untracked(), PieAction::ToggleStopAtEdges),
+                        item(Compass::E, "Larger", key_of(Action::Larger), true, false, PieAction::BrushSize(true)),
+                        item(Compass::W, "Smaller", key_of(Action::Smaller), true, false, PieAction::BrushSize(false)),
+                        item(Compass::NW, "Stop at edges", Some("Shift".to_owned()), true, editor.stop_at_edges.get_untracked(), PieAction::ToggleStopAtEdges),
                     ]);
                 }
                 ("Brush options", items)
             }
             Tool::Select | Tool::Tag => ("Options", Vec::new()),
         };
+        // The "label slice" style: the labels are a flick away from the tool's options.
+        if prefs.settings.with_untracked(|s| s.label_style) == LabelStyle::OptionsRing && !items.is_empty() {
+            let free = [Compass::SW, Compass::NE, Compass::SE, Compass::NW, Compass::E, Compass::W, Compass::S, Compass::N]
+                .into_iter()
+                .find(|slot| items.iter().all(|item| item.slot != *slot));
+            if let Some(slot) = free {
+                items.push(item(slot, "Label…", key_of(Action::LabelPie), true, false, PieAction::Labels));
+            }
+        }
         // Four wide buttons, unless an option needs a diagonal slot.
         let wide = items.iter().all(|item| matches!(item.slot, Compass::N | Compass::E | Compass::S | Compass::W));
         Pie { label, items, centre, wide, held, opened_at: now() }
@@ -1190,6 +1209,11 @@ pub fn AnnotationLayer(
             }
             PieAction::Label(id) => finish_label(id),
             PieAction::MoreLabels => search.set(Some(centre)),
+            PieAction::Labels => {
+                let at = cursor_at.get_value();
+                pointer.set(at);
+                pie.set(Some(label_pie(at, trigger_down.get_value())));
+            }
             PieAction::ToggleSquare => {
                 close_pie();
                 editor.square.update(|on| *on = !*on);
@@ -1325,7 +1349,7 @@ pub fn AnnotationLayer(
         let Some(open) = pie.get_untracked() else { return };
         pointer.set(at);
         // Flick: moving far enough picks at once, whether the pie is held or open for clicking.
-        if (at.x - open.centre.x).hypot(at.y - open.centre.y) >= FLICK_DISTANCE
+        if (at.x - open.centre.x).hypot(at.y - open.centre.y) >= prefs.settings.with_untracked(|s| s.flick_distance)
             && let Some(action) = open.highlighted(at).map(|item| item.action.clone())
         {
             choose(action);
@@ -1338,7 +1362,8 @@ pub fn AnnotationLayer(
         }
     });
     let key_ups = window_event_listener(ev::keyup, move |ev| {
-        if ev.key().eq_ignore_ascii_case("q") {
+        let keys = keymap.get_untracked();
+        if keys.is_key(Action::Pie, &ev.key()) || keys.is_key(Action::LabelPie, &ev.key()) {
             trigger_down.set_value(false);
             release();
         }
@@ -1769,37 +1794,37 @@ pub fn AnnotationLayer(
             return;
         }
         let key = ev.key();
-        let command = ev.ctrl_key() || ev.meta_key();
+        let keys = keymap.get_untracked();
+        let press = press(&ev);
+        let is = |action| keys.matches(action, &press);
         // While a pie is open its keys pick its items; Esc closes it.
         if let Some(open) = pie.get_untracked() {
-            match key.as_str() {
-                "Escape" => close_pie(),
-                "q" | "Q" => {}
-                _ => match open.item_for_key(&key).map(|item| item.action.clone()) {
+            if key == "Escape" || is(Action::Cancel) {
+                close_pie();
+            } else if !is(Action::Pie) && !is(Action::LabelPie) {
+                match open.item_for_key(&key).map(|item| item.action.clone()) {
                     Some(action) => choose(action),
                     None => return,
-                },
+                }
             }
             ev.prevent_default();
             return;
         }
         if let Gesture::BrushSizing { before, .. } = gesture.get_untracked() {
-            match key.as_str() {
-                "f" | "F" | "Enter" => gesture.set(Gesture::Idle),
-                "Escape" => {
-                    editor.brush_size.set(before);
-                    gesture.set(Gesture::Idle);
-                }
-                _ => {}
+            if is(Action::ResizeBrush) || is(Action::Finish) {
+                gesture.set(Gesture::Idle);
+            } else if is(Action::Cancel) {
+                editor.brush_size.set(before);
+                gesture.set(Gesture::Idle);
             }
             ev.prevent_default();
             return;
         }
-        if key.eq_ignore_ascii_case("q") && !command && !ev.alt_key() {
+        if is(Action::Pie) || is(Action::LabelPie) {
             if !ev.repeat() {
                 trigger_down.set_value(true);
-                // Shift+Q opens only the label pie; releasing Q over a label picks it too.
-                open_pie(true, ev.shift_key());
+                // The label pie key opens only the label pie; releasing it over a label picks it too.
+                open_pie(true, is(Action::LabelPie));
             }
             ev.prevent_default();
             return;
@@ -1807,92 +1832,96 @@ pub fn AnnotationLayer(
         let drawing_path = matches!(gesture.get_untracked(), Gesture::Path { .. });
         // A stroke keeps the indices of the masks it changes: no undo or redo under it.
         let painting = gesture.get_untracked() == Gesture::Painting;
-        match key.as_str() {
-            "z" | "Z" | "y" | "Y" if command && painting => {}
-            "z" | "Z" if command && ev.shift_key() => editor.redo(),
-            "z" | "Z" if command => editor.undo(),
-            "y" | "Y" if command => editor.redo(),
-            // Blender: A selects everything, Alt+A nothing.
-            "a" | "A" if ev.alt_key() => editor.selection.set(BTreeSet::new()),
-            // Everything visible: hidden shapes are not picked.
-            "a" | "A" if !command => {
-                let threshold = editor.pre_annotation_threshold.get_untracked();
-                let visible = editor.annotations.with_untracked(|list| list.iter().enumerate().filter(|(_, a)| a.shown(threshold)).map(|(i, _)| i).collect());
-                editor.selection.set(visible);
-            }
-            _ if command || ev.alt_key() => return,
-            "Enter" if drawing_path => finish_path(),
-            "[" | "]" if editor.tool.get_untracked() == Tool::Brush && editor.fill.get_untracked() => change_threshold(key == "]"),
-            "[" | "]" if editor.tool.get_untracked() == Tool::Brush => resize_brush(key == "]"),
-            // F: resize the outline where it is, by moving the pointer right or left.
-            "f" | "F" if editor.tool.get_untracked() == Tool::Brush && !editor.fill.get_untracked() && gesture.get_untracked() == Gesture::Idle => {
-                let Some(centre) = hover.get_untracked() else { return };
-                gesture.set(Gesture::BrushSizing { centre, before: editor.brush_size.get_untracked() });
-            }
-            "[" | "]" if editor.tool.get_untracked() == Tool::Polyline => {
-                let factor = if key == "]" { SIZE_STEP } else { 1.0 / SIZE_STEP };
-                editor.spacing.update(|spacing| *spacing = (*spacing * factor).clamp(MIN_SPACING, MAX_SPACING));
-                editor.notice.set(Some(format!("Freehand spacing {:.0} px", editor.spacing.get_untracked())));
-            }
-            "Backspace" if drawing_path => undo_point(),
-            "Escape" => {
-                if gesture.get_untracked() != Gesture::Idle {
-                    cancel_gesture();
-                } else if !editor.selection.with_untracked(BTreeSet::is_empty) {
-                    editor.selection.set(BTreeSet::new());
-                } else {
-                    editor.tool.set(Tool::Select);
-                }
-            }
-            "Delete" | "Backspace" | "x" | "X" => editor.delete_selected(),
-            // E is the brush in eraser mode, B in paint mode (Blender has no eraser tool either).
-            "e" | "E" | "u" | "U" | "b" | "B" | "t" | "T" if !editor.can_use(if key.eq_ignore_ascii_case("t") { Tool::Tag } else { Tool::Brush }) => {
-                let tool = if key.eq_ignore_ascii_case("t") { Tool::Tag } else { Tool::Brush };
+        let tool = editor.tool.get_untracked();
+        let (smaller, larger) = (is(Action::Smaller), is(Action::Larger));
+        let brush_tool = |tool: Tool| {
+            if editor.can_use(tool) {
+                true
+            } else {
                 editor.notice.set(Some(Editor::unusable_notice(tool)));
+                false
             }
-            "e" | "E" => {
+        };
+        if (is(Action::Undo) || is(Action::Redo)) && painting {
+        } else if is(Action::Redo) {
+            editor.redo();
+        } else if is(Action::Undo) {
+            editor.undo();
+        } else if is(Action::SelectNone) {
+            editor.selection.set(BTreeSet::new());
+        } else if is(Action::SelectAll) {
+            // Everything shown: hidden shapes are not picked.
+            let threshold = editor.pre_annotation_threshold.get_untracked();
+            let visible = editor.annotations.with_untracked(|list| list.iter().enumerate().filter(|(_, a)| a.shown(threshold)).map(|(i, _)| i).collect());
+            editor.selection.set(visible);
+        } else if is(Action::Finish) && drawing_path {
+            finish_path();
+        } else if (smaller || larger) && tool == Tool::Brush && editor.fill.get_untracked() {
+            change_threshold(larger);
+        } else if (smaller || larger) && tool == Tool::Brush {
+            resize_brush(larger);
+        } else if is(Action::ResizeBrush) && tool == Tool::Brush && !editor.fill.get_untracked() && gesture.get_untracked() == Gesture::Idle {
+            // Resize the outline where it is, by moving the pointer right or left.
+            let Some(centre) = hover.get_untracked() else { return };
+            gesture.set(Gesture::BrushSizing { centre, before: editor.brush_size.get_untracked() });
+        } else if (smaller || larger) && tool == Tool::Polyline {
+            let factor = if larger { SIZE_STEP } else { 1.0 / SIZE_STEP };
+            editor.spacing.update(|spacing| *spacing = (*spacing * factor).clamp(MIN_SPACING, MAX_SPACING));
+            editor.notice.set(Some(format!("Freehand spacing {:.0} px", editor.spacing.get_untracked())));
+        } else if is(Action::RemoveLastPoint) && drawing_path {
+            undo_point();
+        } else if is(Action::Cancel) {
+            if gesture.get_untracked() != Gesture::Idle {
+                cancel_gesture();
+            } else if !editor.selection.with_untracked(BTreeSet::is_empty) {
+                editor.selection.set(BTreeSet::new());
+            } else {
+                editor.tool.set(Tool::Select);
+            }
+        } else if is(Action::Delete) {
+            editor.delete_selected();
+        } else if is(Action::Eraser) {
+            // The brush in eraser mode (Blender has no eraser tool either).
+            if brush_tool(Tool::Brush) {
                 cancel_gesture();
                 editor.tool.set(Tool::Brush);
                 editor.eraser.set(true);
             }
-            // T: the label pie, whose label is toggled as a tag of the image.
-            "t" | "T" => {
+        } else if is(Action::FuzzyFill) {
+            // The brush's fuzzy fill (U, GIMP's fuzzy select key).
+            if brush_tool(Tool::Brush) {
+                cancel_gesture();
+                editor.tool.set(Tool::Brush);
+                editor.fill.set(true);
+                editor.eraser.set(false);
+            }
+        } else if is(Action::Tag) {
+            // The label pie, whose label is toggled as a tag of the image.
+            if brush_tool(Tool::Tag) {
                 close_pie();
                 pending_tool.set_value(Some(Tool::Tag));
                 let at = cursor_at.get_value();
                 pointer.set(at);
                 pie.set(Some(label_pie(at, false)));
             }
-            // U: the brush's fuzzy fill (GIMP's fuzzy select key).
-            "u" | "U" => {
+        } else if let Some(tool) = KEY_TOOLS.into_iter().find(|tool| is(tool.action())) {
+            if brush_tool(tool) {
                 cancel_gesture();
-                editor.tool.set(Tool::Brush);
-                editor.fill.set(true);
-                editor.eraser.set(false);
-            }
-            _ => {
-                if let Some(tool) = Tool::for_key(&key).filter(|tool| !editor.can_use(*tool)) {
-                    editor.notice.set(Some(Editor::unusable_notice(tool)));
-                } else if let Some(tool) = Tool::for_key(&key) {
-                    cancel_gesture();
-                    editor.tool.set(tool);
-                    if tool == Tool::Brush {
-                        editor.eraser.set(false);
-                        editor.fill.set(false);
-                    }
-                } else if let Some((_, id)) = hotkeys.iter().find(|(hotkey, _)| hotkey.eq_ignore_ascii_case(&key)) {
-                    match editor.tool.get_untracked().shape_type() {
-                        Some(shape) if !label_allows(*id, shape) => editor.notice.set(Some(format!(
-                            "“{}” cannot be used for {} shapes.",
-                            label_name(*id),
-                            editor.tool.get_untracked().name().to_lowercase()
-                        ))),
-                        _ => editor.label.set(Some(*id)),
-                    }
-                } else {
-                    return;
+                editor.tool.set(tool);
+                if tool == Tool::Brush {
+                    editor.eraser.set(false);
+                    editor.fill.set(false);
                 }
             }
+        } else if let Some((_, id)) = hotkeys.iter().find(|(hotkey, _)| !press.ctrl && !press.alt && hotkey.eq_ignore_ascii_case(&key)) {
+            match tool.shape_type() {
+                Some(shape) if !label_allows(*id, shape) => {
+                    editor.notice.set(Some(format!("“{}” cannot be used for {} shapes.", label_name(*id), tool.name().to_lowercase())))
+                }
+                _ => editor.label.set(Some(*id)),
+            }
+        } else {
+            return;
         }
         ev.prevent_default();
     });

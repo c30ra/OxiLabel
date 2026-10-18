@@ -861,7 +861,7 @@ tests.push({
     await t.b.waitFor(() => t.b.eval(`document.querySelectorAll('.filmstrip a.thumb').length === 6`), 'six thumbnails');
     await t.b.key('j'); await waitAt(1);
     await t.b.key('k'); await waitAt(0);
-    await t.b.key('G'); await waitAt(5);
+    await t.b.key('G', [KEY.shift]); await waitAt(5);
     await t.b.key('g'); await t.b.key('g'); await waitAt(0);
     await clickIn(t, `.filmstrip a.thumb[href$="/images/${ids[2]}"]`); await waitAt(2);
 
@@ -1485,5 +1485,56 @@ tests.push({
     const page = await t.api.call('GET', `/api/projects/${id}/images`);
     const { annotations } = await t.api.call('GET', `/api/projects/${id}/images/${page.images[0].id}/annotations`);
     equal(annotations, (await t.api.annotations(t.project)).annotations, 'annotations');
+  },
+});
+
+tests.push({
+  name: 'own settings: a rebound key, flagged clashes, the flick distance, the label slice and the theme',
+  async run(t) {
+    const change = (action, how = 'change') => t.b.eval(`document.querySelector('.shortcuts-table tr[data-action="${action}"] button.${how}').click(), 1`);
+    const stored = () => t.api.call('GET', '/api/me/settings');
+    try {
+      await t.b.goto(`${t.base}/settings`);
+      await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.shortcuts-table tr[data-action="rectangle"]')`), 'the shortcuts');
+      await change('rectangle');
+      await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.shortcuts-table .capturing')`), 'waiting for a key');
+      await t.b.key('w');
+      await t.b.waitFor(async () => (await stored()).shortcuts.rectangle?.[0]?.key === 'w', 'the saved key');
+      // W for polygon too: both rows are flagged.
+      await change('polygon', 'add');
+      await t.b.key('w');
+      await t.b.waitFor(() => t.b.eval(`document.querySelector('.conflict-count')?.textContent === '1 key is used twice'`), 'the clash');
+      equal(await t.b.json(`[...document.querySelectorAll('.shortcuts-table tr.conflict')].map((r) => r.dataset.action)`), ['rectangle', 'polygon'], 'flagged rows');
+      await change('polygon', 'reset');
+      await t.b.waitFor(() => t.b.eval(`!document.querySelector('.conflict-count')`), 'no clash');
+
+      // Light theme at once, and the label slice; a far flick distance.
+      await t.b.eval(`document.querySelector('.theme input[value="Light"]').click(), 1`);
+      await t.b.waitFor(() => t.b.eval(`document.documentElement.dataset.theme === 'light'`), 'the light theme');
+      await t.b.eval(`document.querySelector('.label-style input[value="options_ring"]').click(), 1`);
+      await t.b.eval(`(() => { const r = document.querySelector('.flick-distance'); r.value = '400'; r.dispatchEvent(new Event('change', { bubbles: true })); return 1; })()`);
+      await t.b.waitFor(async () => { const s = await stored(); return s.theme === 'light' && s.label_style === 'options_ring' && s.flick_distance === 400; }, 'the saved settings');
+
+      // They follow into the workspace after a reload.
+      const w = await openWorkspace(t.b, t.base, t.project);
+      equal(await t.b.eval(`document.documentElement.dataset.theme`), 'light', 'theme after reload');
+      await t.b.key('w');
+      equal((await w.state()).tool, 'Rectangle', 'W picks the rectangle');
+      await t.b.key('r');
+      equal((await w.state()).tool, 'Rectangle', 'R does nothing now');
+      // Held, a 170 px move picks by default (150 px); at 400 px the pie stays open.
+      const [x, y] = w.at(800, 500);
+      await t.b.move(x, y);
+      await t.b.keyDown('q');
+      await t.b.move(x - 120, y + 120, 120);
+      await t.b.waitFor(async () => (await w.state()).pie === 'Rectangle options', 'the options pie still open');
+      equal((await w.state()).pieItems.map((item) => item.name).includes('Label…'), true, 'the Label slice');
+      // Released over the Label slice (south-west), it opens the label pie.
+      await t.b.keyUp('q');
+      await t.b.waitFor(async () => (await w.state()).pie === 'Labels', 'the label pie');
+      await t.b.key(KEY.escape);
+    } finally {
+      await t.api.call('PUT', '/api/me/settings', {});
+    }
   },
 });

@@ -1,13 +1,19 @@
-//! The admin's Settings screen: where the pre-annotation worker is (the command the server starts
-//! it with, and the URL it answers at), applied as soon as it is saved.
+//! The Settings screen: everyone's own settings (theme, pie sensitivity, how labels are switched
+//! while drawing, shortcuts), saved to the server as they change, and for admins where the
+//! pre-annotation worker is (the command the server starts it with, and the URL it answers at).
 
 use leptos::{prelude::*, task::spawn_local};
 use leptos_router::components::A;
-use rtag_core::inference::{DEFAULT_WORKER_URL, WorkerHealth, WorkerSettings};
+use rtag_core::{
+    inference::{DEFAULT_WORKER_URL, WorkerHealth, WorkerSettings},
+    keymap::{Action, Binding},
+    settings::{FLICK_RANGE, LabelStyle, Theme},
+};
 
 use crate::{
     account::{AccountMenu, is_admin},
     api,
+    prefs::{prefs, press},
 };
 
 #[component]
@@ -24,11 +30,8 @@ pub fn SettingsPage() -> impl IntoView {
         </header>
         <main class="page narrow settings">
             <div class="page-head"><h1>"Settings"</h1></div>
-            {if is_admin() {
-                view! { <WorkerSettingsForm /> }.into_any()
-            } else {
-                view! { <p class="muted">"Only admins change the server's settings."</p> }.into_any()
-            }}
+            <PersonalSettings />
+            {is_admin().then(|| view! { <WorkerSettingsForm /> })}
         </main>
     }
 }
@@ -112,5 +115,156 @@ fn WorkerSettingsForm() -> impl IntoView {
                 </Show>
             </div>
         </form>
+    }
+}
+
+/// The signed-in user's own settings; every change applies at once and is saved.
+#[component]
+fn PersonalSettings() -> impl IntoView {
+    let prefs = prefs();
+    let error = RwSignal::new(None::<String>);
+    let change = move |update: Box<dyn FnOnce(&mut rtag_core::settings::UserSettings)>| {
+        error.set(None);
+        prefs.change(update, move |message| error.set(Some(message)));
+    };
+    let theme = move || prefs.settings.with(|s| s.theme);
+    let style = move || prefs.settings.with(|s| s.label_style);
+    view! {
+        <section class="label-form personal-settings">
+            <h3>"Your settings"</h3>
+            <p class="muted hint">"They follow your account to every computer."</p>
+            <fieldset class="choices theme">
+                <legend>"Theme"</legend>
+                {[(Theme::Dark, "Dark"), (Theme::Light, "Light"), (Theme::System, "As the system")].map(|(value, name)| view! {
+                    <label class="choice">
+                        <input type="radio" name="theme" value=name prop:checked=move || theme() == value
+                            on:change=move |_| change(Box::new(move |s| s.theme = value)) />
+                        <span>{name}</span>
+                    </label>
+                })}
+            </fieldset>
+            <fieldset class="flick">
+                <legend>"Pie menu: flick distance"</legend>
+                <input type="range" class="flick-distance" min=FLICK_RANGE.0 max=FLICK_RANGE.1 step="10"
+                    prop:value=move || prefs.settings.with(|s| s.flick_distance).to_string()
+                    on:change:target={move |ev| if let Ok(value) = ev.target().value().parse::<f64>() { change(Box::new(move |s| s.flick_distance = value)) }} />
+                <span class="mono">{move || format!("{:.0} px", prefs.settings.with(|s| s.flick_distance))}</span>
+                <span class="muted hint">"How far the pointer goes from the pie's centre to pick by flicking; nearer picks need a click."</span>
+            </fieldset>
+            <fieldset class="choices label-style">
+                <legend>"Switching labels while drawing"</legend>
+                <label class="choice">
+                    <input type="radio" name="label-style" value="hotkeys" prop:checked=move || style() == LabelStyle::Hotkeys
+                        on:change=move |_| change(Box::new(|s| s.label_style = LabelStyle::Hotkeys)) />
+                    <span>"Number keys and the label pie key"<small class="muted">{move || format!("{} opens the label pie", prefs.keymap.with(|k| k.label(Action::LabelPie)))}</small></span>
+                </label>
+                <label class="choice">
+                    <input type="radio" name="label-style" value="options_ring" prop:checked=move || style() == LabelStyle::OptionsRing
+                        on:change=move |_| change(Box::new(|s| s.label_style = LabelStyle::OptionsRing)) />
+                    <span>"Number keys and a Label slice in the tool's options pie"</span>
+                </label>
+            </fieldset>
+            {move || error.get().map(|message| view! { <p class="error" role="alert">{message}</p> })}
+            <Shortcuts />
+        </section>
+    }
+}
+
+/// Every action's keys, with a way to set them by pressing them; keys two actions share are
+/// flagged.
+#[component]
+fn Shortcuts() -> impl IntoView {
+    let prefs = prefs();
+    // The action waiting for a key press, and whether the press replaces its keys or adds one.
+    let capturing = RwSignal::new(None::<(Action, bool)>);
+    let error = RwSignal::new(None::<String>);
+    let set = move |action: Action, bindings: Option<Vec<Binding>>| {
+        prefs.change(
+            move |s| match bindings {
+                Some(bindings) => {
+                    s.shortcuts.insert(action.id().to_owned(), bindings);
+                }
+                None => {
+                    s.shortcuts.remove(action.id());
+                }
+            },
+            move |message| error.set(Some(message)),
+        );
+    };
+    let listener = window_event_listener(leptos::ev::keydown, move |ev| {
+        let Some((action, add)) = capturing.get_untracked() else { return };
+        // A modifier alone is not a key yet.
+        if matches!(ev.key().as_str(), "Control" | "Shift" | "Alt" | "Meta" | "AltGraph" | "CapsLock") {
+            return;
+        }
+        ev.prevent_default();
+        ev.stop_propagation();
+        capturing.set(None);
+        let binding = Binding::of(&press(&ev));
+        let mut bindings = if add { prefs.keymap.with_untracked(|k| k.bindings(action).to_vec()) } else { Vec::new() };
+        if !bindings.contains(&binding) {
+            bindings.push(binding);
+        }
+        set(action, Some(bindings));
+    });
+    on_cleanup(move || listener.remove());
+    let conflicts = Memo::new(move |_| prefs.keymap.with(|k| k.conflicts()));
+    let mut groups: Vec<&'static str> = Vec::new();
+    for action in Action::ALL {
+        if !groups.contains(&action.group()) {
+            groups.push(action.group());
+        }
+    }
+    view! {
+        <div class="shortcuts">
+            <div class="shortcuts-head">
+                <h4>"Shortcuts"</h4>
+                <Show when=move || !conflicts.with(|c| c.is_empty())>
+                    <span class="error conflict-count" role="status">{move || {
+                        let n = conflicts.with(|c| c.len());
+                        format!("{n} {} used twice", if n == 1 { "key is" } else { "keys are" })
+                    }}</span>
+                </Show>
+                <button type="button" class="small reset-all" on:click=move |_| prefs.change(|s| s.shortcuts.clear(), move |message| error.set(Some(message)))>"Reset all"</button>
+            </div>
+            {move || error.get().map(|message| view! { <p class="error" role="alert">{message}</p> })}
+            {groups.into_iter().map(|group| view! {
+                <table class="labels shortcuts-table">
+                    <thead><tr><th>{group}</th><th></th><th></th></tr></thead>
+                    <tbody>
+                        {Action::ALL.iter().copied().filter(|action| action.group() == group).map(|action| {
+                            let own = move || prefs.settings.with(|s| s.shortcuts.contains_key(action.id()));
+                            view! {
+                                <tr data-action=action.id() class:conflict=move || conflicts.with(|c| prefs.keymap.with(|k| k.bindings(action).iter().any(|b| c.contains_key(b))))>
+                                    <td>{action.name()}</td>
+                                    <td class="keys"><span class="key-list">
+                                        {move || if capturing.get().is_some_and(|(a, _)| a == action) {
+                                            // Any key is taken, Escape too: backing out is a button.
+                                            view! {
+                                                <span class="capturing" role="status">"Press the keys…"</span>
+                                                <button type="button" class="small cancel-capture" on:click=move |_| capturing.set(None)>"Cancel"</button>
+                                            }.into_any()
+                                        } else {
+                                            prefs.keymap.with(|k| k.bindings(action).iter().map(|binding| {
+                                                let others: Vec<&str> = conflicts.with(|c| c.get(binding).map(|actions| actions.iter().filter(|a| **a != action).map(|a| a.name()).collect()).unwrap_or_default());
+                                                let title = if others.is_empty() { String::new() } else { format!("Also: {}", others.join(", ")) };
+                                                view! { <kbd class:clash=!others.is_empty() title=title>{binding.label()}</kbd> }
+                                            }).collect_view()).into_any()
+                                        }}
+                                    </span></td>
+                                    <td class="actions">
+                                        <button type="button" class="small change" on:click=move |_| capturing.set(Some((action, false)))>"Change"</button>
+                                        <button type="button" class="small add" title="Another key for it" on:click=move |_| capturing.set(Some((action, true)))>"+"</button>
+                                        <Show when=own>
+                                            <button type="button" class="small reset" title="Back to the default" on:click=move |_| set(action, None)>"Default"</button>
+                                        </Show>
+                                    </td>
+                                </tr>
+                            }
+                        }).collect_view()}
+                    </tbody>
+                </table>
+            }).collect_view()}
+        </div>
     }
 }
