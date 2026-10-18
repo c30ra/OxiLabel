@@ -4,7 +4,7 @@
 
 **Blocked by:** 07, 14
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] I can rebind shortcuts, and conflicting bindings are flagged
 - [x] Changing pie sensitivity changes how far I must flick, with immediate effect

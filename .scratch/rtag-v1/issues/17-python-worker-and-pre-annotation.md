@@ -4,13 +4,13 @@
 
 **Blocked by:** 05
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] The admin screen shows worker health and lets me register a model with its type, weights and class-to-label mapping
 - [x] Running a model on images creates Pre-annotations marked with their source and confidence, in original image coordinates
 - [x] Long runs show progress and can be cancelled without blocking the app
 - [x] A confidence threshold filters pre-annotations, and I can accept, edit or delete them individually or in bulk
-- [ ] The container can be run with ROCm GPU devices passed through by Podman
+- [x] The container can be run with ROCm GPU devices passed through by Podman
 - [x] API tests run the full flow against a fake worker that implements the same contract
 
 **Decisions (2026-10-17):**
@@ -23,3 +23,5 @@
 **Implementation note:** server side in `rtag-server/src/inference.rs` (worker client, models CRUD at `/api/models`, `/api/worker` health, runs at `POST /api/projects/{p}/pre-annotations` with `GET`/`DELETE /api/runs/{id}`); a run is a background task holding its status in memory, checking for cancelling between images, and writing each image's results in a transaction that replaces that model's pending ones and bumps the image version. Pre-annotations are annotations with `source` (the model's name), `confidence` and `pending`; exports skip pending ones. Classes become labels through the model's class map, else by name (ignoring case); predictions without a label, with a shape the label does not allow or outside the image are counted as left out. The worker (`worker/`, standard-library HTTP server) loads adapters (`ultralytics`, or a `.py` file) and caches loaded models; the server starts and restarts it from a command set on the Settings screen, or calls one running elsewhere (see the later note and `docs/pre-annotation.md`). UI: Models screen (`/models`, admins) with worker health and "Read classes"; "Pre-annotate…" on the project page (selection or a job) and a Pre-annotate section in the workspace's side panel (this image), both with progress and Cancel; in the workspace pending pre-annotations are dashed, a "To review" section hides those below a confidence threshold and accepts the shown ones or deletes those below in one step, each object row has ✓, and reshaping, moving, relabelling, painting or changing attributes of a pre-annotation accepts it. Checked on the author's machine: Ultralytics `yolov8n.pt` through a server-started worker on the RX 7700 XT, 11.7 s for the first image (loading), 0.1 s after. After review: a run finishing in the workspace merges its pre-annotations into the editor (one undo step) instead of reloading, so edits made meanwhile are kept and saved; bulk accept and delete skip hidden shapes, delete skips locked ones; polling stops with its panel and a run the server forgot is reported; ended runs are forgotten after 50; a cancel arriving after the last image reports the run finished; an image removed during a run is skipped; statistics leave pending pre-annotations out; the worker keeps at most two models loaded and reloads one whose weights file changed; the server stops the worker's whole process group when it stops (checked with a worker command without `exec`). Known gaps: a run is tracked by model name, so renaming a model while its pre-annotations await review leaves those to be replaced by hand; the image grid's annotation count and label usage count pending pre-annotations; the GPU container recipe in `docs/pre-annotation.md` is not tried.
 
 **Later (2026-10-18):** the author asked for a settings page instead of environment variables. Where the worker is (a start command and/or a URL) is stored in the `settings` table and edited by admins on a new Settings screen (`/settings`, `GET`/`PUT /api/settings/worker`); saving applies it at once (`worker_process.rs` stops the previous command's process group and starts the new one). `RTAG_WORKER_COMMAND` and `RTAG_WORKER_URL` are gone.
+
+**Later (2026-10-18):** approved by the author with the rest; the ROCm container recipe in `docs/pre-annotation.md` has not been run yet.
