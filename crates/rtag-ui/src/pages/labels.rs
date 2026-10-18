@@ -1,13 +1,16 @@
 use leptos::{prelude::*, task::spawn_local};
 use rtag_core::{
-    DEFAULT_LINE_WIDTH, DEFAULT_POINT_RADIUS, Label, LabelDefinition, ShapeType,
+    Footprint, Label, LabelDefinition, PointShape, ShapeType,
     annotation::LabelUsage,
     attribute::{AttributeDefinition, AttributeKind},
+    constraint::ShapeConstraints,
 };
 
 use crate::{account::is_admin, api};
 
 const DEFAULT_COLOR: &str = "#e74c3c";
+/// The shape types a label can give a fixed size.
+const SIZABLE: [ShapeType; 3] = [ShapeType::Rectangle, ShapeType::OrientedRectangle, ShapeType::Ellipse];
 
 /// The label set of one project: a table of labels and a form to add or edit one.
 #[component]
@@ -29,8 +32,9 @@ pub fn LabelSet(project: i64) -> impl IntoView {
     let shapes = RwSignal::new(ShapeType::ALL.to_vec());
     let ignore = RwSignal::new(false);
     let attributes: AttributeRows = RwSignal::new(Vec::new());
-    let line_width = RwSignal::new(DEFAULT_LINE_WIDTH);
-    let point_radius = RwSignal::new(DEFAULT_POINT_RADIUS);
+    let footprint = RwSignal::new(Footprint::default());
+    let show_footprint = RwSignal::new(true);
+    let constraints = RwSignal::new(ShapeConstraints::default());
     let error = RwSignal::new(None::<String>);
 
     let reset = move || {
@@ -41,8 +45,9 @@ pub fn LabelSet(project: i64) -> impl IntoView {
         shapes.set(ShapeType::ALL.to_vec());
         ignore.set(false);
         attributes.set(Vec::new());
-        line_width.set(DEFAULT_LINE_WIDTH);
-        point_radius.set(DEFAULT_POINT_RADIUS);
+        footprint.set(Footprint::default());
+        show_footprint.set(true);
+        constraints.set(ShapeConstraints::default());
         error.set(None);
     };
 
@@ -54,8 +59,9 @@ pub fn LabelSet(project: i64) -> impl IntoView {
         shapes.set(label.shape_types);
         ignore.set(label.ignore);
         attributes.set(attribute_rows(label.attributes));
-        line_width.set(label.line_width);
-        point_radius.set(label.point_radius);
+        footprint.set(label.footprint);
+        show_footprint.set(label.show_footprint);
+        constraints.set(label.constraints);
         error.set(None);
     };
 
@@ -63,6 +69,11 @@ pub fn LabelSet(project: i64) -> impl IntoView {
         let url = url.clone();
         move |ev: leptos::ev::SubmitEvent| {
             ev.prevent_default();
+            // Fixed sizes of shapes the label no longer allows go with them.
+            let mut fixed = constraints.get();
+            for shape in SIZABLE.into_iter().filter(|shape| !shapes.read().contains(shape)) {
+                fixed.set_size(shape, None);
+            }
             let definition = LabelDefinition {
                 name: name.get(),
                 color: color.get(),
@@ -73,8 +84,9 @@ pub fn LabelSet(project: i64) -> impl IntoView {
                     .collect(),
                 ignore: ignore.get(),
                 attributes: attributes.get().iter().map(|(_, row)| row.get()).collect(),
-                line_width: line_width.get(),
-                point_radius: point_radius.get(),
+                footprint: footprint.get(),
+                show_footprint: show_footprint.get(),
+                constraints: fixed,
             };
             let url = url.clone();
             spawn_local(async move {
@@ -146,7 +158,7 @@ pub fn LabelSet(project: i64) -> impl IntoView {
                 view! {
                     <table class="labels">
                         <thead>
-                            <tr><th>"Id"</th><th>"Name"</th><th>"Key"</th><th>"Shapes"</th><th></th></tr>
+                            <tr><th>"Id"</th><th>"Name"</th><th>"Key"</th><th>"Shapes"</th><th>"Fixed sizes"</th><th></th></tr>
                         </thead>
                         <tbody>
                             {list.into_iter().map(|label| {
@@ -154,6 +166,7 @@ pub fn LabelSet(project: i64) -> impl IntoView {
                                 let to_delete = label.clone();
                                 let on_delete = on_delete.clone();
                                 let shapes = label.shape_types.iter().map(|shape| shape.name()).collect::<Vec<_>>().join(", ");
+                                let fixed = fixed_sizes(&label);
                                 view! {
                                     <tr>
                                         <td>{label.id}</td>
@@ -164,6 +177,7 @@ pub fn LabelSet(project: i64) -> impl IntoView {
                                         </td>
                                         <td><kbd>{label.hotkey.clone()}</kbd></td>
                                         <td class="shapes">{shapes}</td>
+                                        <td class="shapes fixed">{fixed}</td>
                                         <td class="actions">
                                             {admin.then(|| view! {
                                                 <button on:click=move |_| start_edit(to_edit.clone())>"Edit"</button>
@@ -207,21 +221,45 @@ pub fn LabelSet(project: i64) -> impl IntoView {
                         </label>
                     }).collect_view()}
                 </fieldset>
+                <Show when=move || SIZABLE.iter().any(|shape| shapes.read().contains(shape))>
+                    <fieldset class="constraints">
+                        <legend>"Shape constraints"</legend>
+                        {move || SIZABLE.into_iter().filter(|shape| shapes.read().contains(shape)).map(|shape| view! {
+                            <ConstraintRow shape constraints />
+                        }).collect_view()}
+                        <span class="muted hint">"One click places a shape of this size; existing annotations keep theirs."</span>
+                    </fieldset>
+                </Show>
                 <fieldset class="sizes">
-                    <legend>"In exports"</legend>
-                    <label title="Polylines become areas this wide in YOLO segment and OBB exports">
+                    <legend>"Export footprint"</legend>
+                    <label title="Polylines become areas this wide in exports">
                         "Line width"
-                        <input class="line-width" type="number" min="0.5" step="0.5" prop:value=move || line_width.get().to_string()
-                            on:input:target={move |ev| if let Ok(v) = ev.target().value().parse::<f64>() { line_width.set(v) }} />
+                        <input class="line-width" type="number" min="0.5" step="0.5" prop:value=move || footprint.get().line_width.to_string()
+                            on:input:target={move |ev| if let Ok(v) = ev.target().value().parse::<f64>() { footprint.update(|f| f.line_width = v) }} />
                         "px"
                     </label>
-                    <label title="Points become discs of this radius in YOLO segment and OBB exports">
+                    <label title="Points become discs of this radius, or squares of twice its side, in exports">
                         "Point radius"
-                        <input class="point-radius" type="number" min="0.5" step="0.5" prop:value=move || point_radius.get().to_string()
-                            on:input:target={move |ev| if let Ok(v) = ev.target().value().parse::<f64>() { point_radius.set(v) }} />
+                        <input class="point-radius" type="number" min="0.5" step="0.5" prop:value=move || footprint.get().point_radius.to_string()
+                            on:input:target={move |ev| if let Ok(v) = ev.target().value().parse::<f64>() { footprint.update(|f| f.point_radius = v) }} />
                         "px"
                     </label>
-                    <span class="muted hint">"in original image pixels"</span>
+                    <span class="choices" role="radiogroup" aria-label="Point shape">
+                        {[(PointShape::Disc, "Disc"), (PointShape::Square, "Square")].into_iter().map(|(shape, name)| view! {
+                            <label class="check">
+                                <input type="radio" name="point-shape" class=format!("point-{}", name.to_lowercase())
+                                    prop:checked=move || footprint.get().point_shape == shape
+                                    on:change=move |_| footprint.update(|f| f.point_shape = shape) />
+                                {name}
+                            </label>
+                        }).collect_view()}
+                    </span>
+                    <label class="check">
+                        <input type="checkbox" class="show-footprint" prop:checked=show_footprint
+                            on:change:target=move |ev| show_footprint.set(ev.target().checked()) />
+                        "Show footprint in the editor"
+                    </label>
+                    <span class="muted hint">"in original image pixels; an export can change them for itself"</span>
                 </fieldset>
                 <AttributeList rows=attributes />
                 <label class="check">
@@ -239,6 +277,62 @@ pub fn LabelSet(project: i64) -> impl IntoView {
                 </div>
             </form>
         })}
+    }
+}
+
+/// A label's fixed sizes for the label table, e.g. "Rectangle 120×80, Ellipse 60×40".
+fn fixed_sizes(label: &Label) -> String {
+    SIZABLE
+        .into_iter()
+        .filter_map(|shape| label.constraints.size(shape).map(|(a, b)| format!("{} {a}×{b}", shape.name())))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// One sizable shape type of the label being edited: drawn freely, or at a fixed size (width and
+/// height, or an ellipse's two radii).
+#[component]
+fn ConstraintRow(shape: ShapeType, constraints: RwSignal<ShapeConstraints>) -> impl IntoView {
+    let (first, second, default) = match shape {
+        ShapeType::Ellipse => ("Rx", "Ry", (50.0, 50.0)),
+        _ => ("W", "H", (100.0, 100.0)),
+    };
+    let size = move || constraints.read().size(shape);
+    let set = move |size| constraints.update(|c| c.set_size(shape, size));
+    let group = format!("fixed-{}", shape.name().to_lowercase().replace(' ', "-"));
+    let (free_group, fixed_group) = (group.clone(), group.clone());
+    let number = move |index: usize, name: &'static str| {
+        let class = format!("{group}-{}", name.to_lowercase());
+        view! {
+            <label>
+                {name}
+                <input type="number" min="1" step="1" class=class
+                    prop:value=move || size().map(|s| if index == 0 { s.0 } else { s.1 }.to_string()).unwrap_or_default()
+                    on:input:target=move |ev| {
+                        if let (Ok(v), Some((a, b))) = (ev.target().value().parse::<f64>(), size()) {
+                            set(Some(if index == 0 { (v, b) } else { (a, v) }));
+                        }
+                    } />
+            </label>
+        }
+    };
+    view! {
+        <div class="constraint">
+            <span class="name">{shape.name()}</span>
+            <label class="check">
+                <input type="radio" name=free_group prop:checked=move || size().is_none() on:change=move |_| set(None) />
+                "Free"
+            </label>
+            <label class="check">
+                <input type="radio" name=fixed_group class="fixed" prop:checked=move || size().is_some() on:change=move |_| set(Some(default)) />
+                "Fixed"
+            </label>
+            <Show when=move || size().is_some() fallback={|| view! { <span class="muted">"drawn freely"</span> }}>
+                {number(0, first)}
+                {number(1, second)}
+                "px"
+            </Show>
+        </div>
     }
 }
 

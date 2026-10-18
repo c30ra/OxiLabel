@@ -2,7 +2,8 @@
 //! `data.yaml` naming the subsets and classes. Each label file has one line per object, its
 //! coordinates normalised to the image size:
 //!
-//! - detect: `class cx cy w h`, every shape as its bounding box;
+//! - detect: `class cx cy w h`, every shape as its bounding box; polylines and points as the box
+//!   of their footprint unless the export asks for their bare points;
 //! - segment: `class x1 y1 x2 y2 …`, the polygon of each area the shape covers (see `regions`);
 //! - OBB: `class x1 y1 … x4 y4`, the corners of a box: exact for (turned) rectangles, otherwise
 //!   the tightest turned box around each area.
@@ -16,7 +17,7 @@ use std::{collections::BTreeMap, fmt::Write as _, io};
 use rtag_core::{
     Label,
     annotation::{Annotation, Shape},
-    geometry::{Point, min_area_rect},
+    geometry::{Point, bounds_of, min_area_rect},
 };
 
 use crate::{
@@ -41,13 +42,26 @@ impl Exporter for YoloDetect {
         "YOLO detect"
     }
 
+    fn boxes(&self) -> bool {
+        true
+    }
+
     fn image_modes(&self) -> &'static [ImageMode] {
         IMAGE_MODES
     }
 
     fn export(&self, input: &ExportInput, sink: &mut dyn ExportSink) -> io::Result<()> {
-        export(input, sink, "detect", &|annotation, _, image| {
-            let bounds = annotation.shape.bounds();
+        export(input, sink, "detect", &|annotation, label, image| {
+            let bounds = match &annotation.shape {
+                Shape::Polyline { .. } | Shape::Points { .. } if input.footprint_bounds => {
+                    let corners = regions(annotation, &label.footprint, (image.width, image.height), Detail::Exact).concat();
+                    if corners.is_empty() {
+                        return Vec::new();
+                    }
+                    bounds_of(&corners)
+                }
+                shape => shape.bounds(),
+            };
             let (width, height) = (f64::from(image.width), f64::from(image.height));
             let (cx, cy) = ((bounds.min.x + bounds.max.x) / 2.0 / width, (bounds.min.y + bounds.max.y) / 2.0 / height);
             vec![vec![cx, cy, bounds.width() / width, bounds.height() / height]]
@@ -70,7 +84,7 @@ impl Exporter for YoloSegment {
 
     fn export(&self, input: &ExportInput, sink: &mut dyn ExportSink) -> io::Result<()> {
         export(input, sink, "segment", &|annotation, label, image| {
-            regions(annotation, label, (image.width, image.height), Detail::Simplified).iter().map(|polygon| normalised(polygon, image)).collect()
+            regions(annotation, &label.footprint, (image.width, image.height), Detail::Simplified).iter().map(|polygon| normalised(polygon, image)).collect()
         })
     }
 }
@@ -95,7 +109,7 @@ impl Exporter for YoloObb {
             // inside it).
             Shape::Ellipse(ellipse) => vec![normalised(&ellipse.bounding_box().corners(), image)],
             // Every corner, so the box encloses every pixel.
-            _ => regions(annotation, label, (image.width, image.height), Detail::Exact)
+            _ => regions(annotation, &label.footprint, (image.width, image.height), Detail::Exact)
                 .iter()
                 .map(|polygon| normalised(&min_area_rect(polygon), image))
                 .collect(),

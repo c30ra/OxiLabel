@@ -42,11 +42,14 @@ pub struct UserSettings {
     pub flick_distance: f64,
     pub label_style: LabelStyle,
     pub theme: Theme,
+    /// Whether the editor shows the export footprint of polylines and points (for labels that
+    /// show theirs).
+    pub show_footprint: bool,
 }
 
 impl Default for UserSettings {
     fn default() -> Self {
-        UserSettings { shortcuts: BTreeMap::new(), flick_distance: FLICK_DISTANCE, label_style: LabelStyle::default(), theme: Theme::default() }
+        UserSettings { shortcuts: BTreeMap::new(), flick_distance: FLICK_DISTANCE, label_style: LabelStyle::default(), theme: Theme::default(), show_footprint: true }
     }
 }
 

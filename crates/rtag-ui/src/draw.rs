@@ -2,6 +2,7 @@
 //! and a `View`, and draws in CSS pixels (the caller sets the device-pixel transform).
 
 use rtag_core::{
+    Footprint, PointShape,
     annotation::Shape,
     geometry::{Handle, Point, Rect},
     oriented::OrientedRect,
@@ -52,6 +53,58 @@ pub fn shape(context: &CanvasRenderingContext2d, view: View, shape: &Shape, look
             context.set_global_alpha(1.0);
             stroke(context, look, if look.selected { 2.5 } else { 1.5 });
         }
+    }
+}
+
+/// The export footprint of a polyline or points shape (the area exports turn it into) as a
+/// light fill with an outline. Draw footprints first on a clear canvas: each cuts its inside out
+/// of what is already there, so overlapping footprints share one outline.
+pub fn footprint(context: &CanvasRenderingContext2d, view: View, shape: &Shape, footprint: &Footprint, color: &str) {
+    match shape {
+        Shape::Polyline { points } => {
+            trace(context, view, points, false);
+            context.set_line_cap("round");
+            context.set_line_join("round");
+            let width = 2.0 * footprint.line_reach() * view.scale;
+            context.set_stroke_style_str(color);
+            context.set_global_alpha(0.8);
+            context.set_line_width(width + 3.0);
+            context.stroke();
+            context.set_global_composite_operation("destination-out").ok();
+            context.set_global_alpha(1.0);
+            context.set_line_width(width);
+            context.stroke();
+            context.set_global_composite_operation("source-over").ok();
+            context.set_global_alpha(0.22);
+            context.stroke();
+            context.set_global_alpha(1.0);
+            context.set_line_cap("butt");
+            context.set_line_join("miter");
+        }
+        Shape::Points { points } => {
+            // A point covers the pixels whose centres are within its reach: half a pixel more.
+            let reach = (footprint.point_reach() + 0.5) * view.scale;
+            context.begin_path();
+            for point in points {
+                let at = view.to_screen(*point);
+                match footprint.point_shape {
+                    PointShape::Disc => {
+                        context.move_to(at.x + reach, at.y);
+                        context.arc(at.x, at.y, reach, 0.0, std::f64::consts::TAU).ok();
+                    }
+                    PointShape::Square => context.rect(at.x - reach, at.y - reach, 2.0 * reach, 2.0 * reach),
+                }
+            }
+            context.set_fill_style_str(color);
+            context.set_global_alpha(0.22);
+            context.fill();
+            context.set_global_alpha(0.8);
+            context.set_stroke_style_str(color);
+            context.set_line_width(1.5);
+            context.stroke();
+            context.set_global_alpha(1.0);
+        }
+        _ => {}
     }
 }
 

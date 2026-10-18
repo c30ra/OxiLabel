@@ -345,7 +345,13 @@ a.button.primary { background: var(--accent); border-color: var(--accent); color
 .filmstrip .thumb.annotated .dot { background: var(--ok); border-color: var(--ok); }
 .label-form .sizes { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; }
 .label-form .sizes label { display: inline-flex; align-items: center; gap: 6px; }
-.label-form .sizes input { width: 70px; }
+.label-form .sizes input[type=number] { width: 70px; }
+.label-form .constraints { display: flex; flex-direction: column; gap: 8px; }
+.label-form .constraint { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.label-form .constraint .name { min-width: 150px; }
+.label-form .constraint label { display: inline-flex; align-items: center; gap: 6px; }
+.label-form .constraint input[type=number] { width: 70px; }
+.label-form .sizes .choices { display: inline-flex; gap: 12px; }
 
 /* View filter panel, floating over the image's top-left corner. */
 .view-filter { position: absolute; left: 16px; top: 16px; z-index: 5; width: 280px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; background: #17181BF2; border: 1px solid var(--border); border-radius: 8px; font-size: 13px; }
@@ -364,6 +370,7 @@ a.button.primary { background: var(--accent); border-color: var(--accent); color
 .view-filter .slider .value { color: var(--text); text-align: right; font-size: 12px; }
 .view-filter .reset { align-self: flex-end; height: 26px; padding: 0 10px; font-size: 12px; }
 .view-chip { height: 30px; padding: 0 10px; font-size: 13px; }
+.view-chip.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-strong); }
 
 /* Account menu in the top bar, and the sign-in screen */
 .account { display: flex; align-items: center; gap: 12px; margin-left: auto; font-size: 13px; }
@@ -456,3 +463,9 @@ select.job-filter { max-width: 14rem; }
 .shortcuts-table kbd { min-width: 24px; height: 24px; padding: 0 6px; font-size: 12px; }
 .shortcuts-table kbd.clash, .shortcuts-table tr.conflict td:first-child { color: var(--error); border-color: var(--error); }
 .shortcuts-table .capturing { color: var(--accent); }
+
+.export-dialog .footprints table { width: 100%; border-collapse: collapse; }
+.export-dialog .footprints th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; padding: 4px 8px; }
+.export-dialog .footprints td { padding: 4px 8px; }
+.export-dialog .footprints input[type=number] { width: 64px; }
+.export-dialog .footprints .changed { border-color: var(--accent); color: var(--accent); }

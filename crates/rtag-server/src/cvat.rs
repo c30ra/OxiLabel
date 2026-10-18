@@ -355,8 +355,9 @@ fn definition_of(label: &CvatLabel) -> LabelDefinition {
         shape_types: label.shape_types.clone(),
         ignore: false,
         attributes: label.attributes.clone(),
-        line_width: rtag_core::DEFAULT_LINE_WIDTH,
-        point_radius: rtag_core::DEFAULT_POINT_RADIUS,
+        footprint: rtag_core::Footprint::default(),
+        show_footprint: true,
+        constraints: Default::default(),
     }
 }
 

@@ -29,9 +29,10 @@ use std::collections::{BTreeSet, HashMap};
 
 use leptos::{ev, html, prelude::*};
 use rtag_core::{
-    Label, ShapeType,
+    Footprint, Label, ShapeType,
     annotation::{Annotation, Shape, overlapping, topmost_at},
     attribute::Attributes,
+    constraint::ShapeConstraints,
     edges::EdgeMap,
     ellipse::Ellipse,
     fill::{FillSettings, grow},
@@ -513,6 +514,9 @@ enum Gesture {
     /// An ellipse from `start` (its centre, or a corner of its box); like a rectangle, it is
     /// finished by releasing a drag or by a second click.
     Ellipse { start: Point, current: Point, dragged: bool, circle: bool, from_centre: bool },
+    /// A fixed-size shape centred on `centre`, its angle following the pointer until a second
+    /// click sets it.
+    Placing { centre: Point, angle: f64 },
     /// A brush or eraser stroke; its pixels are in the `Stroke` kept beside the gesture.
     Painting,
     /// F with the brush: the outline stays at `centre` (where the pointer was) and the size
@@ -587,6 +591,24 @@ pub fn AnnotationLayer(
     };
     let defaults = move |id: i64| conform(id, &Attributes::new());
     let label_name = move |id: i64| all_labels.with_value(|labels| labels.iter().find(|l| l.id == id).map(|l| l.name.clone()).unwrap_or_default());
+    let constraints_of = move |id: i64| all_labels.with_value(|labels| labels.iter().find(|l| l.id == id).map(|l| l.constraints).unwrap_or_default());
+    // Whether `annotation`'s label fixes the size of its shape: it can then not be resized.
+    let fixed_size = move |annotation: &Annotation| constraints_of(annotation.label).fixes(annotation.shape.shape_type());
+    // The footprints the editor shows, by label (labels that show theirs).
+    let footprints: StoredValue<HashMap<i64, Footprint>> =
+        StoredValue::new(labels.iter().filter(|label| label.show_footprint).map(|label| (label.id, label.footprint)).collect());
+    // The shape type the current tool draws and the current label's constraints, when the label
+    // fixes that type's size: the tool then places shapes instead of dragging them out.
+    let fixed_tool = move || -> Option<(ShapeType, ShapeConstraints)> {
+        let shape = match editor.tool.get_untracked() {
+            Tool::Rectangle if editor.oriented.get_untracked() => ShapeType::OrientedRectangle,
+            Tool::Rectangle => ShapeType::Rectangle,
+            Tool::Ellipse => ShapeType::Ellipse,
+            _ => return None,
+        };
+        let constraints = constraints_of(editor.label.get_untracked()?);
+        constraints.fixes(shape).then_some((shape, constraints))
+    };
 
     // Pointer position in canvas pixels and in image coordinates.
     let locate = move |ev: &ev::MouseEvent| -> Option<(Point, Point, View)> {
@@ -609,13 +631,19 @@ pub fn AnnotationLayer(
     // The handle of the single selected shape under `point`, if any.
     let grip_at = move |point: Point, scale: f64| -> Option<(usize, Grip)> {
         let index = editor.single_selection()?;
-        let shape = editor.annotation(index).filter(|a| !a.locked && a.shown(editor.pre_annotation_threshold.get_untracked()))?.shape;
+        let annotation = editor.annotation(index).filter(|a| !a.locked && a.shown(editor.pre_annotation_threshold.get_untracked()))?;
+        // A shape of fixed size moves and turns, but has no handles that resize it.
+        let fixed = fixed_size(&annotation);
+        let shape = annotation.shape;
         let reach = HANDLE_REACH / scale;
         let grip = match &shape {
+            Shape::Rectangle(_) if fixed => None,
             Shape::Rectangle(rect) => rect.handle_at(point, reach).map(|handle| Grip::Resize(handle, *rect)),
             Shape::OrientedRectangle(rect) => {
                 if rect.rotation_handle(ROTATION_HANDLE_DISTANCE / scale).distance(point) <= reach {
                     Some(Grip::Rotate(*rect))
+                } else if fixed {
+                    None
                 } else {
                     nearest(&shape.vertices(), point, reach).map(Grip::Vertex)
                 }
@@ -624,7 +652,8 @@ pub fn AnnotationLayer(
                 if ellipse.rotation_handle(ROTATION_HANDLE_DISTANCE / scale).distance(point) <= reach {
                     Some(Grip::Turn)
                 } else {
-                    nearest(&ellipse.radius_handles(), point, reach)
+                    let radii = if fixed { Vec::new() } else { ellipse.radius_handles().to_vec() };
+                    nearest(&radii, point, reach)
                         .map(Grip::Radius)
                         .or_else(|| nearest(&shape.vertices(), point, reach).map(Grip::Vertex))
                 }
@@ -1455,6 +1484,22 @@ pub fn AnnotationLayer(
             return;
         }
         let point = inside(point);
+        // A label with a fixed size places its shape: one click, and one more for its angle.
+        if let Some((shape_type, constraints)) = fixed_tool() {
+            let (centre, angle) = match gesture.get_untracked() {
+                Gesture::Placing { centre, angle } => (centre, angle),
+                _ if constraints.needs_angle(shape_type) => return gesture.set(Gesture::Placing { centre: point, angle: 0.0 }),
+                _ => (point, 0.0),
+            };
+            match constraints.place(shape_type, centre, angle, image_size.0, image_size.1) {
+                Some(shape) => add_shape(shape),
+                None => {
+                    gesture.set(Gesture::Idle);
+                    editor.notice.set(Some(format!("“{}” has a fixed size that does not fit this image.", label_name(editor.label.get_untracked().unwrap_or_default()))));
+                }
+            }
+            return;
+        }
         match (tool, gesture.get_untracked()) {
             (Tool::Rectangle, Gesture::Drawing { start, square, from_centre, .. }) => {
                 finish_rectangle(start, point, square, from_centre, current.scale)
@@ -1566,10 +1611,15 @@ pub fn AnnotationLayer(
 
     let on_pointer_move = move |ev: ev::PointerEvent| {
         let Some((screen, point, current)) = locate(&ev) else { return };
-        if editor.tool.get_untracked() == Tool::Brush {
-            hover.set(Some(point));
+        if editor.tool.get_untracked() == Tool::Brush || fixed_tool().is_some() {
+            hover.set(Some(inside(point)));
         }
         match gesture.get_untracked() {
+            // Turning a fixed-size shape: its width side points at the pointer.
+            Gesture::Placing { centre, .. } => {
+                let angle = snap_turn((point.y - centre.y).atan2(point.x - centre.x), ev.shift_key() != editor.snap.get_untracked());
+                gesture.set(Gesture::Placing { centre, angle });
+            }
             Gesture::Drawing { start, dragged, .. } => {
                 let moved = current.to_screen(start).distance(screen) > DRAG_THRESHOLD;
                 gesture.set(Gesture::Drawing {
@@ -1943,22 +1993,34 @@ pub fn AnnotationLayer(
         let gesture = gesture.get_untracked();
         let selection = editor.selection.get_untracked();
         let single = editor.single_selection();
+        // Shapes being edited show their new form.
+        let shown_shape = |index: usize, annotation: &Annotation| match &gesture {
+            Gesture::Resizing { index: i, current, .. } if *i == index => Shape::Rectangle(*current),
+            Gesture::Vertex { index: i, current, .. } if *i == index => current.clone(),
+            Gesture::Rotating { index: i, current, .. } if *i == index => Shape::OrientedRectangle(*current),
+            Gesture::Radius { index: i, current, .. } | Gesture::Turning { index: i, current, .. } if *i == index => Shape::Ellipse(*current),
+            Gesture::Moving { dx, dy, .. } if selection.contains(&index) && !annotation.locked => annotation.shape.translated(*dx, *dy),
+            _ => annotation.shape.clone(),
+        };
+        let visible = |annotation: &Annotation| !annotation.shape.is_tag() && annotation.shown(editor.pre_annotation_threshold.get_untracked());
+        // The footprints of lines and points under everything else (see `draw::footprint`).
+        if prefs.settings.with_untracked(|s| s.show_footprint) {
+            editor.annotations.with_untracked(|list| {
+                for (index, annotation) in list.iter().enumerate().filter(|(_, a)| visible(a)) {
+                    if let Some(footprint) = footprints.with_value(|map| map.get(&annotation.label).copied()) {
+                        draw::footprint(&context, current, &shown_shape(index, annotation), &footprint, &color_of(annotation.label));
+                    }
+                }
+            });
+        }
         editor.annotations.with_untracked(|list| {
             for (index, annotation) in list.iter().enumerate() {
                 // Tags are chips over the image, not drawn on it; hidden shapes are not drawn.
-                if annotation.shape.is_tag() || !annotation.shown(editor.pre_annotation_threshold.get_untracked()) {
+                if !visible(annotation) {
                     continue;
                 }
                 let selected = selection.contains(&index);
-                // Shapes being edited show their new form.
-                let shape = match &gesture {
-                    Gesture::Resizing { index: i, current, .. } if *i == index => Shape::Rectangle(*current),
-                    Gesture::Vertex { index: i, current, .. } if *i == index => current.clone(),
-                    Gesture::Rotating { index: i, current, .. } if *i == index => Shape::OrientedRectangle(*current),
-                    Gesture::Radius { index: i, current, .. } | Gesture::Turning { index: i, current, .. } if *i == index => Shape::Ellipse(*current),
-                    Gesture::Moving { dx, dy, .. } if selected && !annotation.locked => annotation.shape.translated(*dx, *dy),
-                    _ => annotation.shape.clone(),
-                };
+                let shape = shown_shape(index, annotation);
                 let color = color_of(annotation.label);
                 if let Shape::Mask(mask) = &shape {
                     // Masks the stroke changes are drawn by the stroke.
@@ -1980,17 +2042,22 @@ pub fn AnnotationLayer(
                     draw::tag(&context, current.to_screen(shape.bounds().min), &name, &color);
                 }
                 // Handles only when one shape is selected: they edit that shape.
+                // A shape of fixed size has no handles that resize it.
                 if single == Some(index) {
+                    let fixed = fixed_size(annotation);
                     match &shape {
+                        Shape::Rectangle(_) if fixed => {}
                         Shape::Rectangle(rect) => draw::rectangle_handles(&context, current, *rect, &color),
                         Shape::OrientedRectangle(rect) => {
-                            draw::vertex_handles(&context, current, &shape, &color, false);
+                            if !fixed {
+                                draw::vertex_handles(&context, current, &shape, &color, false);
+                            }
                             draw::rotation_handle(&context, current, rect.rotation_handle(0.0), rect.rotation_handle(ROTATION_HANDLE_DISTANCE / current.scale), &color);
                         }
                         Shape::Points { .. } => draw::vertex_handles(&context, current, &shape, &color, false),
                         Shape::Ellipse(ellipse) => {
                             draw::vertex_handles(&context, current, &shape, &color, false);
-                            for handle in ellipse.radius_handles() {
+                            for handle in ellipse.radius_handles().into_iter().filter(|_| !fixed) {
                                 draw::radius_handle(&context, current, handle, &color);
                             }
                             draw::rotation_handle(&context, current, ellipse.rotation_handle(0.0), ellipse.rotation_handle(ROTATION_HANDLE_DISTANCE / current.scale), &color);
@@ -2015,6 +2082,25 @@ pub fn AnnotationLayer(
             draw::brush_outline(&context, current, at, brush_radius);
         }
         let pen = editor.label.get_untracked().map(color_of).unwrap_or_else(|| "#ffffff".to_owned());
+        // The fixed-size shape the next click places: at the pointer, or turning.
+        if let Some((shape_type, constraints)) = fixed_tool() {
+            let placing = match gesture {
+                Gesture::Placing { centre, angle } => Some((centre, angle, true)),
+                Gesture::Idle => hover.get_untracked().map(|at| (at, 0.0, false)),
+                _ => None,
+            };
+            if let Some((centre, angle, turning)) = placing {
+                if let Some(shape) = constraints.place(shape_type, centre, angle, image_size.0, image_size.1) {
+                    draw::shape(&context, current, &shape, Look { color: &pen, selected: false, dashed: true });
+                    let text = match (turning, constraints.size(shape_type)) {
+                        (true, _) => format!("{:.0}°", angle.to_degrees()),
+                        (false, Some((a, b))) => format!("{a:.0} × {b:.0}"),
+                        (false, None) => String::new(),
+                    };
+                    draw::tag(&context, current.to_screen(shape.bounds().min), &text, &pen);
+                }
+            }
+        }
         match gesture {
             Gesture::Selecting { start, current: end, .. } => draw::selection_box(&context, current, Rect::from_corners(start, end)),
             Gesture::Drawing { start, current: end, square, from_centre, .. } => {
@@ -2050,6 +2136,8 @@ pub fn AnnotationLayer(
         editor.selection.track();
         editor.label.track();
         editor.tool.track();
+        editor.oriented.track();
+        prefs.settings.track();
         editor.brush_size.track();
         editor.fill.track();
         fill_drawn.track();
@@ -2058,6 +2146,13 @@ pub fn AnnotationLayer(
     });
     Effect::new(move |_| editor.busy.set(gesture.with(|g| *g != Gesture::Idle)));
     // Drop a half-drawn shape when the tool or a drawing mode changes.
+    // Another label can fix another size, or none: drop a shape being placed.
+    Effect::new(move |_| {
+        editor.label.track();
+        if matches!(gesture.get_untracked(), Gesture::Placing { .. }) {
+            gesture.set(Gesture::Idle);
+        }
+    });
     Effect::new(move |_| {
         editor.tool.track();
         editor.oriented.track();

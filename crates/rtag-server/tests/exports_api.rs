@@ -56,8 +56,11 @@ async fn the_available_formats_are_listed() {
     let app = test_app().await;
     let (status, formats) = call(&app, Method::GET, "/api/exporters", None).await;
     assert_eq!(status, StatusCode::OK);
-    let yolo = |id: &str, name: &str| json!({"id": id, "name": name, "image_modes": ["symlink", "copy"]});
-    assert_eq!(formats, json!([yolo("yolo-detect", "YOLO detect"), yolo("yolo-segment", "YOLO segment"), yolo("yolo-obb", "YOLO OBB")]));
+    let yolo = |id: &str, name: &str, boxes: bool| json!({"id": id, "name": name, "image_modes": ["symlink", "copy"], "boxes": boxes});
+    assert_eq!(
+        formats,
+        json!([yolo("yolo-detect", "YOLO detect", true), yolo("yolo-segment", "YOLO segment", false), yolo("yolo-obb", "YOLO OBB", false)])
+    );
 }
 
 #[tokio::test]
@@ -192,4 +195,35 @@ async fn invalid_exports_are_rejected() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, _, _) = get_bytes(&app, "/api/exports/..%2Fsecret/zip").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn an_export_can_override_label_footprints_and_leave_them_out_of_boxes() {
+    let app = test_app().await;
+    let (project, ids) = setup(&app).await;
+    // A point of "crack" (radius 8 by default) on c.png.
+    let url = format!("/api/projects/{project}/images/{}/annotations", ids[2]);
+    let point = json!({"label": 1, "shape": {"type": "points", "points": [{"x": 100.0, "y": 50.0}]}});
+    call(&app, Method::PUT, &url, Some(json!({"base_version": 0, "annotations": [point]}))).await;
+    let c_line = |request: Value| {
+        let app = &app;
+        async move {
+            let (status, result) = export(app, project, request).await;
+            assert_eq!(status, StatusCode::OK, "{result}");
+            fs::read_to_string(folder(app, &result).join("labels/train/set__c.txt")).unwrap()
+        }
+    };
+    let ids_c = json!({"kind": "ids", "ids": [ids[2]]});
+    assert_eq!(c_line(all_train(ids_c.clone(), "symlink")).await, "0 0.502500 0.505000 0.085000 0.170000\n", "17 × 17 pixels");
+    let mut request = all_train(ids_c.clone(), "symlink");
+    request["footprints"] = json!({"1": {"line_width": 7.0, "point_radius": 2.0, "point_shape": "square"}});
+    assert_eq!(c_line(request).await, "0 0.502500 0.505000 0.025000 0.050000\n", "5 × 5 pixels for this export");
+    let mut request = all_train(ids_c.clone(), "symlink");
+    request["footprint_bounds"] = json!(false);
+    assert_eq!(c_line(request).await, "0 0.500000 0.500000 0.000000 0.000000\n", "the bare point");
+
+    let mut request = all_train(ids_c, "symlink");
+    request["footprints"] = json!({"1": {"line_width": 0.0, "point_radius": 2.0}});
+    let (status, _) = export(&app, project, request).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }

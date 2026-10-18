@@ -1,7 +1,8 @@
 use std::io::{Cursor, Read};
 
 use rtag_core::{
-    Label, ShapeType,
+    Footprint, Label, PointShape, ShapeType,
+    constraint::{Radii, ShapeConstraints, Size},
     annotation::{Annotation, Shape},
     attribute::{AttributeDefinition, AttributeKind, AttributeValue},
     ellipse::Ellipse,
@@ -20,8 +21,9 @@ fn label(id: i64, name: &str, attributes: Vec<AttributeDefinition>) -> Label {
         shape_types: ShapeType::ALL.to_vec(),
         ignore: id == 7,
         attributes,
-        line_width: 4.5,
-        point_radius: 2.0,
+        footprint: Footprint { line_width: 4.5, point_radius: 2.0, point_shape: PointShape::Square },
+        show_footprint: id != 7,
+        constraints: ShapeConstraints { rectangle: Some(Size { width: 12.0, height: 8.0 }), ellipse: Some(Radii { rx: 3.0, ry: 2.0 }), ..Default::default() },
     }
 }
 

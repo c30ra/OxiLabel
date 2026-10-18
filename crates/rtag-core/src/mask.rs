@@ -109,6 +109,23 @@ impl Bitmap {
         covered
     }
 
+    /// Sets the pixels whose centres lie within the axis-aligned square of half-side `half`
+    /// around `centre`, inside an `image` of that size. Returns the pixels it covered.
+    pub fn paint_square(&mut self, centre: Point, half: f64, image: (u32, u32)) -> PixelRect {
+        let covered = brush_area(centre, centre, half, image);
+        if covered.is_empty() {
+            return covered;
+        }
+        self.grow_to(covered, image);
+        for y in covered.top..covered.bottom() {
+            for x in covered.left..covered.right() {
+                let offset = self.offset(x, y);
+                self.pixels[offset] = 1;
+            }
+        }
+        covered
+    }
+
     /// Clears the pixels a round eraser dragged from `from` to `to` covers. Returns the part of
     /// the bitmap it touched.
     pub fn erase(&mut self, from: Point, to: Point, radius: f64) -> PixelRect {

@@ -343,7 +343,7 @@ fn run_export(client: &Client, export: Export, out: &mut dyn Write) -> Result<()
         Include::Symlink => ImageMode::Symlink,
         Include::Copy => ImageMode::Copy,
     });
-    let request = ExportRequest { format: export.format.clone(), images, include_images, split };
+    let request = ExportRequest { format: export.format.clone(), images, include_images, split, footprints: Default::default(), footprint_bounds: true };
     let result: ExportResult = client.post(&format!("/api/projects/{}/exports", project.id), &request)?;
     client.download(&result.download, &export.out)?;
     writeln!(out, "Exported {} images with {} annotations ({}) to {}.", result.image_count, result.annotation_count, export.format, export.out.display()).map_err(|err| CliError(err.to_string(), false))

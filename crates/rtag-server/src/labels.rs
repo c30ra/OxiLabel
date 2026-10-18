@@ -4,7 +4,7 @@ use axum::{
     http::StatusCode,
     routing::{get, put},
 };
-use rtag_core::{Label, LabelDefinition, annotation::LabelUsage, attribute::Attributes};
+use rtag_core::{Footprint, Label, LabelDefinition, PointShape, annotation::LabelUsage, attribute::Attributes};
 use serde::Deserialize;
 use sqlx::{Row, SqliteConnection, SqlitePool, sqlite::SqliteRow};
 
@@ -55,7 +55,8 @@ pub(crate) async fn insert_label(conn: &mut SqliteConnection, project: i64, defi
 /// Writes `label` into the project as it is, id included.
 pub(crate) async fn store_label(conn: &mut SqliteConnection, project: i64, label: &Label) -> Result<(), ApiError> {
     sqlx::query(
-        "INSERT INTO labels (project_id, id, name, color, hotkey, shape_types, is_ignore, attributes, line_width, point_radius) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO labels (project_id, id, name, color, hotkey, shape_types, is_ignore, attributes, line_width, point_radius, point_shape, show_footprint, constraints) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(project)
     .bind(label.id)
@@ -65,8 +66,11 @@ pub(crate) async fn store_label(conn: &mut SqliteConnection, project: i64, label
     .bind(serde_json::to_string(&label.shape_types).expect("shape types serialize"))
     .bind(label.ignore)
     .bind(serde_json::to_string(&label.attributes).expect("attributes serialize"))
-    .bind(label.line_width)
-    .bind(label.point_radius)
+    .bind(label.footprint.line_width)
+    .bind(label.footprint.point_radius)
+    .bind(label.footprint.point_shape.name())
+    .bind(label.show_footprint)
+    .bind(serde_json::to_string(&label.constraints).expect("constraints serialize"))
     .execute(&mut *conn)
     .await?;
     Ok(())
@@ -102,7 +106,8 @@ async fn update_label(
     }
     let label = Label::new(id, definition.validated(&others).map_err(ApiError::BadRequest)?);
     sqlx::query(
-        "UPDATE labels SET name = ?, color = ?, hotkey = ?, shape_types = ?, is_ignore = ?, attributes = ?, line_width = ?, point_radius = ? WHERE project_id = ? AND id = ?",
+        "UPDATE labels SET name = ?, color = ?, hotkey = ?, shape_types = ?, is_ignore = ?, attributes = ?, line_width = ?, point_radius = ?, \
+         point_shape = ?, show_footprint = ?, constraints = ? WHERE project_id = ? AND id = ?",
     )
     .bind(&label.name)
     .bind(&label.color)
@@ -110,8 +115,11 @@ async fn update_label(
     .bind(serde_json::to_string(&label.shape_types).expect("shape types serialize"))
     .bind(label.ignore)
     .bind(serde_json::to_string(&label.attributes).expect("attributes serialize"))
-    .bind(label.line_width)
-    .bind(label.point_radius)
+    .bind(label.footprint.line_width)
+    .bind(label.footprint.point_radius)
+    .bind(label.footprint.point_shape.name())
+    .bind(label.show_footprint)
+    .bind(serde_json::to_string(&label.constraints).expect("constraints serialize"))
     .bind(project)
     .bind(id)
     .execute(&mut *tx)
@@ -226,7 +234,12 @@ fn label_from_row(row: &SqliteRow) -> Label {
         shape_types: serde_json::from_str(row.get("shape_types")).unwrap_or_default(),
         ignore: row.get("is_ignore"),
         attributes: serde_json::from_str(row.get("attributes")).unwrap_or_default(),
-        line_width: row.get("line_width"),
-        point_radius: row.get("point_radius"),
+        footprint: Footprint {
+            line_width: row.get("line_width"),
+            point_radius: row.get("point_radius"),
+            point_shape: PointShape::named(row.get("point_shape")),
+        },
+        show_footprint: row.get("show_footprint"),
+        constraints: serde_json::from_str(row.get("constraints")).unwrap_or_default(),
     }
 }

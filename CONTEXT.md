@@ -36,6 +36,14 @@ _Avoid_: Image label, category
 Extra named property attached to an annotation or tag (e.g. "occluded"), beyond its label.
 _Avoid_: Metadata, property
 
+**Shape constraint**:
+A label's fixed size for one shape type (width and height of a rectangle or oriented rectangle, the two radii of an ellipse), applied when an annotator draws that shape for that label. It guides drawing; it does not invalidate annotations that differ from it.
+_Avoid_: Fixed size, template, preset
+
+**Export footprint**:
+The area an exporter turns a polyline or points into: the line stroked at its label's line width, each point as a disc or square of its label's point radius. The label's values are the defaults; a single export may override them per label. The editor can show it as a ghost so the annotator sees what will be exported.
+_Avoid_: Ghost (for the area itself), buffer, halo
+
 **Enhancement filter**:
 A view-only transformation of an image (e.g. illumination flattening, local contrast) that makes faint structures visible. It never changes the image or where annotations lie; image-analysis aids such as edge snapping and fuzzy fill work on the original image unless the annotator chooses to use the filtered view.
 _Avoid_: Preprocessing, effect, enhancement (on its own)

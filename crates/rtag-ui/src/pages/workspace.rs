@@ -254,6 +254,9 @@ fn Workspace(
     };
     let (image_id, image_size) = (image.id, (image.width, image.height));
     let nav = ImageNav::new(project.id, &image);
+    let prefs = prefs();
+    let footprint_shown = move || prefs.settings.with(|s| s.show_footprint);
+    let toggle_footprint = move |_| prefs.change(|s| s.show_footprint = !s.show_footprint, move |message| editor.notice.set(Some(message)));
     Effect::new(move |_| editor.view_filter.set(view_filter.applied.get()));
 
     view! {
@@ -274,6 +277,10 @@ fn Workspace(
                     <button class="view-chip" title="View filter (hold O for the original)" aria-label="View filter"
                         on:click=move |_| view_filter.collapsed.update(|c| *c = !*c)>
                         <span class="muted">"View "</span>{move || view_filter.title()}
+                    </button>
+                    <button class="view-chip footprint-toggle" class:active=footprint_shown aria-pressed=move || footprint_shown().to_string()
+                        title="Show the export footprint of lines and points (for labels that show theirs)" on:click=toggle_footprint>
+                        "Footprint"
                     </button>
                     <button class="zoom mono" title="Zoom: click for 100% / fit (Home fits, + and − zoom)"
                         on:click=toggle_zoom>{zoom_label}</button>

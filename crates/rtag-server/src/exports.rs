@@ -43,6 +43,7 @@ async fn list_exporters(_: Admin) -> Json<Vec<ExportFormat>> {
                 id: exporter.id().to_owned(),
                 name: exporter.name().to_owned(),
                 image_modes: exporter.image_modes().to_vec(),
+                boxes: exporter.boxes(),
             })
             .collect(),
     )
@@ -74,7 +75,13 @@ async fn create_export(
             )));
         }
     };
-    let labels = labels::project_labels(&mut conn, project).await?;
+    let mut labels = labels::project_labels(&mut conn, project).await?;
+    // This export's footprints, in place of the labels' own.
+    for label in &mut labels {
+        if let Some(footprint) = request.footprints.get(&label.id) {
+            label.footprint = footprint.validated().map_err(|err| ApiError::BadRequest(format!("{}: {err}", label.name)))?;
+        }
+    }
 
     let mut annotations: HashMap<i64, Vec<Annotation>> = HashMap::new();
     for row in sqlx::query(
@@ -123,7 +130,7 @@ async fn create_export(
     }
 
     let (created, stamp) = utc_now();
-    let input = ExportInput { project: project_name.clone(), labels, images, split: request.split };
+    let input = ExportInput { project: project_name.clone(), labels, images, split: request.split, footprint_bounds: request.footprint_bounds };
     let export_dir = state.export_dir.clone();
     let format = request.format.clone();
     let (name, dir, manifest) = tokio::task::spawn_blocking(move || -> Result<_, ApiError> {

@@ -2,6 +2,7 @@
 
 pub mod annotation;
 pub mod attribute;
+pub mod constraint;
 pub mod edges;
 pub mod ellipse;
 pub mod export;
@@ -23,7 +24,7 @@ pub mod view;
 
 use serde::{Deserialize, Serialize};
 
-use crate::attribute::AttributeDefinition;
+use crate::{attribute::AttributeDefinition, constraint::ShapeConstraints};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Project {
@@ -109,12 +110,13 @@ pub struct Label {
     pub ignore: bool,
     #[serde(default)]
     pub attributes: Vec<AttributeDefinition>,
-    /// Exports that need areas (YOLO segment, OBB) draw this label's polylines this wide and its
-    /// points as discs of this radius, in original-image pixels.
-    #[serde(default = "default_line_width")]
-    pub line_width: f64,
-    #[serde(default = "default_point_radius")]
-    pub point_radius: f64,
+    #[serde(flatten)]
+    pub footprint: Footprint,
+    /// Whether the editor shows the footprint of this label's polylines and points.
+    #[serde(default = "default_true")]
+    pub show_footprint: bool,
+    #[serde(default)]
+    pub constraints: ShapeConstraints,
 }
 
 /// The defaults of `cvat_to_masks.py`.
@@ -127,6 +129,76 @@ fn default_line_width() -> f64 {
 
 fn default_point_radius() -> f64 {
     DEFAULT_POINT_RADIUS
+}
+
+pub(crate) fn default_true() -> bool {
+    true
+}
+
+/// A label's export footprint: the area its polylines and points become in exports that need
+/// areas or boxes. Polylines are stroked `line_width` wide; each point becomes a disc of
+/// `point_radius`, or a square of twice that side. In original-image pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Footprint {
+    #[serde(default = "default_line_width")]
+    pub line_width: f64,
+    #[serde(default = "default_point_radius")]
+    pub point_radius: f64,
+    #[serde(default)]
+    pub point_shape: PointShape,
+}
+
+impl Default for Footprint {
+    fn default() -> Self {
+        Footprint { line_width: DEFAULT_LINE_WIDTH, point_radius: DEFAULT_POINT_RADIUS, point_shape: PointShape::Disc }
+    }
+}
+
+impl Footprint {
+    /// Half the width of the band a polyline covers in exports, drawn like OpenCV draws thick
+    /// lines: the width cut to whole pixels (at least 1), 2·⌈w/2⌉ + 1 pixels across.
+    pub fn line_reach(&self) -> f64 {
+        let thickness = self.line_width.trunc().max(1.0);
+        if thickness == 1.0 { 0.5 } else { (thickness / 2.0).ceil() + 0.5 }
+    }
+
+    /// How far from a point's pixel centre the pixels of its area lie: the radius cut to whole
+    /// pixels (0 still covers the one pixel).
+    pub fn point_reach(&self) -> f64 {
+        self.point_radius.trunc().max(0.0)
+    }
+
+    /// The footprint made sound: a line width and a point radius above zero.
+    pub fn validated(self) -> Result<Self, String> {
+        if !(self.line_width.is_finite() && self.line_width > 0.0 && self.point_radius.is_finite() && self.point_radius > 0.0) {
+            return Err("line width and point radius must be above zero".into());
+        }
+        Ok(self)
+    }
+}
+
+/// The area each point of a points shape becomes in exports.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PointShape {
+    #[default]
+    Disc,
+    Square,
+}
+
+impl PointShape {
+    /// The name it is stored and sent as.
+    pub fn name(self) -> &'static str {
+        match self {
+            PointShape::Disc => "disc",
+            PointShape::Square => "square",
+        }
+    }
+
+    /// The point shape called `name`; anything else is a disc.
+    pub fn named(name: &str) -> PointShape {
+        if name == PointShape::Square.name() { PointShape::Square } else { PointShape::Disc }
+    }
 }
 
 /// Everything about a label except its id: what clients send to create or edit one.
@@ -142,10 +214,12 @@ pub struct LabelDefinition {
     pub ignore: bool,
     #[serde(default)]
     pub attributes: Vec<AttributeDefinition>,
-    #[serde(default = "default_line_width")]
-    pub line_width: f64,
-    #[serde(default = "default_point_radius")]
-    pub point_radius: f64,
+    #[serde(flatten)]
+    pub footprint: Footprint,
+    #[serde(default = "default_true")]
+    pub show_footprint: bool,
+    #[serde(default)]
+    pub constraints: ShapeConstraints,
 }
 
 impl LabelDefinition {
@@ -183,9 +257,8 @@ impl LabelDefinition {
             return Err("a label must allow at least one shape type".into());
         }
         self.attributes = attribute::validated(self.attributes)?;
-        if !(self.line_width.is_finite() && self.line_width > 0.0 && self.point_radius.is_finite() && self.point_radius > 0.0) {
-            return Err("line width and point radius must be above zero".into());
-        }
+        self.footprint = self.footprint.validated()?;
+        self.constraints = self.constraints.validated()?;
         Ok(self)
     }
 }
@@ -200,14 +273,14 @@ fn all_shape_types() -> Vec<ShapeType> {
 
 impl Label {
     pub fn new(id: i64, definition: LabelDefinition) -> Self {
-        let LabelDefinition { name, color, hotkey, shape_types, ignore, attributes, line_width, point_radius } = definition;
-        Label { id, name, color, hotkey, shape_types, ignore, attributes, line_width, point_radius }
+        let LabelDefinition { name, color, hotkey, shape_types, ignore, attributes, footprint, show_footprint, constraints } = definition;
+        Label { id, name, color, hotkey, shape_types, ignore, attributes, footprint, show_footprint, constraints }
     }
 
     /// Everything but the id.
     pub fn definition(&self) -> LabelDefinition {
-        let Label { name, color, hotkey, shape_types, ignore, attributes, line_width, point_radius, .. } = self.clone();
-        LabelDefinition { name, color, hotkey, shape_types, ignore, attributes, line_width, point_radius }
+        let Label { name, color, hotkey, shape_types, ignore, attributes, footprint, show_footprint, constraints, .. } = self.clone();
+        LabelDefinition { name, color, hotkey, shape_types, ignore, attributes, footprint, show_footprint, constraints }
     }
 }
 

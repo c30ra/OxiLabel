@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, fs, path::Path};
 use rtag_core::{
     Label, ShapeType,
     annotation::{Annotation, Shape},
-    geometry::Rect,
+    geometry::{Point, Rect},
 };
 use rtag_formats::{
     ExportImage, ExportInput, ImageMode, MemorySink, Split, Subset, YoloDetect, exporter, exporters, run_export,
@@ -18,8 +18,9 @@ fn label(id: i64, name: &str, ignore: bool) -> Label {
         shape_types: vec![ShapeType::Rectangle],
         ignore,
         attributes: vec![],
-        line_width: rtag_core::DEFAULT_LINE_WIDTH,
-        point_radius: rtag_core::DEFAULT_POINT_RADIUS,
+        footprint: Default::default(),
+        show_footprint: true,
+        constraints: Default::default(),
     }
 }
 
@@ -53,6 +54,7 @@ fn cells(split: Split) -> ExportInput {
             image("other/b.png", "hash-b", vec![]),
         ],
         split,
+        footprint_bounds: true,
     }
 }
 
@@ -165,4 +167,34 @@ fn exporters_are_found_by_id() {
     assert_eq!(exporter("yolo-detect").unwrap().name(), "YOLO detect");
     assert!(exporter("nope").is_none());
     assert_eq!(exporters().iter().map(|e| e.id()).collect::<Vec<_>>(), ["yolo-detect", "yolo-segment", "yolo-obb"]);
+}
+
+/// The one label line of exporting `shape` (label 1) with YOLO detect, in image pixels.
+fn detect_box(shape: Shape, footprint_bounds: bool) -> (f64, f64, f64, f64) {
+    let input = ExportInput {
+        images: vec![image("set/a.png", "hash-a", vec![Annotation::manual(1, shape)])],
+        footprint_bounds,
+        ..cells(Split { train: 100, val: 0, test: 0 })
+    };
+    let mut sink = MemorySink::default();
+    run_export(&YoloDetect, &input, &mut sink, "now", ImageMode::Symlink).unwrap();
+    let text = String::from_utf8(sink.files["labels/train/set__a.txt"].clone()).unwrap();
+    let v: Vec<f64> = text.trim().split(' ').skip(1).map(|v| v.parse().unwrap()).collect();
+    (v[0] * 200.0, v[1] * 100.0, v[2] * 200.0, v[3] * 100.0)
+}
+
+fn near(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> bool {
+    [(a.0, b.0), (a.1, b.1), (a.2, b.2), (a.3, b.3)].iter().all(|(x, y)| (x - y).abs() < 1e-3)
+}
+
+#[test]
+fn points_and_polylines_are_boxed_by_their_footprint_unless_asked_not_to() {
+    let point = || Shape::Points { points: vec![Point::new(80.0, 40.0)] };
+    // Radius 8: the 17 × 17 pixels around the point's pixel (80, 40).
+    let boxed = detect_box(point(), true);
+    assert!(near(boxed, (80.5, 40.5, 17.0, 17.0)), "{boxed:?}");
+    assert!(near(detect_box(point(), false), (80.0, 40.0, 0.0, 0.0)));
+    // Width 7 draws 2·⌈7/2⌉ + 1 = 9 pixels across a level line.
+    let line = detect_box(Shape::Polyline { points: vec![Point::new(20.0, 50.0), Point::new(120.0, 50.0)] }, true);
+    assert!(near(line, (70.5, 50.5, 109.0, 9.0)), "{line:?}");
 }

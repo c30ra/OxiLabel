@@ -9,12 +9,13 @@ async fn each_user_keeps_their_own_settings_across_sessions() {
     let app = test_app().await;
     let (status, settings) = call(&app, Method::GET, "/api/me/settings", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(settings, json!({"shortcuts": {}, "flick_distance": 150.0, "label_style": "hotkeys", "theme": "dark"}));
+    assert_eq!(settings, json!({"shortcuts": {}, "flick_distance": 150.0, "label_style": "hotkeys", "theme": "dark", "show_footprint": true}));
 
-    let mine = json!({"shortcuts": {"rectangle": [{"key": "w"}], "undo": [{"key": "u", "ctrl": true}]}, "flick_distance": 900, "label_style": "options_ring", "theme": "light"});
+    let mine = json!({"shortcuts": {"rectangle": [{"key": "w"}], "undo": [{"key": "u", "ctrl": true}]}, "flick_distance": 900, "label_style": "options_ring", "theme": "light", "show_footprint": false});
     let (status, saved) = call(&app, Method::PUT, "/api/me/settings", Some(mine)).await;
     assert_eq!(status, StatusCode::OK, "{saved}");
     assert_eq!(saved["flick_distance"], json!(400.0), "kept within its range");
+    assert_eq!(saved["show_footprint"], json!(false));
 
     // Another session of the same user sees them; another user has the defaults.
     let again = login(&app, "admin", "admin password").await;

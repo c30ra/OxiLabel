@@ -36,7 +36,8 @@ async fn created_label_appears_in_the_project_label_set() {
         "hotkey": "1",
         "shape_types": ["polyline", "polygon"],
         "ignore": false,
-        "attributes": [], "line_width": 7.0, "point_radius": 8.0
+        "attributes": [], "line_width": 7.0, "point_radius": 8.0, "point_shape": "disc",
+        "show_footprint": true, "constraints": {"rectangle": null, "oriented_rectangle": null, "ellipse": null}
     });
     assert_eq!(label, expected);
     let (status, labels) = call(&app, Method::GET, &format!("/api/projects/{project}/labels"), None).await;
@@ -82,7 +83,8 @@ async fn editing_a_label_keeps_its_id() {
 
     let expected = json!({
         "id": 1, "name": "micro_crack", "color": "#00ff00", "hotkey": "c", "shape_types": ["polyline"], "ignore": false,
-        "attributes": [], "line_width": 7.0, "point_radius": 8.0
+        "attributes": [], "line_width": 7.0, "point_radius": 8.0, "point_shape": "disc",
+        "show_footprint": true, "constraints": {"rectangle": null, "oriented_rectangle": null, "ellipse": null}
     });
     assert_eq!(edited, expected);
     let (_, labels) = call(&app, Method::GET, &format!("/api/projects/{project}/labels"), None).await;
@@ -199,4 +201,21 @@ async fn labels_keep_their_line_width_and_point_radius() {
     assert_eq!((label["line_width"].clone(), label["point_radius"].clone()), (json!(4.0), json!(3.0)));
     let (status, _) = add_label(&app, project, json!({"name": "chip", "color": "#e67e22", "line_width": 0})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn labels_keep_their_point_shape_ghost_and_fixed_sizes() {
+    let app = test_app().await;
+    let project = new_project(&app).await;
+    let constraints = json!({"rectangle": {"width": 120.0, "height": 80.0}, "oriented_rectangle": null, "ellipse": {"rx": 60.0, "ry": 40.0}});
+    let definition = json!({"name": "window", "color": "#3498db", "point_shape": "square", "show_footprint": false, "constraints": constraints});
+    let (status, label) = add_label(&app, project, definition).await;
+    assert_eq!(status, StatusCode::CREATED, "{label}");
+    let (_, labels) = call(&app, Method::GET, &format!("/api/projects/{project}/labels"), None).await;
+    assert_eq!(labels[0], label);
+    assert_eq!((label["point_shape"].clone(), label["show_footprint"].clone(), label["constraints"].clone()), (json!("square"), json!(false), constraints));
+
+    let bad = json!({"name": "door", "color": "#3498db", "constraints": {"rectangle": {"width": 0.0, "height": 80.0}}});
+    let (status, body) = add_label(&app, project, bad).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 }

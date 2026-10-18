@@ -1,7 +1,7 @@
 //! YOLO segment and YOLO OBB on one 200 × 100 image with every kind of shape.
 
 use rtag_core::{
-    Label, ShapeType,
+    Footprint, Label, PointShape, ShapeType,
     annotation::{Annotation, Shape},
     ellipse::Ellipse,
     geometry::{Point, Rect, polygon_area},
@@ -21,8 +21,9 @@ fn label(id: i64, name: &str, ignore: bool, line_width: f64, point_radius: f64) 
         shape_types: ShapeType::ALL.to_vec(),
         ignore,
         attributes: vec![],
-        line_width,
-        point_radius,
+        footprint: Footprint { line_width, point_radius, point_shape: PointShape::Disc },
+        show_footprint: true,
+        constraints: Default::default(),
     }
 }
 
@@ -63,13 +64,18 @@ fn input() -> ExportInput {
             annotations,
         }],
         split: ALL_TRAIN,
+        footprint_bounds: true,
     }
 }
 
 /// The label file's lines as (class, points in image pixels).
 fn lines(exporter: &dyn rtag_formats::Exporter) -> Vec<(i64, Vec<Point>)> {
+    lines_of(exporter, &input())
+}
+
+fn lines_of(exporter: &dyn rtag_formats::Exporter, input: &ExportInput) -> Vec<(i64, Vec<Point>)> {
     let mut sink = MemorySink::default();
-    run_export(exporter, &input(), &mut sink, "now", ImageMode::Symlink).unwrap();
+    run_export(exporter, input, &mut sink, "now", ImageMode::Symlink).unwrap();
     let text = String::from_utf8(sink.files["labels/train/cells__a.txt"].clone()).unwrap();
     assert!(sink.files["data.yaml"].starts_with(b"# YOLO"), "a data.yaml");
     text.lines()
@@ -121,6 +127,15 @@ fn segment_expands_polylines_and_points_like_cvat_to_masks() {
     assert!(polygon_area(&lines[11].1) > 0.0, "a one-point polyline is a dot");
     let ellipse = &lines[6].1;
     assert!(ellipse.len() >= 16 && ellipse.iter().all(|p| ELLIPSE.contains(*p, 0.01) && !ELLIPSE.contains(*p, -0.01)), "ellipse {ellipse:?}");
+}
+
+#[test]
+fn square_points_become_squares_of_twice_their_radius() {
+    let mut input = input();
+    input.labels[0].footprint.point_shape = PointShape::Square;
+    let lines = lines_of(&YoloSegment, &input);
+    // The point (180, 20) of radius 3: the 7 × 7 pixels whose centres are within 3 of its pixel's.
+    assert!(near(&lines[4].1, &points(&[(177.0, 17.0), (184.0, 17.0), (184.0, 24.0), (177.0, 24.0)])), "{:?}", lines[4].1);
 }
 
 #[test]

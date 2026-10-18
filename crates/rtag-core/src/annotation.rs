@@ -130,6 +130,24 @@ impl Shape {
         }
     }
 
+    /// The shape moved just enough to lie inside a `width` × `height` image; none if it is larger.
+    pub fn moved_inside(&self, width: u32, height: u32) -> Option<Shape> {
+        let bounds = self.bounds();
+        let shift = |min: f64, max: f64, size: u32| {
+            let size = f64::from(size);
+            if max - min > size + EDGE_TOLERANCE {
+                None
+            } else if min < 0.0 {
+                Some(-min)
+            } else {
+                Some((size - max).min(0.0))
+            }
+        };
+        let dx = shift(bounds.min.x, bounds.max.x, width)?;
+        let dy = shift(bounds.min.y, bounds.max.y, height)?;
+        Some(if dx == 0.0 && dy == 0.0 { self.clone() } else { self.translated(dx, dy) })
+    }
+
     /// Whether `point` is on the shape, allowing `margin` image pixels around it: inside areas,
     /// near lines and near points. Masks only count their set pixels.
     pub fn contains(&self, point: Point, margin: f64) -> bool {

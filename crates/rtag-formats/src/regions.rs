@@ -1,6 +1,7 @@
 //! Annotations as areas: the polygons a shape covers in image pixels, for formats that need areas
-//! (YOLO segment and OBB). Shapes with corners give them exactly; brush masks, and polylines and
-//! points drawn with their label's line width and point radius, are traced along their pixels.
+//! (YOLO segment and OBB, and detect's boxes). Shapes with corners give them exactly; brush masks,
+//! and polylines and points drawn with their footprint (line width, point radius and shape), are
+//! traced along their pixels. A square point covers the pixels whose centres lie in the square.
 //!
 //! Lines and points are drawn as the author's `cvat_to_masks.py` draws them with OpenCV:
 //! coordinates rounded to whole pixels and taken as pixel centres, the line width (at least 1)
@@ -13,7 +14,7 @@
 //! patches.
 
 use rtag_core::{
-    Label,
+    Footprint, PointShape,
     annotation::{Annotation, Shape},
     geometry::{Point, simplify},
     mask::Bitmap,
@@ -32,9 +33,9 @@ pub enum Detail {
     Exact,
 }
 
-/// The polygons `annotation` covers in an image of `image` size, using `label`'s sizes for lines
-/// and points; none for tags.
-pub fn regions(annotation: &Annotation, label: &Label, image: (u32, u32), detail: Detail) -> Vec<Vec<Point>> {
+/// The polygons `annotation` covers in an image of `image` size, using `footprint` for lines and
+/// points; none for tags.
+pub fn regions(annotation: &Annotation, footprint: &Footprint, image: (u32, u32), detail: Detail) -> Vec<Vec<Point>> {
     // OpenCV's coordinates: whole pixels, at the pixel's centre.
     let pixel = |p: &Point| Point::new(p.x.round() + 0.5, p.y.round() + 0.5);
     match &annotation.shape {
@@ -44,8 +45,7 @@ pub fn regions(annotation: &Annotation, label: &Label, image: (u32, u32), detail
         Shape::Ellipse(ellipse) => vec![ellipse.outline(ELLIPSE_CORNERS)],
         Shape::Mask(mask) => traced(&mask.to_bitmap(), detail),
         Shape::Polyline { points } => {
-            let thickness = label.line_width.trunc().max(1.0);
-            let radius = if thickness == 1.0 { 0.5 } else { (thickness / 2.0).ceil() + 0.5 };
+            let radius = footprint.line_reach();
             let mut bitmap = Bitmap::default();
             // A one-point line is a dot.
             let ends: Vec<Point> = points.iter().map(pixel).collect();
@@ -60,10 +60,13 @@ pub fn regions(annotation: &Annotation, label: &Label, image: (u32, u32), detail
             traced(&bitmap, detail)
         }
         Shape::Points { points } => {
-            let radius = label.point_radius.trunc().max(0.0);
+            let radius = footprint.point_reach();
             let mut bitmap = Bitmap::default();
             for point in points.iter().map(pixel) {
-                bitmap.paint(point, point, radius, image);
+                match footprint.point_shape {
+                    PointShape::Disc => bitmap.paint(point, point, radius, image),
+                    PointShape::Square => bitmap.paint_square(point, radius, image),
+                };
             }
             traced(&bitmap, detail)
         }

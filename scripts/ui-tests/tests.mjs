@@ -1538,3 +1538,126 @@ tests.push({
     }
   },
 });
+
+// Shape constraints and export footprints (ticket 24).
+/** Changes label `id` of the test project through the API. */
+const changeLabel = async (t, id, change) => {
+  const labels = await t.api.call('GET', `/api/projects/${t.project.id}/labels`);
+  const label = labels.find((l) => l.id === id);
+  await t.api.call('PUT', `/api/projects/${t.project.id}/labels/${id}`, { ...label, ...change });
+};
+/** The opacity of the annotation canvas at image point (x, y). */
+const overlayAlpha = (t, w, x, y) => {
+  const [sx, sy] = w.at(x, y);
+  return t.b.json(`(() => {
+    const canvas = document.querySelector('canvas.annotations');
+    const rect = canvas.getBoundingClientRect();
+    const ratio = canvas.width / rect.width;
+    return canvas.getContext('2d').getImageData(Math.round((${sx} - rect.x) * ratio), Math.round((${sy} - rect.y) * ratio), 1, 1).data[3];
+  })()`);
+};
+
+tests.push({
+  name: 'a fixed rectangle size set on the Labels tab places rectangles with one click, without resize handles',
+  async run(t) {
+    await t.b.goto(`${t.base}/projects/${t.project.id}/labels`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('table.labels')`), 'the labels');
+    await t.b.eval(`document.querySelector('table.labels tbody tr button').click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.label-form .constraint input.fixed')`), 'the constraints');
+    await t.b.eval(`document.querySelector('.label-form .constraint input.fixed').click(), 1`);
+    const set = async (selector, value) => {
+      await t.b.waitFor(() => t.b.eval(`!!document.querySelector(${JSON.stringify(selector)})`), selector);
+      await t.b.eval(`(() => { const el = document.querySelector(${JSON.stringify(selector)}); el.value = ${JSON.stringify(value)}; el.dispatchEvent(new Event('input', { bubbles: true })); return 1; })()`);
+    };
+    await set('.label-form input.fixed-rectangle-w', '120');
+    await set('.label-form input.fixed-rectangle-h', '80');
+    await t.b.eval(`document.querySelector('.label-form .point-square').click(), 1`);
+    await t.b.eval(`document.querySelector('.label-form button.primary').click(), 1`);
+    const label = await t.b.waitFor(async () => {
+      const crack = (await t.api.call('GET', `/api/projects/${t.project.id}/labels`)).find((l) => l.id === 1);
+      return crack.constraints.rectangle && crack;
+    }, 'the saved constraint');
+    equal([label.constraints, label.point_shape], [{ rectangle: { width: 120, height: 80 }, oriented_rectangle: null, ellipse: null }, 'square'], 'constraint and point shape');
+    equal(await t.b.eval(`document.querySelector('table.labels tbody tr .fixed').textContent`), 'Rectangle 120×80', 'the table');
+
+    const w = await openWorkspace(t.b, t.base, t.project);
+    await t.b.key('r');
+    await t.b.click(...w.at(800, 500));
+    let [placed] = await saved(t, (list) => list.length === 1, 'the placed rectangle');
+    near(corners(placed), [740, 460, 860, 540], 2 / w.scale, 'a 120 × 80 rectangle centred on the click');
+    near([placed.shape.max.x - placed.shape.min.x, placed.shape.max.y - placed.shape.min.y], [120, 80], 1e-6, 'its size');
+    // Near the edge it moves inside the image.
+    await t.b.click(...w.at(10, 990));
+    [, placed] = await saved(t, (list) => list.length === 2, 'the second rectangle');
+    near(corners(placed), [0, 920, 120, 1000], 0.01, 'kept inside');
+    // Selected, its corner moves it instead of resizing it.
+    await t.b.key('v');
+    await t.b.click(...w.at(800, 500));
+    await t.b.drag(w.at(860, 540), w.at(960, 600));
+    [placed] = await saved(t, (list) => corners(list[0])[0] > 800, 'the move');
+    near(corners(placed), [840, 520, 960, 600], 2 / w.scale, 'moved, same size');
+  },
+}, {
+  name: 'a fixed oriented rectangle is placed by a click and turned to the pointer by a second click',
+  async run(t) {
+    await changeLabel(t, 1, { constraints: { oriented_rectangle: { width: 200, height: 100 } } });
+    const w = await openWorkspace(t.b, t.base, t.project);
+    await t.b.key('r');
+    await t.b.eval(`[...document.querySelectorAll('.tool-options button')].find((b) => b.textContent.includes('3-point oriented')).click(), 1`);
+    await t.b.click(...w.at(800, 500));
+    await t.b.move(...w.at(800, 800), 60);
+    await t.b.click(...w.at(800, 800));
+    const [placed] = await saved(t, (list) => list.length === 1, 'the oriented rectangle');
+    const { centre, width, height, angle } = placed.shape;
+    near([centre.x, centre.y], [800, 500], 2 / w.scale, 'centre');
+    near([width, height, angle], [200, 100, Math.PI / 2], 0.01, 'size and angle');
+  },
+}, {
+  name: 'the footprint of a polyline shows as a ghost, toggled from the workspace header',
+  async run(t) {
+    try {
+      await changeLabel(t, 3, { line_width: 60 });
+      await t.api.setAnnotations(t.project, [{ label: 3, shape: { type: 'polyline', points: [{ x: 400, y: 500 }, { x: 1200, y: 500 }] } }]);
+      const w = await openWorkspace(t.b, t.base, t.project);
+      await t.b.waitFor(async () => (await overlayAlpha(t, w, 800, 520)) > 0, 'the ghost 20 px from the line');
+      equal(await overlayAlpha(t, w, 800, 560), 0, 'nothing beyond the footprint');
+      await t.b.eval(`document.querySelector('button.footprint-toggle').click(), 1`);
+      await t.b.waitFor(async () => (await overlayAlpha(t, w, 800, 520)) === 0, 'the ghost hidden');
+      await t.b.waitFor(async () => (await t.api.call('GET', '/api/me/settings')).show_footprint === false, 'the saved setting');
+      // A label that hides its footprint has no ghost either.
+      await t.b.eval(`document.querySelector('button.footprint-toggle').click(), 1`);
+      await t.b.waitFor(async () => (await overlayAlpha(t, w, 800, 520)) > 0, 'the ghost again');
+      await t.b.waitFor(async () => (await t.api.call('GET', '/api/me/settings')).show_footprint === true, 'the setting saved again');
+      await changeLabel(t, 3, { show_footprint: false });
+      await openWorkspace(t.b, t.base, t.project);
+      await t.b.waitFor(async () => (await t.b.eval(`document.querySelector('canvas.annotations').dataset.count`)) === '1', 'the line');
+      equal(await overlayAlpha(t, w, 800, 520), 0, 'no ghost for that label');
+    } finally {
+      await t.api.call('PUT', '/api/me/settings', {});
+    }
+  },
+}, {
+  name: 'the export dialog lists label footprints, changeable for one export',
+  async run(t) {
+    await t.api.setAnnotations(t.project, [{ label: 3, shape: { type: 'polyline', points: [{ x: 100, y: 100 }, { x: 300, y: 120 }] } }]);
+    await t.b.goto(`${t.base}/projects/${t.project.id}`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.grid li')`), 'the grid');
+    await t.b.eval(`[...document.querySelectorAll('.actions button')].find((b) => b.textContent.includes('Export')).click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.export-dialog .footprints tbody tr')`), 'the footprint table');
+    const rows = () => t.b.json(`[...document.querySelectorAll('.export-dialog .footprints tbody tr')].map((r) => [r.textContent.trim(), r.classList.contains('changed')])`);
+    equal((await rows()).filter(([text]) => text.startsWith('line')).length, 1, 'a row for "line"');
+    const state = () => t.b.json(`({
+      bounds: !!document.querySelector('.export-dialog .footprint-bounds'),
+      shapeColumn: [...document.querySelectorAll('.export-dialog .footprints th')].some((th) => th.textContent === 'Point shape'),
+    })`);
+    equal(await state(), { bounds: true, shapeColumn: false }, 'detect: the box option, no point shape');
+    await t.b.eval(`(() => { const s = document.querySelector('.export-dialog select'); s.value = 'yolo-segment'; s.dispatchEvent(new Event('change', { bubbles: true })); return 1; })()`);
+    await t.b.waitFor(async () => JSON.stringify(await state()) === JSON.stringify({ bounds: false, shapeColumn: true }), 'segment: the point shape, no box option');
+    const width = `[...document.querySelectorAll('.export-dialog .footprints input')].find((i) => i.getAttribute('aria-label') === 'line line width')`;
+    equal(await t.b.eval(`${width}.value`), '7', 'filled in from the label');
+    await t.b.eval(`(() => { const i = ${width}; i.value = '12'; i.dispatchEvent(new Event('change', { bubbles: true })); return 1; })()`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.export-dialog .footprints tr.changed button')`), 'the changed row');
+    await t.b.eval(`document.querySelector('.export-dialog .footprints tr.changed button').click(), 1`);
+    await t.b.waitFor(async () => (await t.b.eval(`${width}.value`)) === '7', 'reset to the label');
+  },
+});

@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::Footprint;
+
 /// Whether an export includes the image files.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -75,7 +77,7 @@ pub enum ImageSelection {
     Ids { ids: Vec<i64> },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExportRequest {
     /// An exporter id, e.g. `yolo-detect`.
     pub format: String,
@@ -85,6 +87,13 @@ pub struct ExportRequest {
     pub include_images: Option<ImageMode>,
     #[serde(default)]
     pub split: Split,
+    /// Footprints to use for this export instead of their labels' own, by label id.
+    #[serde(default)]
+    pub footprints: BTreeMap<i64, Footprint>,
+    /// Whether formats that write boxes box polylines and points by their footprint rather than
+    /// by their bare points.
+    #[serde(default = "crate::default_true")]
+    pub footprint_bounds: bool,
 }
 
 /// A finished export: a folder on the server, also downloadable as a zip.
@@ -107,4 +116,8 @@ pub struct ExportFormat {
     pub name: String,
     /// The image options this format supports; the first is its default.
     pub image_modes: Vec<ImageMode>,
+    /// Whether it writes boxes: footprints then only set their size, so the point shape does
+    /// not matter, and they can be left out (see `ExportRequest::footprint_bounds`).
+    #[serde(default)]
+    pub boxes: bool,
 }

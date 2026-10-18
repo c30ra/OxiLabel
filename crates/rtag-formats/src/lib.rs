@@ -35,6 +35,11 @@ pub trait Exporter: Send + Sync {
     fn image_modes(&self) -> &'static [ImageMode] {
         &[ImageMode::None, ImageMode::Symlink, ImageMode::Copy]
     }
+    /// Whether the format writes boxes, which take only the size of polylines' and points'
+    /// footprints (see [`ExportInput::footprint_bounds`]).
+    fn boxes(&self) -> bool {
+        false
+    }
     /// Writes the export. The manifest is written by [`run_export`], not by the exporter.
     fn export(&self, input: &ExportInput, sink: &mut dyn ExportSink) -> io::Result<()>;
 }
@@ -75,6 +80,9 @@ pub struct ExportInput {
     pub labels: Vec<Label>,
     pub images: Vec<ExportImage>,
     pub split: Split,
+    /// Whether box formats box polylines and points by their footprint rather than their bare
+    /// points (which leaves a single point a box of no size).
+    pub footprint_bounds: bool,
 }
 
 impl ExportInput {
