@@ -88,8 +88,8 @@ pub fn RunPanel(project: i64, scope: Signal<Option<RunScope>>, ready: Signal<boo
         let alive = alive.get_value();
         let (Some(model), Some(scope)) = (model.get_untracked().or_else(|| models.get().and_then(Result::ok)?.first().map(|m| m.id)), scope.get_untracked()) else { return };
         let request = match scope {
-            RunScope::Images(image_ids) => RunRequest { model, image_ids, job: None },
-            RunScope::Job(job) => RunRequest { model, image_ids: Vec::new(), job: Some(job) },
+            RunScope::Images(image_ids) => RunRequest { model, image_ids, job: None, threshold: None },
+            RunScope::Job(job) => RunRequest { model, image_ids: Vec::new(), job: Some(job), threshold: None },
         };
         error.set(None);
         spawn_local(async move {

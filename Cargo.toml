@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/rtag-core", "crates/rtag-server", "crates/rtag-formats", "crates/rtag-ui"]
+members = ["crates/rtag-core", "crates/rtag-server", "crates/rtag-formats", "crates/rtag-ui", "crates/rtag-cli"]
 
 [workspace.package]
 edition = "2024"

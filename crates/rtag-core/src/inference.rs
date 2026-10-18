@@ -74,6 +74,9 @@ pub struct RunRequest {
     pub image_ids: Vec<i64>,
     #[serde(default)]
     pub job: Option<i64>,
+    /// Predictions less confident than this are left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

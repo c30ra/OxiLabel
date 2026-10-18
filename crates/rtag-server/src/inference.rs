@@ -296,12 +296,13 @@ async fn start_run(user: CurrentUser, State(state): State<AppState>, Path(projec
         table.runs.insert(status.id, (status.clone(), cancelled.clone()));
         status
     };
-    tokio::spawn(run(state, status.id, project, model.definition, labels, image_ids, cancelled));
+    tokio::spawn(run(state, status.id, project, model.definition, labels, image_ids, request.threshold, cancelled));
     Ok((StatusCode::ACCEPTED, Json(status)))
 }
 
 /// Runs the model image by image; between images it stops if cancelled.
-async fn run(state: AppState, id: u64, project: i64, model: ModelDefinition, labels: Vec<Label>, image_ids: Vec<i64>, cancelled: Arc<AtomicBool>) {
+#[allow(clippy::too_many_arguments)]
+async fn run(state: AppState, id: u64, project: i64, model: ModelDefinition, labels: Vec<Label>, image_ids: Vec<i64>, threshold: Option<f64>, cancelled: Arc<AtomicBool>) {
     let skip = |reason: String| {
         state.runs.update(id, |status| match status.skipped.iter_mut().find(|skip| skip.reason == reason) {
             Some(skip) => skip.count += 1,
@@ -344,6 +345,10 @@ async fn run(state: AppState, id: u64, project: i64, model: ModelDefinition, lab
         }
         let mut made = Vec::new();
         for prediction in predictions {
+            if let Some(threshold) = threshold.filter(|threshold| prediction.confidence < *threshold) {
+                skip(format!("less confident than {threshold}"));
+                continue;
+            }
             let wanted = model.class_map.get(&prediction.class).unwrap_or(&prediction.class);
             let Some(label) = labels.iter().find(|label| label.name.eq_ignore_ascii_case(wanted)) else {
                 skip(format!("no label for class \"{}\"", prediction.class));

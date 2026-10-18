@@ -320,3 +320,13 @@ async fn the_worker_command_is_started_by_the_server() {
     assert!(marker.exists(), "the command ran");
     call(&app, Method::PUT, "/api/settings/worker", Some(json!({}))).await;
 }
+
+#[tokio::test]
+async fn a_confidence_threshold_leaves_out_less_certain_predictions() {
+    let app = test_app_with_worker(Some(FakeWorker::default().start().await)).await;
+    let (p, images) = project(&app, 1).await;
+    let m = model(&app).await;
+    let status = run(&app, p, json!({"model": m, "image_ids": images, "threshold": 0.5})).await;
+    assert_eq!(status["created"], json!(1), "{status}");
+    assert!(status["skipped"].as_array().unwrap().iter().any(|s| s["reason"] == "less confident than 0.5" && s["count"] == 1), "{status}");
+}
