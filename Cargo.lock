@@ -1923,6 +1923,86 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxilabel-cli"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "clap",
+ "image",
+ "oxilabel-core",
+ "oxilabel-server",
+ "reqwest",
+ "rpassword",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "oxilabel-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "oxilabel-formats"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "oxilabel-core",
+ "roxmltree",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "zip",
+]
+
+[[package]]
+name = "oxilabel-server"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "ashpd",
+ "axum",
+ "base64 0.22.1",
+ "blake3",
+ "http-body-util",
+ "image",
+ "libc",
+ "oxilabel-core",
+ "oxilabel-formats",
+ "password-hash",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tower-http",
+ "zip",
+]
+
+[[package]]
+name = "oxilabel-ui"
+version = "0.1.0"
+dependencies = [
+ "gloo-net",
+ "leptos",
+ "leptos_router",
+ "oxilabel-core",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2428,86 +2508,6 @@ dependencies = [
  "quote",
  "syn 3.0.7",
  "thiserror 2.0.21",
-]
-
-[[package]]
-name = "rtag-cli"
-version = "0.1.0"
-dependencies = [
- "axum",
- "clap",
- "image",
- "reqwest",
- "rpassword",
- "rtag-core",
- "rtag-server",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "rtag-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "rtag-formats"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "roxmltree",
- "rtag-core",
- "serde",
- "serde_json",
- "tempfile",
- "zip",
-]
-
-[[package]]
-name = "rtag-server"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "ashpd",
- "axum",
- "base64 0.22.1",
- "blake3",
- "http-body-util",
- "image",
- "libc",
- "password-hash",
- "regex",
- "reqwest",
- "rtag-core",
- "rtag-formats",
- "serde",
- "serde_json",
- "sqlx",
- "tempfile",
- "tokio",
- "tokio-util",
- "tower",
- "tower-http",
- "zip",
-]
-
-[[package]]
-name = "rtag-ui"
-version = "0.1.0"
-dependencies = [
- "gloo-net",
- "leptos",
- "leptos_router",
- "rtag-core",
- "serde",
- "serde_json",
- "wasm-bindgen",
- "web-sys",
 ]
 
 [[package]]

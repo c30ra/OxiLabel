@@ -1,0 +1,25 @@
+[package]
+name = "oxilabel-cli"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "oxilabel"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "multipart"] }
+rpassword = "7"
+oxilabel-core = { path = "../oxilabel-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+axum = "0.8"
+image = { version = "0.25", default-features = false, features = ["png"] }
+oxilabel-server = { path = "../oxilabel-server" }
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "net"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }

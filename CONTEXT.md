@@ -1,4 +1,4 @@
-# rtag
+# OxiLabel
 
 A self-hosted tool for labeling image datasets (initially for ML object detection and segmentation), used alone or by a team, and exporting them in formats that major ML frameworks accept (e.g. YOLO). Vocabulary follows CVAT/COCO conventions.
 
@@ -53,7 +53,7 @@ A pluggable component that converts a project's annotations into one external fo
 _Avoid_: Converter, writer
 
 **Project archive**:
-rtag's own versioned, lossless file format for moving a whole project (labels, images or image references, annotations) between rtag instances.
+OxiLabel's own versioned, lossless file format for moving a whole project (labels, images or image references, annotations) between OxiLabel instances.
 _Avoid_: Backup, dump
 
 **Pre-annotation**:

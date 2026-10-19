@@ -7,17 +7,17 @@ RUN version=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/^version
     && cargo install wasm-bindgen-cli --version "$version" --locked
 COPY . .
 RUN scripts/build-ui.sh release
-RUN cargo build --release -p rtag-server
+RUN cargo build --release -p oxilabel-server
 
 FROM docker.io/library/debian:stable-slim
-COPY --from=build /src/target/release/rtag-server /usr/local/bin/rtag-server
-COPY --from=build /src/crates/rtag-ui/dist /srv/rtag/web
-ENV RTAG_WEB_ROOT=/srv/rtag/web \
-    RTAG_DATABASE="sqlite:///data/rtag.db?mode=rwc" \
-    RTAG_CACHE_DIR=/data/cache \
-    RTAG_EXPORT_DIR=/data/exports \
-    RTAG_IMAGES_ROOT=/images
+COPY --from=build /src/target/release/oxilabel-server /usr/local/bin/oxilabel-server
+COPY --from=build /src/crates/oxilabel-ui/dist /srv/oxilabel/web
+ENV OXILABEL_WEB_ROOT=/srv/oxilabel/web \
+    OXILABEL_DATABASE="sqlite:///data/oxilabel.db?mode=rwc" \
+    OXILABEL_CACHE_DIR=/data/cache \
+    OXILABEL_EXPORT_DIR=/data/exports \
+    OXILABEL_IMAGES_ROOT=/images
 # /data holds the database and caches; mount your datasets read-only at /images.
 VOLUME /data /images
 EXPOSE 3000
-CMD ["rtag-server"]
+CMD ["oxilabel-server"]

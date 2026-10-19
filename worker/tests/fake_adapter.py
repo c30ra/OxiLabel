@@ -1,5 +1,5 @@
 """An adapter for the worker's tests: no model, a rectangle as wide as the image file is long."""
-from rtag_worker import shapes
+from oxilabel_worker import shapes
 
 loads = []
 

@@ -1,6 +1,6 @@
 # Image-analysis aids run in the browser at the viewed resolution, on lossless tiles
 
-Edge snapping (live-wire), fuzzy fill and the edge-limited brush analyse pixels in the browser (WASM, algorithms in `rtag-core`) on the tiles of the zoom level being viewed, so they can react at pointer speed; a server round trip per pointer move or threshold change would be too slow. The analysed pixels come from a second, lossless (PNG) tile pyramid, generated the first time a tool needs it for an image, because the viewing tiles are JPEG and their block edges would mislead edge detection and low thresholds.
+Edge snapping (live-wire), fuzzy fill and the edge-limited brush analyse pixels in the browser (WASM, algorithms in `oxilabel-core`) on the tiles of the zoom level being viewed, so they can react at pointer speed; a server round trip per pointer move or threshold change would be too slow. The analysed pixels come from a second, lossless (PNG) tile pyramid, generated the first time a tool needs it for an image, because the viewing tiles are JPEG and their block edges would mislead edge detection and low thresholds.
 
 ## Considered Options
 

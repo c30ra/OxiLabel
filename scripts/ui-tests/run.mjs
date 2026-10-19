@@ -3,8 +3,8 @@
 // name contains the first argument).
 //
 // Usage: node scripts/ui-tests/run.mjs [name filter]
-// The browser is `firefox` unless RTAG_UI_TEST_BROWSER says otherwise, e.g.
-// RTAG_UI_TEST_BROWSER="flatpak run app.zen_browser.zen". Build first (scripts/ui-test.sh does).
+// The browser is `firefox` unless OXILABEL_UI_TEST_BROWSER says otherwise, e.g.
+// OXILABEL_UI_TEST_BROWSER="flatpak run app.zen_browser.zen". Build first (scripts/ui-test.sh does).
 
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
@@ -13,7 +13,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { connect } from './bidi.mjs';
-import { ADMIN, api, signIn, writeTestImage } from './rtag.mjs';
+import { ADMIN, api, signIn, writeTestImage } from './oxilabel.mjs';
 import { LABELS, tests } from './tests.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -38,8 +38,8 @@ async function until(check, what, timeout = 30000) {
   throw new Error(`timed out waiting for ${what}`);
 }
 
-const server = join(root, 'target', 'release', 'rtag-server');
-if (!existsSync(server) || !existsSync(join(root, 'crates', 'rtag-ui', 'dist', 'rtag-ui_bg.wasm'))) {
+const server = join(root, 'target', 'release', 'oxilabel-server');
+if (!existsSync(server) || !existsSync(join(root, 'crates', 'oxilabel-ui', 'dist', 'oxilabel-ui_bg.wasm'))) {
   console.error('Build first: scripts/ui-test.sh builds the server and the UI and then runs this.');
   process.exit(2);
 }
@@ -61,19 +61,19 @@ process.on('exit', stopAll);
 process.on('SIGINT', () => process.exit(130));
 
 start(server, [], {
-  RTAG_ADDR: `127.0.0.1:${appPort}`,
-  RTAG_DATABASE: `sqlite://${join(work, 'rtag.db')}?mode=rwc`,
-  RTAG_IMAGES_ROOT: join(work, 'images'),
-  RTAG_CACHE_DIR: join(work, 'cache'),
-  RTAG_EXPORT_DIR: join(work, 'exports'),
-  RTAG_WEB_ROOT: join(root, 'crates', 'rtag-ui', 'dist'),
-  RTAG_UPLOAD_DIR: join(work, 'uploads'),
+  OXILABEL_ADDR: `127.0.0.1:${appPort}`,
+  OXILABEL_DATABASE: `sqlite://${join(work, 'oxilabel.db')}?mode=rwc`,
+  OXILABEL_IMAGES_ROOT: join(work, 'images'),
+  OXILABEL_CACHE_DIR: join(work, 'cache'),
+  OXILABEL_EXPORT_DIR: join(work, 'exports'),
+  OXILABEL_WEB_ROOT: join(root, 'crates', 'oxilabel-ui', 'dist'),
+  OXILABEL_UPLOAD_DIR: join(work, 'uploads'),
   // Tests write what the host's folder dialog "picks" here, so no real dialog opens.
-  RTAG_FOLDER_DIALOG: `answers:${join(work, 'folder-dialog.txt')}`,
+  OXILABEL_FOLDER_DIALOG: `answers:${join(work, 'folder-dialog.txt')}`,
 });
 await until(async () => (await fetch(`${base}/api/session`)).ok, 'the server');
 
-const [command, ...prefix] = (process.env.RTAG_UI_TEST_BROWSER ?? 'firefox').split(' ').filter(Boolean);
+const [command, ...prefix] = (process.env.OXILABEL_UI_TEST_BROWSER ?? 'firefox').split(' ').filter(Boolean);
 // A flatpak browser only sees folders it is given.
 if (command === 'flatpak' && prefix[0] === 'run') prefix.splice(1, 0, `--filesystem=${work}`);
 const browserProcess = start(command, [...prefix, '--headless', '--no-remote', '--profile', join(work, 'profile'),
@@ -89,7 +89,7 @@ await signIn(b, base, ADMIN, { setup: true });
 const client = await api(base);
 // The pre-annotation worker, started by the server; tests register scripts/ui-tests/test_adapter.py.
 await client.call('PUT', '/api/settings/worker', {
-  command: `PYTHONPATH=${join(root, 'worker')} RTAG_WORKER_QUIET=1 exec python3 -m rtag_worker`,
+  command: `PYTHONPATH=${join(root, 'worker')} OXILABEL_WORKER_QUIET=1 exec python3 -m oxilabel_worker`,
   url: `http://127.0.0.1:${workerPort}`,
 });
 let failed = 0;

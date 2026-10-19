@@ -1,4 +1,4 @@
 target/
-crates/rtag-ui/dist/
+crates/oxilabel-ui/dist/
 data/
 .venv/

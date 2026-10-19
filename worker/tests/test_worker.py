@@ -12,10 +12,10 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-os.environ["RTAG_WORKER_QUIET"] = "1"
+os.environ["OXILABEL_WORKER_QUIET"] = "1"
 
-from rtag_worker import shapes  # noqa: E402
-from rtag_worker.server import Models, serve  # noqa: E402
+from oxilabel_worker import shapes  # noqa: E402
+from oxilabel_worker.server import Models, serve  # noqa: E402
 
 ADAPTER = str(Path(__file__).with_name("fake_adapter.py"))
 

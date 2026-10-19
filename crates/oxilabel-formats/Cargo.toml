@@ -1,0 +1,16 @@
+[package]
+name = "oxilabel-formats"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+blake3 = "1"
+roxmltree = "0.20"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+oxilabel-core = { path = "../oxilabel-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

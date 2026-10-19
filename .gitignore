@@ -1,4 +1,6 @@
 target/
-crates/rtag-ui/dist/
+crates/oxilabel-ui/dist/
 data/
 .venv/
+# Session handoff notes (local only)
+.scratch/**/handoff-*.md

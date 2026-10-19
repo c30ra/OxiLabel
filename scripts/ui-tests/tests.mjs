@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { KEY } from './bidi.mjs';
-import { ADMIN, NINE_LABELS, api, box, openWorkspace, signIn, signOut, writeTestImage } from './rtag.mjs';
+import { ADMIN, NINE_LABELS, api, box, openWorkspace, signIn, signOut, writeTestImage } from './oxilabel.mjs';
 
 function equal(actual, expected, what) {
   const a = JSON.stringify(actual);
@@ -1463,7 +1463,7 @@ tests.push({
     await t.b.eval(`document.querySelector('.archive-dialog input.with-images').click(), 1`);
     const href = await t.b.eval(`document.querySelector('.archive-dialog a.download-archive').getAttribute('href')`);
     equal(href, `/api/projects/${p}/archive?images=true`, 'download link');
-    const file = join(t.work, 'project.rtag.zip');
+    const file = join(t.work, 'project.oxilabel.zip');
     writeFileSync(file, await t.api.bytes(href));
 
     await t.b.goto(`${t.base}/`);

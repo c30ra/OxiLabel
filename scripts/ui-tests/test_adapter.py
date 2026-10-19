@@ -2,7 +2,7 @@
 (boxes in the 1600 × 1000 test image). The option "delay" (seconds) makes it slow."""
 import time
 
-from rtag_worker import shapes
+from oxilabel_worker import shapes
 
 
 def load(weights, options):
