@@ -21,7 +21,6 @@ Images are published to the GitHub Container Registry: `latest` follows `main`, 
 
     podman run -d --name oxilabel -p 3000:3000 \
         -v oxilabel-data:/data \
-        -v /path/to/your/datasets:/images:ro \
         ghcr.io/c30ra/oxilabel:latest
 
 Docker works the same way: replace `podman` with `docker`.
@@ -29,10 +28,17 @@ Docker works the same way: replace `podman` with `docker`.
 Open http://localhost:3000. While the server has no accounts, it asks you to create the first one,
 which becomes the admin.
 
-- `/data` holds the database (`oxilabel.db`), tile and thumbnail caches, uploads and exports. Keep
-  it on a volume.
-- `/images` is the folder that image imports browse. Mount your datasets there, read-only is
-  enough.
+`/data` holds the database (`oxilabel.db`), tile and thumbnail caches, uploaded images and exports.
+Keep it on a volume.
+
+Images can be uploaded from the browser on any machine. The server keeps a copy of each in `/data`,
+and identical files are stored once. For large datasets already on the server machine, you can
+mount them at `/images` instead (read-only is enough), for example by adding
+`-v /path/to/your/datasets:/images:ro` to the command above:
+
+- The import dialog then browses that folder, and images are referenced where they are, never
+  copied.
+- CVAT and project-archive imports also look there for the images an export only refers to.
 
 To update, pull the new image and recreate the container with the same volumes:
 
