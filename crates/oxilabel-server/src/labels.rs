@@ -14,12 +14,7 @@ use sqlx::{
     sqlite::{SqliteArguments, SqliteRow},
 };
 
-use crate::{
-    AppState,
-    auth::{Admin, CurrentUser},
-    error::ApiError,
-    jobs, placeholders, projects,
-};
+use crate::{AppState, access_scope::AccessScope, auth::Admin, error::ApiError, placeholders, projects};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -64,9 +59,9 @@ pub(crate) async fn store_label(conn: &mut SqliteConnection, project: i64, label
     Ok(())
 }
 
-async fn list_labels(user: CurrentUser, State(pool): State<SqlitePool>, Path(project): Path<i64>) -> Result<Json<Vec<Label>>, ApiError> {
+async fn list_labels(scope: AccessScope, State(pool): State<SqlitePool>, Path(project): Path<i64>) -> Result<Json<Vec<Label>>, ApiError> {
     let mut conn = pool.acquire().await?;
-    jobs::ensure_project_visible(&mut conn, &user, project).await?;
+    scope.project(&mut conn, project).await?;
     Ok(Json(project_labels(&mut conn, project).await?))
 }
 
@@ -171,12 +166,12 @@ async fn delete_label(
 }
 
 async fn label_usage(
-    user: CurrentUser,
+    scope: AccessScope,
     State(pool): State<SqlitePool>,
     Path((project, id)): Path<(i64, i64)>,
 ) -> Result<Json<LabelUsage>, ApiError> {
     let mut conn = pool.acquire().await?;
-    jobs::ensure_project_visible(&mut conn, &user, project).await?;
+    scope.project(&mut conn, project).await?;
     let exists = sqlx::query("SELECT 1 FROM labels WHERE project_id = ? AND id = ?")
         .bind(project)
         .bind(id)

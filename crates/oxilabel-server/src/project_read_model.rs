@@ -14,6 +14,7 @@ use sqlx::{Row, SqliteConnection};
 use crate::{
     annotation_store::{ANNOTATION_COLUMNS, annotation_from_row},
     error::ApiError,
+    images::source_file,
     labels,
 };
 
@@ -55,8 +56,8 @@ static ANNOTATIONS: LazyLock<String> = LazyLock::new(|| {
     format!("SELECT image_id, {ANNOTATION_COLUMNS} FROM annotations WHERE project_id = ? AND (? OR NOT pending) ORDER BY image_id, position")
 });
 
-/// Reads `project`, or `NotFound` if there is none. An image's file is its path under `root`, the
-/// canonical image root (`images::image_root`), or its absolute path as it is.
+/// Reads `project`, or `NotFound` if there is none. Image files are resolved by
+/// `images::source_file` from the canonical image root (`images::image_root`).
 pub(crate) async fn read(conn: &mut SqliteConnection, root: &Path, project: i64, pending: Pending) -> Result<ProjectRead, ApiError> {
     let row = sqlx::query("SELECT name, next_label_id, next_job_number FROM projects WHERE id = ?")
         .bind(project)
@@ -80,7 +81,7 @@ pub(crate) async fn read(conn: &mut SqliteConnection, root: &Path, project: i64,
         let (id, path): (i64, String) = (row.get("id"), row.get("path"));
         ImageRead {
             id,
-            source: root.join(&path),
+            source: source_file(root, &path),
             path,
             hash: row.get("hash"),
             width: row.get("width"),

@@ -12,14 +12,9 @@ use oxilabel_core::{
     job::{Job, JobChange, LabelCount, NewJobs, Statistics, UserCount},
     user::{Role, User},
 };
-use sqlx::{QueryBuilder, Row, SqliteConnection, SqlitePool, sqlite::SqliteRow};
+use sqlx::{QueryBuilder, Row, Sqlite, SqliteConnection, SqlitePool, sqlite::SqliteRow};
 
-use crate::{
-    AppState,
-    auth::{Admin, CurrentUser},
-    error::ApiError,
-    projects,
-};
+use crate::{AppState, access_scope::AccessScope, auth::Admin, error::ApiError, projects};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -28,41 +23,23 @@ pub fn routes() -> Router<AppState> {
         .route("/api/projects/{project}/statistics", get(statistics))
 }
 
-/// Fails with `NotFound` unless the project exists and `user` may see it: admins see every
-/// project, annotators those with a job assigned to them.
-pub async fn ensure_project_visible(conn: &mut SqliteConnection, user: &CurrentUser, project: i64) -> Result<(), ApiError> {
-    projects::ensure_exists(conn, project).await?;
-    if let Some(owner) = user.job_owner() {
-        sqlx::query("SELECT 1 FROM jobs WHERE project_id = ? AND assignee_id = ?")
-            .bind(project)
-            .bind(owner)
-            .fetch_optional(&mut *conn)
-            .await?
-            .ok_or(ApiError::NotFound)?;
-    }
-    Ok(())
-}
-
-/// Fails with `Forbidden` if `user` is an annotator and the image is not in one of their jobs.
-/// Whether the image exists is the caller's business.
-pub async fn ensure_image_access(conn: &mut SqliteConnection, user: &CurrentUser, image: i64) -> Result<(), ApiError> {
-    if let Some(owner) = user.job_owner() {
-        sqlx::query("SELECT 1 FROM images JOIN jobs ON jobs.id = images.job_id WHERE images.id = ? AND jobs.assignee_id = ?")
-            .bind(image)
-            .bind(owner)
-            .fetch_optional(&mut *conn)
-            .await?
-            .ok_or_else(|| ApiError::Forbidden("this image is not in one of your jobs".to_owned()))?;
-    }
-    Ok(())
-}
-
-/// Each job with its assignee and counts, selected from `jobs`; callers append the conditions.
-const JOB_COLUMNS: &str = "SELECT jobs.id, jobs.number, users.id AS user_id, users.username, users.role, \
+/// Each job with its assignee and counts; callers name the job source and append the conditions.
+const JOB_COLUMNS: &str = "jobs.id, jobs.number, users.id AS user_id, users.username, users.role, \
      (SELECT COUNT(*) FROM images WHERE images.job_id = jobs.id) AS images, \
      (SELECT COUNT(*) FROM images WHERE images.job_id = jobs.id AND annotated) AS annotated, \
-     (SELECT COUNT(*) FROM annotations JOIN images ON images.id = annotations.image_id WHERE images.job_id = jobs.id AND NOT annotations.pending) AS annotations \
-     FROM jobs LEFT JOIN users ON users.id = jobs.assignee_id";
+     (SELECT COUNT(*) FROM annotations JOIN images ON images.id = annotations.image_id WHERE images.job_id = jobs.id AND NOT annotations.pending) AS annotations";
+
+/// Appends the select of a project's jobs from `source` (`jobs`, or the scope's `visible_jobs`).
+fn push_jobs(query: &mut QueryBuilder<'_, Sqlite>, source: &str, project: i64) {
+    query
+        .push(format!("SELECT {JOB_COLUMNS} FROM {source} LEFT JOIN users ON users.id = jobs.assignee_id WHERE jobs.project_id = "))
+        .push_bind(project)
+        .push(" ORDER BY jobs.number");
+}
+
+async fn read_jobs(conn: &mut SqliteConnection, mut query: QueryBuilder<'_, Sqlite>) -> Result<Vec<Job>, ApiError> {
+    Ok(query.build().fetch_all(&mut *conn).await?.iter().map(job_from_row).collect())
+}
 
 fn user_from_job_row(row: &SqliteRow) -> Option<User> {
     let id: Option<i64> = row.get("user_id");
@@ -84,18 +61,8 @@ fn job_from_row(row: &SqliteRow) -> Job {
     }
 }
 
-async fn project_jobs(conn: &mut SqliteConnection, project: i64, owner: Option<i64>) -> Result<Vec<Job>, ApiError> {
-    let mut select = QueryBuilder::new(JOB_COLUMNS);
-    select.push(" WHERE jobs.project_id = ").push_bind(project);
-    if let Some(owner) = owner {
-        select.push(" AND jobs.assignee_id = ").push_bind(owner);
-    }
-    select.push(" ORDER BY jobs.number");
-    Ok(select.build().fetch_all(&mut *conn).await?.iter().map(job_from_row).collect())
-}
-
 async fn job(conn: &mut SqliteConnection, project: i64, id: i64) -> Result<Job, ApiError> {
-    let row = sqlx::query(&format!("{JOB_COLUMNS} WHERE jobs.project_id = ? AND jobs.id = ?"))
+    let row = sqlx::query(&format!("SELECT {JOB_COLUMNS} FROM jobs jobs LEFT JOIN users ON users.id = jobs.assignee_id WHERE jobs.project_id = ? AND jobs.id = ?"))
         .bind(project)
         .bind(id)
         .fetch_optional(&mut *conn)
@@ -104,10 +71,12 @@ async fn job(conn: &mut SqliteConnection, project: i64, id: i64) -> Result<Job, 
     Ok(job_from_row(&row))
 }
 
-async fn list_jobs(user: CurrentUser, State(pool): State<SqlitePool>, Path(project): Path<i64>) -> Result<Json<Vec<Job>>, ApiError> {
+async fn list_jobs(scope: AccessScope, State(pool): State<SqlitePool>, Path(project): Path<i64>) -> Result<Json<Vec<Job>>, ApiError> {
     let mut conn = pool.acquire().await?;
-    ensure_project_visible(&mut conn, &user, project).await?;
-    Ok(Json(project_jobs(&mut conn, project, user.job_owner()).await?))
+    scope.project(&mut conn, project).await?;
+    let mut select = scope.sql();
+    push_jobs(&mut select, "visible_jobs jobs", project);
+    Ok(Json(read_jobs(&mut conn, select).await?))
 }
 
 async fn ensure_user_exists(conn: &mut SqliteConnection, user: Option<i64>) -> Result<(), ApiError> {
@@ -247,6 +216,8 @@ async fn statistics(_: Admin, State(pool): State<SqlitePool>, Path(project): Pat
         annotations: row.get("annotations"),
     })
     .collect();
-    let jobs = project_jobs(&mut conn, project, None).await?;
+    let mut select = QueryBuilder::new("");
+    push_jobs(&mut select, "jobs jobs", project);
+    let jobs = read_jobs(&mut conn, select).await?;
     Ok(Json(Statistics { labels, jobs, users }))
 }

@@ -20,10 +20,10 @@ use sqlx::{QueryBuilder, Row, Sqlite, SqliteConnection, SqlitePool};
 
 use crate::{
     AppState,
-    auth::{Admin, CurrentUser},
+    access_scope::AccessScope,
+    auth::Admin,
     error::ApiError,
     host::Caller,
-    jobs,
     progress::{Reporter, Streaming},
     projects,
 };
@@ -244,6 +244,13 @@ pub(crate) fn image_root(state: &AppState) -> Result<PathBuf, ApiError> {
         .images_root
         .canonicalize()
         .map_err(|err| ApiError::Internal(format!("image root {} is not available: {err}", state.images_root.display())))
+}
+
+/// The file a stored image path names (ADR 0003): an absolute path (a host folder or an uploaded
+/// copy) as it is, a relative one under the image root. The inverse of `relative_path`.
+pub(crate) fn source_file(root: &Path, stored: &str) -> PathBuf {
+    let path = Path::new(stored);
+    if path.is_absolute() { path.to_owned() } else { root.join(path) }
 }
 
 /// Resolves a folder or file: an absolute path as it is, for requests from the server's own
@@ -492,13 +499,9 @@ fn default_page_size() -> i64 {
     100
 }
 
-/// Appends the conditions selecting the project's images that match `filter` and, for an
-/// annotator (`owner`), are in their jobs.
-fn push_filter(query: &mut QueryBuilder<'_, Sqlite>, project: i64, filter: &ImageFilter, owner: Option<i64>) -> Result<(), ApiError> {
-    query.push(" WHERE project_id = ").push_bind(project);
-    if let Some(owner) = owner {
-        query.push(" AND job_id IN (SELECT id FROM jobs WHERE assignee_id = ").push_bind(owner).push(")");
-    }
+/// Appends the conditions of `filter`; the caller's query already selects the project's images
+/// the user may see (`access_scope::AccessScope::sql`).
+fn push_filter(query: &mut QueryBuilder<'_, Sqlite>, project: i64, filter: &ImageFilter) -> Result<(), ApiError> {
     if let Some(job) = filter.job {
         query.push(" AND job_id = ").push_bind(job);
     }
@@ -576,20 +579,22 @@ fn is_date(text: &str) -> bool {
 }
 
 async fn list_images(
-    user: CurrentUser,
+    scope: AccessScope,
     State(pool): State<SqlitePool>,
     UrlPath(project): UrlPath<i64>,
     Query(page): Query<PageQuery>,
     Query(filter): Query<ImageFilter>,
 ) -> Result<Json<ImagePage>, ApiError> {
     let mut conn = pool.acquire().await?;
-    jobs::ensure_project_visible(&mut conn, &user, project).await?;
-    let mut count = QueryBuilder::new("SELECT COUNT(*) AS n FROM images");
-    push_filter(&mut count, project, &filter, user.job_owner())?;
+    scope.project(&mut conn, project).await?;
+    let mut count = scope.sql();
+    count.push("SELECT COUNT(*) AS n FROM visible_images WHERE project_id = ").push_bind(project);
+    push_filter(&mut count, project, &filter)?;
     let total: i64 = count.build().fetch_one(&mut *conn).await?.get("n");
 
-    let mut select = QueryBuilder::new(IMAGE_COLUMNS);
-    push_filter(&mut select, project, &filter, user.job_owner())?;
+    let mut select = scope.sql();
+    select.push(format!("SELECT id, {IMAGE_COLUMNS} FROM visible_images images WHERE project_id = ")).push_bind(project);
+    push_filter(&mut select, project, &filter)?;
     select
         .push(order(&filter))
         .push(" LIMIT ")
@@ -600,13 +605,13 @@ async fn list_images(
     Ok(Json(ImagePage { total, images: rows.iter().map(image_from_row).collect() }))
 }
 
-/// Selects the columns `image_from_row` reads; callers append the conditions.
-const IMAGE_COLUMNS: &str = "SELECT id, path, width, height, annotated, size, \
+/// The columns `image_from_row` reads, without `id`; callers select them from their image source.
+pub(crate) const IMAGE_COLUMNS: &str = "path, width, height, annotated, size, \
      strftime('%Y-%m-%d %H:%M', modified_at, 'unixepoch', 'localtime') AS modified, \
      strftime('%Y-%m-%d %H:%M', created_at, 'unixepoch', 'localtime') AS created, \
-     (SELECT COUNT(*) FROM annotations WHERE annotations.image_id = images.id) AS annotation_count FROM images";
+     (SELECT COUNT(*) FROM annotations WHERE annotations.image_id = images.id) AS annotation_count";
 
-fn image_from_row(row: &sqlx::sqlite::SqliteRow) -> Image {
+pub(crate) fn image_from_row(row: &sqlx::sqlite::SqliteRow) -> Image {
     Image {
         id: row.get("id"),
         path: row.get("path"),
@@ -620,34 +625,22 @@ fn image_from_row(row: &sqlx::sqlite::SqliteRow) -> Image {
     }
 }
 
-/// The image, if it is in the project and `user` may open it.
-async fn visible_image(pool: &SqlitePool, user: &CurrentUser, project: i64, image: i64) -> Result<Image, ApiError> {
-    let row = sqlx::query(&format!("{IMAGE_COLUMNS} WHERE id = ? AND project_id = ?"))
-        .bind(image)
-        .bind(project)
-        .fetch_optional(pool)
-        .await?
-        .ok_or(ApiError::NotFound)?;
-    jobs::ensure_image_access(&mut *pool.acquire().await?, user, image).await?;
-    Ok(image_from_row(&row))
-}
-
 async fn get_image(
-    user: CurrentUser,
+    scope: AccessScope,
     State(pool): State<SqlitePool>,
     UrlPath((project, image)): UrlPath<(i64, i64)>,
 ) -> Result<Json<Image>, ApiError> {
-    Ok(Json(visible_image(&pool, &user, project, image).await?))
+    Ok(Json(scope.project_image(&mut *pool.acquire().await?, project, image).await?.image))
 }
 
 /// Marks an image annotated or not annotated.
 async fn set_status(
-    user: CurrentUser,
+    scope: AccessScope,
     State(pool): State<SqlitePool>,
     UrlPath((project, image)): UrlPath<(i64, i64)>,
     Json(status): Json<ImageStatus>,
 ) -> Result<Json<Image>, ApiError> {
-    visible_image(&pool, &user, project, image).await?;
+    scope.project_image(&mut *pool.acquire().await?, project, image).await?;
     let updated = sqlx::query("UPDATE images SET annotated = ? WHERE id = ? AND project_id = ?")
         .bind(status.annotated)
         .bind(image)
@@ -657,7 +650,7 @@ async fn set_status(
     if updated.rows_affected() == 0 {
         return Err(ApiError::NotFound);
     }
-    Ok(Json(visible_image(&pool, &user, project, image).await?))
+    Ok(Json(scope.project_image(&mut *pool.acquire().await?, project, image).await?.image))
 }
 
 #[derive(Deserialize)]
@@ -675,16 +668,17 @@ fn default_neighbours() -> i64 {
 /// the order they are listed in) and up to `count` of those on each side, for the filmstrip.
 /// The image itself need not match: `position` is then where it would be.
 async fn neighbours(
-    user: CurrentUser,
+    scope: AccessScope,
     State(pool): State<SqlitePool>,
     UrlPath((project, image)): UrlPath<(i64, i64)>,
     Query(query): Query<NeighboursQuery>,
     Query(filter): Query<ImageFilter>,
 ) -> Result<Json<ImageNeighbours>, ApiError> {
-    let path = visible_image(&pool, &user, project, image).await?.path;
+    let path = scope.project_image(&mut *pool.acquire().await?, project, image).await?.image.path;
     let count = query.count.clamp(0, 50);
-    let mut before = QueryBuilder::new("SELECT COUNT(*) AS n FROM images");
-    push_filter(&mut before, project, &filter, user.job_owner())?;
+    let mut before = scope.sql();
+    before.push("SELECT COUNT(*) AS n FROM visible_images WHERE project_id = ").push_bind(project);
+    push_filter(&mut before, project, &filter)?;
     if filter.same_name {
         let name = path.rsplit('/').next().unwrap_or_default().to_owned();
         before.push(format!(" AND ({FILE_NAME}, path) < (")).push_bind(name).push(", ").push_bind(&path).push(")");
@@ -692,11 +686,13 @@ async fn neighbours(
         before.push(" AND path < ").push_bind(&path);
     }
     let before: i64 = before.build().fetch_one(&pool).await?.get("n");
-    let mut total = QueryBuilder::new("SELECT COUNT(*) AS n FROM images");
-    push_filter(&mut total, project, &filter, user.job_owner())?;
+    let mut total = scope.sql();
+    total.push("SELECT COUNT(*) AS n FROM visible_images WHERE project_id = ").push_bind(project);
+    push_filter(&mut total, project, &filter)?;
     let total: i64 = total.build().fetch_one(&pool).await?.get("n");
-    let mut select = QueryBuilder::new(IMAGE_COLUMNS);
-    push_filter(&mut select, project, &filter, user.job_owner())?;
+    let mut select = scope.sql();
+    select.push(format!("SELECT id, {IMAGE_COLUMNS} FROM visible_images images WHERE project_id = ")).push_bind(project);
+    push_filter(&mut select, project, &filter)?;
     select.push(order(&filter)).push(" LIMIT ").push_bind(2 * count + 1).push(" OFFSET ").push_bind((before - count).max(0));
     let rows = select.build().fetch_all(&pool).await?;
     // When fewer than `count` images come before, the window starts at the first and is shorter.
@@ -706,15 +702,16 @@ async fn neighbours(
 
 /// Ids of every image matching the filter, in path order; used to select all of them at once.
 async fn list_image_ids(
-    user: CurrentUser,
+    scope: AccessScope,
     State(pool): State<SqlitePool>,
     UrlPath(project): UrlPath<i64>,
     Query(filter): Query<ImageFilter>,
 ) -> Result<Json<Vec<i64>>, ApiError> {
     let mut conn = pool.acquire().await?;
-    jobs::ensure_project_visible(&mut conn, &user, project).await?;
-    let mut select = QueryBuilder::new("SELECT id FROM images");
-    push_filter(&mut select, project, &filter, user.job_owner())?;
+    scope.project(&mut conn, project).await?;
+    let mut select = scope.sql();
+    select.push("SELECT id FROM visible_images WHERE project_id = ").push_bind(project);
+    push_filter(&mut select, project, &filter)?;
     select.push(order(&filter));
     let rows = select.build().fetch_all(&mut *conn).await?;
     Ok(Json(rows.iter().map(|row| row.get("id")).collect()))

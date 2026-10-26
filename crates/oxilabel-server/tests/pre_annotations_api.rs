@@ -190,7 +190,7 @@ async fn annotators_run_models_only_on_images_of_their_jobs() {
     call(&app, Method::POST, &format!("/api/projects/{p}/jobs"), Some(json!({"image_ids": [images[0]], "assignee": anna["id"]}))).await;
     let anna = login(&app, "anna", "anna's password").await;
     let (status, _) = call(&anna, Method::POST, &format!("/api/projects/{p}/pre-annotations"), Some(json!({"model": m, "image_ids": images}))).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(status, StatusCode::NOT_FOUND);
     let status = run(&anna, p, json!({"model": m, "image_ids": [images[0]]})).await;
     assert_eq!(status["created"], json!(2));
     let (status, _) = call(&anna, Method::POST, &format!("/api/projects/{p}/pre-annotations"), Some(json!({"model": m, "image_ids": []}))).await;

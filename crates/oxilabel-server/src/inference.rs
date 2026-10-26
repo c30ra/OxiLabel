@@ -25,9 +25,10 @@ use sqlx::{Row, SqliteConnection, SqlitePool};
 
 use crate::{
     AppState,
+    access_scope::AccessScope,
     auth::{Admin, CurrentUser},
     error::ApiError,
-    images, jobs, labels,
+    images, labels,
     pre_annotation_run::PreAnnotationRun,
     worker::{HttpWorker, WorkerPort},
 };
@@ -192,25 +193,19 @@ struct RunPath {
 }
 
 /// Starts running a model on the given images, or a job's, in the background.
-async fn start_run(user: CurrentUser, State(state): State<AppState>, Path(project): Path<i64>, Json(request): Json<RunRequest>) -> Result<(StatusCode, Json<RunStatus>), ApiError> {
+async fn start_run(scope: AccessScope, State(state): State<AppState>, Path(project): Path<i64>, Json(request): Json<RunRequest>) -> Result<(StatusCode, Json<RunStatus>), ApiError> {
     let mut conn = state.pool.acquire().await?;
-    jobs::ensure_project_visible(&mut conn, &user, project).await?;
+    scope.project(&mut conn, project).await?;
     let model = model(&mut conn, request.model).await?;
     let image_ids: Vec<i64> = match request.job {
-        Some(job) => sqlx::query_scalar("SELECT images.id FROM images JOIN jobs ON jobs.id = images.job_id WHERE jobs.id = ? AND jobs.project_id = ? ORDER BY images.path")
-            .bind(job)
-            .bind(project)
-            .fetch_all(&mut *conn)
-            .await?,
-        None => request.image_ids.clone(),
+        Some(job) => scope.job_images(&mut conn, project, job).await?,
+        None => {
+            scope.check_run_images(&mut conn, project, &request.image_ids).await?;
+            request.image_ids.clone()
+        }
     };
     if image_ids.is_empty() {
         return Err(ApiError::BadRequest("choose images to run the model on".into()));
-    }
-    for &image in &image_ids {
-        let in_project: Option<i64> = sqlx::query_scalar("SELECT id FROM images WHERE id = ? AND project_id = ?").bind(image).bind(project).fetch_optional(&mut *conn).await?;
-        in_project.ok_or_else(|| ApiError::BadRequest(format!("image {image} is not in this project")))?;
-        jobs::ensure_image_access(&mut conn, &user, image).await?;
     }
     let worker = current_worker(&state)?;
     let labels = labels::project_labels(&mut conn, project).await?;
@@ -251,19 +246,19 @@ async fn start_run(user: CurrentUser, State(state): State<AppState>, Path(projec
     Ok((StatusCode::ACCEPTED, Json(status)))
 }
 
-async fn visible_run(state: &AppState, user: &CurrentUser, id: u64) -> Result<(RunStatus, Arc<AtomicBool>), ApiError> {
+async fn visible_run(state: &AppState, scope: &AccessScope, id: u64) -> Result<(RunStatus, Arc<AtomicBool>), ApiError> {
     let (status, cancelled) = state.runs.get(id).ok_or(ApiError::NotFound)?;
-    jobs::ensure_project_visible(&mut *state.pool.acquire().await?, user, status.project).await?;
+    scope.project(&mut *state.pool.acquire().await?, status.project).await?;
     Ok((status, cancelled))
 }
 
-async fn run_status(user: CurrentUser, State(state): State<AppState>, Path(RunPath { id }): Path<RunPath>) -> Result<Json<RunStatus>, ApiError> {
-    Ok(Json(visible_run(&state, &user, id).await?.0))
+async fn run_status(scope: AccessScope, State(state): State<AppState>, Path(RunPath { id }): Path<RunPath>) -> Result<Json<RunStatus>, ApiError> {
+    Ok(Json(visible_run(&state, &scope, id).await?.0))
 }
 
 /// Stops a run after the image the worker is on.
-async fn cancel_run(user: CurrentUser, State(state): State<AppState>, Path(RunPath { id }): Path<RunPath>) -> Result<StatusCode, ApiError> {
-    visible_run(&state, &user, id).await?.1.store(true, Ordering::SeqCst);
+async fn cancel_run(scope: AccessScope, State(state): State<AppState>, Path(RunPath { id }): Path<RunPath>) -> Result<StatusCode, ApiError> {
+    visible_run(&state, &scope, id).await?.1.store(true, Ordering::SeqCst);
     Ok(StatusCode::NO_CONTENT)
 }
 

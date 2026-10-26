@@ -186,7 +186,7 @@ async fn annotators_see_only_their_jobs_and_the_projects_and_images_in_them() {
 }
 
 #[tokio::test]
-async fn annotators_can_only_open_and_edit_images_in_jobs_they_own() {
+async fn annotators_can_only_open_and_edit_images_in_jobs_they_own_and_the_rest_is_not_found() {
     let app = test_app().await;
     let (anna_id, anna) = annotator(&app, "anna").await;
     let (bob_id, _) = annotator(&app, "bob").await;
@@ -196,13 +196,13 @@ async fn annotators_can_only_open_and_edit_images_in_jobs_they_own() {
 
     assert_eq!(save(&anna, p, images[0], json!([rectangle(1)])).await, StatusCode::OK);
     for other in [images[1], images[2]] {
-        assert_eq!(save(&anna, p, other, json!([rectangle(1)])).await, StatusCode::FORBIDDEN);
+        assert_eq!(save(&anna, p, other, json!([rectangle(1)])).await, StatusCode::NOT_FOUND);
         let image = format!("/api/projects/{p}/images/{other}");
-        assert_eq!(call(&anna, Method::PUT, &format!("{image}/status"), Some(json!({"annotated": true}))).await.0, StatusCode::FORBIDDEN);
-        assert_eq!(call(&anna, Method::GET, &format!("{image}/annotations"), None).await.0, StatusCode::FORBIDDEN);
-        assert_eq!(call(&anna, Method::GET, &image, None).await.0, StatusCode::FORBIDDEN);
-        assert_eq!(get_bytes(&anna, &format!("/api/images/{other}/thumbnail")).await.0, StatusCode::FORBIDDEN);
-        assert_eq!(get_bytes(&anna, &format!("/api/images/{other}/tiles/0/0/0")).await.0, StatusCode::FORBIDDEN);
+        assert_eq!(call(&anna, Method::PUT, &format!("{image}/status"), Some(json!({"annotated": true}))).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(call(&anna, Method::GET, &format!("{image}/annotations"), None).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(call(&anna, Method::GET, &image, None).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(get_bytes(&anna, &format!("/api/images/{other}/thumbnail")).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(get_bytes(&anna, &format!("/api/images/{other}/tiles/0/0/0")).await.0, StatusCode::NOT_FOUND);
     }
     // Admins edit everywhere.
     assert_eq!(save(&app, p, images[1], json!([rectangle(2)])).await, StatusCode::OK);

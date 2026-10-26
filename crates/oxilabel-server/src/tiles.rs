@@ -31,14 +31,12 @@ use oxilabel_core::{
     pyramid::{Pyramid, TILE_SIZE},
 };
 use serde::Deserialize;
-use sqlx::Row;
 
 use crate::{
     AppState,
-    auth::CurrentUser,
+    access_scope::AccessScope,
     enhance::{self, Pixels},
     error::ApiError,
-    jobs,
     thumbnails::open_image,
     write_atomically,
 };
@@ -108,7 +106,7 @@ impl GenerationLocks {
 }
 
 async fn tile(
-    user: CurrentUser,
+    scope: AccessScope,
     State(state): State<AppState>,
     UrlPath((id, level, x, y)): UrlPath<(i64, u32, u32, u32)>,
     Query(query): Query<TileQuery>,
@@ -118,16 +116,11 @@ async fn tile(
         None | Some("") => None,
         Some(key) => Some(Filter::parse(key).ok_or_else(|| ApiError::BadRequest(format!("unknown filter {key}")))?),
     };
-    let row = sqlx::query("SELECT path, hash, width, height FROM images WHERE id = ?")
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await?
-        .ok_or(ApiError::NotFound)?;
-    jobs::ensure_image_access(&mut *state.pool.acquire().await?, &user, id).await?;
-    let pyramid = Pyramid::new(row.get("width"), row.get("height"));
+    let visible = scope.image(&mut *state.pool.acquire().await?, id).await?;
+    let pyramid = Pyramid::new(visible.image.width, visible.image.height);
     pyramid.tile_bounds(level, x, y).ok_or(ApiError::NotFound)?;
 
-    let hash: String = row.get("hash");
+    let hash = visible.hash;
     // Named by content hash, so identical images share one pyramid; filters each get a folder
     // (named by their key) under `filters`.
     let image_dir = state.cache_dir.join("tiles").join(&hash);
@@ -145,7 +138,7 @@ async fn tile(
         let lock = state.pyramid_locks.for_key(&relative);
         let _generating = lock.lock().await;
         if !dir.join(COMPLETE_MARKER).exists() {
-            let source = state.images_root.join(row.get::<String, _>("path"));
+            let source = visible.source;
             let dir = dir.clone();
             let filtered = filter.is_some();
             tokio::task::spawn_blocking(move || {
