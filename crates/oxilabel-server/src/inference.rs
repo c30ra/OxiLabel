@@ -1,18 +1,13 @@
-//! Pre-annotation: the registered models, the worker that runs them (ADR 0001), and runs of a
-//! model over images, in the background with progress and cancelling.
-//!
-//! The worker contract (HTTP/JSON): `GET /health` → `{device}`; `POST /classes` with a model
-//! (`adapter`, `weights`, `options`) → `{classes}`; `POST /predict` with a model and `image`
-//! (the file's bytes, base64) → `{predictions: [{class, confidence, shape}]}`, shapes in the
-//! image's pixels as OxiLabel writes them. Errors come as a non-2xx status with `{error}`.
+//! Pre-annotation: the registered models, the worker that runs them (ADR 0001, through
+//! `worker::WorkerPort`), and runs of a model over images, in the background with progress and
+//! cancelling.
 
 use std::{
     collections::BTreeMap,
     sync::{
-        Arc, Mutex, RwLock,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
 };
 
 use axum::{
@@ -21,29 +16,25 @@ use axum::{
     http::StatusCode,
     routing::{get, post, put},
 };
-use base64::Engine;
 use oxilabel_core::{
     Label,
     annotation::Annotation,
     import::SkipCount,
-    inference::{DEFAULT_WORKER_URL, Model, ModelDefinition, Prediction, RunRequest, RunState, RunStatus, WorkerHealth, WorkerSettings},
+    inference::{DEFAULT_WORKER_URL, Model, ModelDefinition, RunRequest, RunState, RunStatus, WorkerHealth, WorkerSettings},
+    worker::{PredictRequest, WorkerModel},
 };
 use serde::Deserialize;
-use serde_json::{Value, json};
 use sqlx::{Row, SqliteConnection, SqlitePool};
 
 use crate::{
     AppState,
-    worker_process::WorkerProcess,
     annotations::{check_annotation, insert_annotations},
     auth::{Admin, CurrentUser},
     error::ApiError,
     images, jobs, labels,
+    worker::{HttpWorker, WorkerPort},
 };
 
-/// Loading a model can take a while the first time; a prediction on a large photo too.
-const PREDICT_TIMEOUT: Duration = Duration::from_secs(600);
-const HEALTH_TIMEOUT: Duration = Duration::from_secs(3);
 /// Ended runs kept for their status; older ones are forgotten.
 const KEPT_RUNS: usize = 50;
 const NO_WORKER: &str = "no pre-annotation worker is set up: an admin sets one on the Settings screen";
@@ -59,75 +50,28 @@ pub fn routes() -> Router<AppState> {
         .route("/api/settings/worker", get(worker_settings).put(change_worker_settings))
 }
 
-/// The worker's client: where it listens, if anywhere, and the worker the server starts.
-#[derive(Clone, Default)]
-pub struct Worker {
-    url: Arc<RwLock<Option<String>>>,
-    client: reqwest::Client,
-    process: WorkerProcess,
+/// The worker, unless none is set up.
+fn current_worker(state: &AppState) -> Result<HttpWorker, ApiError> {
+    state.worker.current().ok_or_else(|| ApiError::Conflict(NO_WORKER.into()))
 }
 
-impl Worker {
-    fn url(&self, path: &str) -> Result<String, String> {
-        let base = self.url.read().expect("worker url lock").clone().ok_or(NO_WORKER)?;
-        Ok(format!("{base}{path}"))
-    }
-
-    /// Uses `settings` from now on: the URL to call, and the command to run (restarted if it was
-    /// running).
-    pub fn apply(&self, settings: &WorkerSettings) {
-        *self.url.write().expect("worker url lock") = settings.url.clone();
-        let addr = settings.url.as_deref().unwrap_or(DEFAULT_WORKER_URL).trim_start_matches("http://").to_owned();
-        self.process.run(settings.command.clone(), addr);
-    }
-
-    /// Sends a request and reads the JSON answer, or the worker's `{error}`.
-    async fn call(&self, request: reqwest::RequestBuilder) -> Result<Value, String> {
-        let response = request.send().await.map_err(|err| format!("the worker did not answer: {err}"))?;
-        let status = response.status();
-        let text = response.text().await.map_err(|err| format!("the worker's answer is unreadable: {err}"))?;
-        let body = serde_json::from_str::<Value>(&text);
-        if !status.is_success() {
-            // A proxy or a crash may answer without the worker's JSON.
-            let message = body.ok().and_then(|body| body["error"].as_str().map(str::to_owned)).unwrap_or_else(|| format!("status {status}"));
-            return Err(format!("the worker failed: {message}"));
-        }
-        body.map_err(|err| format!("the worker's answer is unreadable: {err}"))
-    }
-
-    async fn health(&self) -> WorkerHealth {
-        let answer = match self.url("/health") {
-            Ok(url) => self.call(self.client.get(url).timeout(HEALTH_TIMEOUT)).await,
-            Err(message) => Err(message),
-        };
-        match answer {
-            Ok(body) => WorkerHealth { reachable: true, device: body["device"].as_str().map(str::to_owned), error: None },
-            Err(error) => WorkerHealth { reachable: false, device: None, error: Some(error) },
-        }
-    }
-
-    async fn post(&self, path: &str, model: &ModelDefinition, extra: Option<(&str, Value)>) -> Result<Value, String> {
-        let mut body = json!({"adapter": model.adapter, "weights": model.weights, "options": model.options});
-        if let Some((key, value)) = extra {
-            body[key] = value;
-        }
-        self.call(self.client.post(self.url(path)?).json(&body).timeout(PREDICT_TIMEOUT)).await
-    }
-
-    async fn classes(&self, model: &ModelDefinition) -> Result<Vec<String>, String> {
-        let body = self.post("/classes", model, None).await?;
-        serde_json::from_value(body["classes"].clone()).map_err(|err| format!("the worker's classes are unreadable: {err}"))
-    }
-
-    async fn predict(&self, model: &ModelDefinition, image: &[u8]) -> Result<Vec<Prediction>, String> {
-        let encoded = base64::engine::general_purpose::STANDARD.encode(image);
-        let body = self.post("/predict", model, Some(("image", Value::String(encoded)))).await?;
-        serde_json::from_value(body["predictions"].clone()).map_err(|err| format!("the worker's predictions are unreadable: {err}"))
-    }
+/// Uses `settings` from now on: the URL to call, and the command to run (restarted if it was
+/// running).
+pub(crate) fn apply_worker_settings(state: &AppState, settings: &WorkerSettings) {
+    state.worker.point_at(settings.url.clone());
+    let addr = settings.url.as_deref().unwrap_or(DEFAULT_WORKER_URL).trim_start_matches("http://").to_owned();
+    state.worker_process.run(settings.command.clone(), addr);
 }
 
 async fn worker_health(_: CurrentUser, State(state): State<AppState>) -> Json<WorkerHealth> {
-    Json(state.worker.health().await)
+    let device = match state.worker.current() {
+        Some(worker) => worker.health().await.map_err(|err| err.to_string()),
+        None => Err(NO_WORKER.to_owned()),
+    };
+    Json(match device {
+        Ok(device) => WorkerHealth { reachable: true, device: Some(device), error: None },
+        Err(error) => WorkerHealth { reachable: false, device: None, error: Some(error) },
+    })
 }
 
 fn model_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Model, ApiError> {
@@ -219,7 +163,8 @@ async fn delete_model(_: Admin, State(pool): State<SqlitePool>, Path(id): Path<i
 /// The model's class names, as the worker reads them from the weights.
 async fn model_classes(_: Admin, State(state): State<AppState>, Path(id): Path<i64>) -> Result<Json<Vec<String>>, ApiError> {
     let model = model(&mut *state.pool.acquire().await?, id).await?;
-    state.worker.classes(&model.definition).await.map(Json).map_err(ApiError::Conflict)
+    let worker = current_worker(&state)?;
+    worker.classes(&WorkerModel::from(&model.definition)).await.map(Json).map_err(|err| ApiError::Conflict(err.to_string()))
 }
 
 /// The runs of this server's lifetime: their status, and a flag that cancels each.
@@ -270,7 +215,7 @@ async fn start_run(user: CurrentUser, State(state): State<AppState>, Path(projec
         in_project.ok_or_else(|| ApiError::BadRequest(format!("image {image} is not in this project")))?;
         jobs::ensure_image_access(&mut conn, &user, image).await?;
     }
-    state.worker.url("").map_err(ApiError::Conflict)?;
+    let worker = current_worker(&state)?;
     let labels = labels::project_labels(&mut conn, project).await?;
     drop(conn);
 
@@ -296,13 +241,13 @@ async fn start_run(user: CurrentUser, State(state): State<AppState>, Path(projec
         table.runs.insert(status.id, (status.clone(), cancelled.clone()));
         status
     };
-    tokio::spawn(run(state, status.id, project, model.definition, labels, image_ids, request.threshold, cancelled));
+    tokio::spawn(run(state, worker, status.id, project, model.definition, labels, image_ids, request.threshold, cancelled));
     Ok((StatusCode::ACCEPTED, Json(status)))
 }
 
 /// Runs the model image by image; between images it stops if cancelled.
 #[allow(clippy::too_many_arguments)]
-async fn run(state: AppState, id: u64, project: i64, model: ModelDefinition, labels: Vec<Label>, image_ids: Vec<i64>, threshold: Option<f64>, cancelled: Arc<AtomicBool>) {
+async fn run(state: AppState, worker: impl WorkerPort + 'static, id: u64, project: i64, model: ModelDefinition, labels: Vec<Label>, image_ids: Vec<i64>, threshold: Option<f64>, cancelled: Arc<AtomicBool>) {
     let skip = |reason: String| {
         state.runs.update(id, |status| match status.skipped.iter_mut().find(|skip| skip.reason == reason) {
             Some(skip) => skip.count += 1,
@@ -316,6 +261,8 @@ async fn run(state: AppState, id: u64, project: i64, model: ModelDefinition, lab
     };
     // Set when cancelling leaves images undone.
     let mut stopped = false;
+    // The image changes from one to the next.
+    let mut request = PredictRequest { model: WorkerModel::from(&model), image: Vec::new() };
     for image in image_ids {
         if cancelled.load(Ordering::SeqCst) {
             stopped = true;
@@ -334,9 +281,10 @@ async fn run(state: AppState, id: u64, project: i64, model: ModelDefinition, lab
             skip("image files missing".into());
             continue;
         };
-        let predictions = match state.worker.predict(&model, &bytes).await {
+        request.image = bytes;
+        let predictions = match worker.predict(&request).await {
             Ok(predictions) => predictions,
-            Err(error) => return fail(error),
+            Err(error) => return fail(error.to_string()),
         };
         // A run cancelled while the worker was busy keeps nothing of that image.
         if cancelled.load(Ordering::SeqCst) {
@@ -430,6 +378,6 @@ async fn change_worker_settings(_: Admin, State(state): State<AppState>, Json(se
         .bind(serde_json::to_string(&settings).expect("settings serialise"))
         .execute(&state.pool)
         .await?;
-    state.worker.apply(&settings);
+    apply_worker_settings(&state, &settings);
     Ok(Json(settings))
 }
