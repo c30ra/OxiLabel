@@ -32,7 +32,7 @@ use sqlx::Row;
 
 use crate::{
     AppState,
-    annotation_store::{check_annotation, insert_annotations},
+    annotation_store::{self, Replacing},
     auth::Admin,
     error::ApiError,
     host::Caller,
@@ -250,36 +250,25 @@ async fn import_into(
             .await?;
         jobs.insert(job.number, id);
     }
-    let (mut annotations, mut skipped) = (0, Vec::<SkipCount>::new());
-    for Found { image, archived } in &found {
-        let id = images::add_images(&mut tx, project, std::slice::from_ref(image)).await?[0];
+    let (imported, mut annotations, mut skipped) = (found.len(), 0, Vec::<SkipCount>::new());
+    for Found { image, archived } in found {
+        let id = images::add_images(&mut tx, project, std::slice::from_ref(&image)).await?[0];
         sqlx::query("UPDATE images SET annotated = ?, job_id = ? WHERE id = ?")
             .bind(archived.annotated)
             .bind(archived.job.and_then(|number| jobs.get(&number)))
             .bind(id)
             .execute(&mut *tx)
             .await?;
-        let mut fitting = Vec::new();
-        for annotation in &archived.annotations {
-            let check = archive
-                .labels
-                .iter()
-                .find(|label| label.id == annotation.label)
-                .ok_or_else(|| format!("there is no label with id {}", annotation.label))
-                .and_then(|label| check_annotation(label, annotation, image.width, image.height));
-            match check {
-                Ok(()) => fitting.push(annotation.clone()),
-                Err(reason) => match skipped.iter_mut().find(|skip| skip.reason == reason) {
-                    Some(skip) => skip.count += 1,
-                    None => skipped.push(SkipCount { reason, count: 1 }),
-                },
-            }
+        let written = annotation_store::write(&mut tx, project, id, Replacing::All, archived.annotations)
+            .await?
+            .ok_or_else(|| ApiError::Internal("an image just added is not in its project".into()))?;
+        annotations += written.stored;
+        for skip in written.skipped {
+            SkipCount::tally(&mut skipped, skip.reason, skip.count);
         }
-        insert_annotations(&mut tx, project, id, 0, &fitting).await?;
-        annotations += fitting.len();
     }
     tx.commit().await?;
-    let report = ArchiveImportReport { project: Project { id: project, name }, images: found.len(), missing, annotations, skipped, unassigned_jobs };
+    let report = ArchiveImportReport { project: Project { id: project, name }, images: imported, missing, annotations, skipped, unassigned_jobs };
     Ok((StatusCode::CREATED, Json(report)))
 }
 
