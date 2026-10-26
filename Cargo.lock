@@ -1924,7 +1924,7 @@ dependencies = [
 
 [[package]]
 name = "oxilabel-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "clap",
@@ -1941,7 +1941,7 @@ dependencies = [
 
 [[package]]
 name = "oxilabel-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -1950,7 +1950,7 @@ dependencies = [
 
 [[package]]
 name = "oxilabel-formats"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "oxilabel-core",
@@ -1963,7 +1963,7 @@ dependencies = [
 
 [[package]]
 name = "oxilabel-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "ashpd",
@@ -1992,7 +1992,7 @@ dependencies = [
 
 [[package]]
 name = "oxilabel-ui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gloo-net",
  "leptos",
