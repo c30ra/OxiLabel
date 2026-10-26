@@ -27,11 +27,10 @@ use axum::{
 };
 use image::{DynamicImage, ImageBuffer, ImageFormat, Pixel, codecs::jpeg::JpegEncoder, imageops::FilterType};
 use oxilabel_core::{
+    api::TileQuery,
     filter::Filter,
     pyramid::{Pyramid, TILE_SIZE},
 };
-use serde::Deserialize;
-
 use crate::{
     AppState,
     access_scope::AccessScope,
@@ -53,11 +52,6 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/images/{id}/tiles/{level}/{x}/{y}", get(|user, state, url, query| tile(user, state, url, query, Kind::View)))
         .route("/api/images/{id}/analysis/{level}/{x}/{y}", get(|user, state, url, query| tile(user, state, url, query, Kind::Analysis)))
-}
-
-#[derive(Deserialize)]
-struct TileQuery {
-    filter: Option<String>,
 }
 
 /// Which pyramid of an image.

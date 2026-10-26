@@ -6,7 +6,10 @@
 use std::collections::{HashMap, HashSet};
 
 use leptos::prelude::*;
-use oxilabel_core::fill::{Raster, Tiles};
+use oxilabel_core::{
+    api::{TileQuery, with_query},
+    fill::{Raster, Tiles},
+};
 use wasm_bindgen::{JsCast, closure::Closure};
 use web_sys::{HtmlCanvasElement, HtmlImageElement};
 
@@ -61,7 +64,7 @@ impl Analysis {
         let Ok(element) = HtmlImageElement::new() else { return };
         let this = *self;
         let image = element.clone();
-        let query = source.as_ref().map(|key| format!("?filter={key}")).unwrap_or_default();
+        let url = with_query(&format!("/api/images/{}/analysis/{level}/{column}/{row}", self.image), &TileQuery { filter: source.clone() }.to_query());
         let failed = source.clone();
         let on_load = Closure::once_into_js(move || match read_pixels(&image) {
             Some(raster) => {
@@ -75,7 +78,7 @@ impl Analysis {
         let on_error = Closure::once_into_js(move || this.fail(failed, level, column, row));
         element.set_onload(Some(on_load.unchecked_ref()));
         element.set_onerror(Some(on_error.unchecked_ref()));
-        element.set_src(&format!("/api/images/{}/analysis/{level}/{column}/{row}{query}", self.image));
+        element.set_src(&url);
     }
 
     /// Reports a tile that could not be read, and forgets asking for it so a later fill retries.

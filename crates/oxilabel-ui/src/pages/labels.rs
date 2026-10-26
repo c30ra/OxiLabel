@@ -2,6 +2,7 @@ use leptos::{prelude::*, task::spawn_local};
 use oxilabel_core::{
     Footprint, Label, LabelDefinition, PointShape, ShapeType,
     annotation::LabelUsage,
+    api::{DeleteLabelQuery, with_query},
     attribute::{AttributeDefinition, AttributeKind},
     constraint::ShapeConstraints,
 };
@@ -129,11 +130,7 @@ pub fn LabelSet(project: i64) -> impl IntoView {
                 if !window().confirm_with_message(&question).unwrap_or(false) {
                     return;
                 }
-                let url = if used > 0 {
-                    format!("{url}?confirm=true")
-                } else {
-                    url
-                };
+                let url = with_query(&url, &DeleteLabelQuery { confirm: used > 0 }.to_query());
                 match api::delete(&url).await {
                     Ok(()) => {
                         if editing.get_untracked() == Some(label.id) {

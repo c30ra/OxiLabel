@@ -15,9 +15,10 @@ use axum::{
 };
 use oxilabel_core::{
     annotation::Shape,
+    api::ErrorReply,
     geometry::{Point, Rect},
     inference::Prediction,
-    worker::{ClassesReply, ErrorReply, HealthReply, PredictReply, PredictRequest, WorkerError, WorkerModel},
+    worker::{ClassesReply, HealthReply, PredictReply, PredictRequest, WorkerError, WorkerModel},
 };
 
 use crate::worker::WorkerPort;

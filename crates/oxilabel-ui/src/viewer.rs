@@ -10,7 +10,14 @@
 use std::collections::HashMap;
 
 use leptos::{ev, html, prelude::*};
-use oxilabel_core::{Image, geometry::Point, keymap::Action, pyramid::Pyramid, view::View};
+use oxilabel_core::{
+    Image,
+    api::{TileQuery, with_query},
+    geometry::Point,
+    keymap::Action,
+    pyramid::Pyramid,
+    view::View,
+};
 use wasm_bindgen::{JsCast, closure::Closure};
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, HtmlImageElement};
 
@@ -76,8 +83,8 @@ pub fn TileViewer(
         element.set_onload(Some(on_load.unchecked_ref()));
         element.set_onerror(Some(on_error.unchecked_ref()));
         let (filter, level, x, y) = &key;
-        let query = filter.as_ref().map(|key| format!("?filter={key}")).unwrap_or_default();
-        element.set_src(&format!("/api/images/{id}/tiles/{level}/{x}/{y}{query}"));
+        let url = with_query(&format!("/api/images/{id}/tiles/{level}/{x}/{y}"), &TileQuery { filter: filter.clone() }.to_query());
+        element.set_src(&url);
         pending.update_value(|pending| {
             pending.insert(key.clone());
         });

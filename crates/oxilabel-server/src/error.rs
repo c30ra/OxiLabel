@@ -3,7 +3,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use serde_json::json;
+use oxilabel_core::api::ErrorReply;
 
 pub enum ApiError {
     BadRequest(String),
@@ -59,6 +59,6 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, message) = self.public();
-        (status, Json(json!({ "error": message }))).into_response()
+        (status, Json(ErrorReply::new(message))).into_response()
     }
 }

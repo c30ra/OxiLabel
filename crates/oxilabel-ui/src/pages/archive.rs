@@ -3,7 +3,10 @@
 
 use leptos::{prelude::*, task::spawn_local};
 use leptos_router::hooks::use_navigate;
-use oxilabel_core::import::{ArchiveImportPlan, ArchiveImportReport};
+use oxilabel_core::{
+    api::{ArchiveExportQuery, with_query},
+    import::{ArchiveImportPlan, ArchiveImportReport},
+};
 
 use crate::api;
 
@@ -40,7 +43,7 @@ pub fn ArchiveDialog(project: i64, project_name: String, on_close: impl Fn() + C
                     <span class="grow"></span>
                     <button on:click=move |_| on_close()>"Cancel"</button>
                     <a class="button primary download-archive" download
-                        href=move || format!("/api/projects/{project}/archive?images={}", images.get())>"Download"</a>
+                        href=move || with_query(&format!("/api/projects/{project}/archive"), &ArchiveExportQuery { images: images.get() }.to_query())>"Download"</a>
                 </div>
             </div>
         </div>

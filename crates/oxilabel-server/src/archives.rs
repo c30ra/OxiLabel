@@ -24,10 +24,10 @@ use axum::{
 };
 use oxilabel_core::{
     Project,
+    api::ArchiveExportQuery,
     import::{ArchiveImportPlan, ArchiveImportReport, SkipCount},
 };
 use oxilabel_formats::archive::{ArchiveImage, ArchiveJob, ArchiveReader, ArchiveWriter, ProjectArchive};
-use serde::Deserialize;
 use sqlx::Row;
 
 use crate::{
@@ -53,12 +53,6 @@ const IMAGE_LIMIT: u64 = 4 << 30;
 
 fn internal(err: impl std::fmt::Display) -> ApiError {
     ApiError::Internal(err.to_string())
-}
-
-#[derive(Deserialize)]
-struct ExportQuery {
-    #[serde(default)]
-    images: bool,
 }
 
 /// The project as an archive, and each image's file.
@@ -95,7 +89,7 @@ async fn project_archive(state: &AppState, project: i64) -> Result<(ProjectArchi
 
 /// The project as an archive file to download, with the image files if asked. Images whose file
 /// is gone are referred to only.
-async fn export_archive(_: Admin, State(state): State<AppState>, UrlPath(project): UrlPath<i64>, Query(query): Query<ExportQuery>) -> Result<impl IntoResponse, ApiError> {
+async fn export_archive(_: Admin, State(state): State<AppState>, UrlPath(project): UrlPath<i64>, Query(query): Query<ArchiveExportQuery>) -> Result<impl IntoResponse, ApiError> {
     let (mut archive, sources) = project_archive(&state, project).await?;
     let name = archive.name.clone();
     let folder = state.export_dir.clone();

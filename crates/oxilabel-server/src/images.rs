@@ -14,8 +14,8 @@ use axum::{
 use oxilabel_core::{
     BrowseEntry, BrowseListing, EntryKind, FolderCount, Image, ImageFilter, ImageNeighbours, ImagePage, ImageStatus, ImportFailure, ImportReport, ImportRequest,
     RemovalReport, RemovalRequest,
+    api::{BrowseQuery, ImagePageQuery, NeighboursQuery},
 };
-use serde::Deserialize;
 use sqlx::{QueryBuilder, Row, Sqlite, SqliteConnection, SqlitePool};
 
 use crate::{
@@ -66,13 +66,6 @@ async fn known_images(conn: &mut SqliteConnection, project: i64) -> Result<Known
         known.hashes.insert(row.get("hash"));
     }
     Ok(known)
-}
-
-#[derive(Deserialize)]
-struct BrowseQuery {
-    #[serde(default)]
-    path: String,
-    project: Option<i64>,
 }
 
 async fn browse(_: Admin, State(state): State<AppState>, Query(query): Query<BrowseQuery>) -> Result<Json<BrowseListing>, ApiError> {
@@ -487,18 +480,6 @@ pub async fn backfill_file_info(pool: SqlitePool, root: PathBuf) {
     let _ = tx.commit().await;
 }
 
-#[derive(Deserialize)]
-struct PageQuery {
-    #[serde(default)]
-    offset: i64,
-    #[serde(default = "default_page_size")]
-    limit: i64,
-}
-
-fn default_page_size() -> i64 {
-    100
-}
-
 /// Appends the conditions of `filter`; the caller's query already selects the project's images
 /// the user may see (`access_scope::AccessScope::sql`).
 fn push_filter(query: &mut QueryBuilder<'_, Sqlite>, project: i64, filter: &ImageFilter) -> Result<(), ApiError> {
@@ -582,7 +563,7 @@ async fn list_images(
     scope: AccessScope,
     State(pool): State<SqlitePool>,
     UrlPath(project): UrlPath<i64>,
-    Query(page): Query<PageQuery>,
+    Query(page): Query<ImagePageQuery>,
     Query(filter): Query<ImageFilter>,
 ) -> Result<Json<ImagePage>, ApiError> {
     let mut conn = pool.acquire().await?;
@@ -651,17 +632,6 @@ async fn set_status(
         return Err(ApiError::NotFound);
     }
     Ok(Json(scope.project_image(&mut *pool.acquire().await?, project, image).await?.image))
-}
-
-#[derive(Deserialize)]
-struct NeighboursQuery {
-    /// How many images to give on each side.
-    #[serde(default = "default_neighbours")]
-    count: i64,
-}
-
-fn default_neighbours() -> i64 {
-    6
 }
 
 /// An image's place among the project's images the user may open that match the filter (in

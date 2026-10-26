@@ -1,7 +1,7 @@
 //! The pre-annotation worker's requests and replies (ADR 0001), as `worker/oxilabel_worker/server.py`
 //! puts them on the wire: `GET /health` → `HealthReply`; `POST /classes` with a `WorkerModel` →
 //! `ClassesReply`; `POST /predict` with a `PredictRequest` → `PredictReply`. A failure is a non-2xx
-//! status with an `ErrorReply`.
+//! status with an [`crate::api::ErrorReply`].
 
 use std::fmt;
 
@@ -53,12 +53,6 @@ pub struct PredictReply {
     pub predictions: Vec<Prediction>,
 }
 
-/// The body of a failing status: the worker's reason.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ErrorReply {
-    pub error: String,
-}
-
 /// Why a request to the worker brought no reply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkerError {
@@ -103,6 +97,7 @@ mod tests {
 
     use super::*;
     use crate::{
+        api::ErrorReply,
         ShapeType,
         annotation::Shape,
         ellipse::Ellipse,

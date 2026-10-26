@@ -1,5 +1,5 @@
 use leptos::{prelude::*, task::spawn_local};
-use oxilabel_core::{BrowseEntry, BrowseListing, EntryKind, ImportReport, ImportRequest};
+use oxilabel_core::{BrowseEntry, BrowseListing, EntryKind, ImportReport, ImportRequest, api::BrowseQuery};
 
 use crate::api;
 
@@ -25,16 +25,11 @@ pub fn ImportDialog(
     let busy = RwSignal::new(false);
     let outcome = RwSignal::new(None::<Result<ImportReport, String>>);
 
-    let project_param = project.to_string();
     let listing = LocalResource::new(move || {
         let path = folder.get();
-        let project = project_param.clone();
         async move {
-            api::get_with_query::<BrowseListing>(
-                "/api/browse",
-                &[("path", &path), ("project", &project)],
-            )
-            .await
+            let query = BrowseQuery { path, project: Some(project) }.to_query();
+            api::get_with_query::<BrowseListing>("/api/browse", &query).await
         }
     });
 

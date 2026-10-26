@@ -1872,3 +1872,25 @@ tests.push({
     await t.b.waitFor(() => t.b.eval(`document.querySelectorAll('.grid li').length === 4 && !document.querySelector('.name-group')`), 'the unfiltered grid');
   },
 });
+
+tests.push({
+  name: 'the image grid pages through its images',
+  async run(t) {
+    const folder = join(t.work, 'images', 'pages');
+    for (let i = 0; i < 31; i += 1) writeTestImage(join(folder, `p${String(i).padStart(2, '0')}.png`), 100 + i, 80);
+    await t.api.call('POST', `/api/projects/${t.project.id}/imports`, { paths: ['pages'] });
+    const total = (await t.api.call('GET', `/api/projects/${t.project.id}/images`)).total;
+    const range = () => t.b.eval(`document.querySelector('.pager .mono').textContent`);
+
+    await t.b.goto(`${t.base}/projects/${t.project.id}`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('select[aria-label="Images per page"]')`), 'the pager');
+    await t.b.eval(`(() => { const s = document.querySelector('select[aria-label="Images per page"]'); s.value = '30'; s.dispatchEvent(new Event('change', { bubbles: true })); return 1; })()`);
+    await t.b.waitFor(() => t.b.eval(`document.querySelectorAll('.grid li').length === 30`), 'the first page');
+    equal(await range(), `1–30 of ${total}`, 'the first page range');
+
+    await t.b.eval(`document.querySelector('button[aria-label="Next page"]').click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`document.querySelectorAll('.grid li').length === ${total - 30}`), 'the last page');
+    equal(await range(), `31–${total} of ${total}`, 'the last page range');
+    equal(await t.b.eval(`document.querySelector('button[aria-label="Next page"]').disabled`), true, 'Next page disabled at the end');
+  },
+});

@@ -9,7 +9,7 @@ use axum::{
     http::request::Parts,
     routing::{get, post},
 };
-use serde::Serialize;
+use oxilabel_core::api::{FolderDialogReply, HostReply};
 
 use crate::{AppState, auth::Admin, error::ApiError};
 
@@ -40,26 +40,15 @@ impl<S: Send + Sync> FromRequestParts<S> for Caller {
     }
 }
 
-#[derive(Serialize)]
-struct Host {
-    local: bool,
-}
-
-async fn host(caller: Caller) -> Json<Host> {
-    Json(Host { local: caller.local })
-}
-
-#[derive(Serialize)]
-struct Picked {
-    /// The chosen folder's absolute path, or none if the dialog was cancelled.
-    path: Option<String>,
+async fn host(caller: Caller) -> Json<HostReply> {
+    Json(HostReply { local: caller.local })
 }
 
 /// Opens the desktop's folder dialog on the server's machine and waits for the choice.
-async fn folder_dialog(_: Admin, State(state): State<AppState>, caller: Caller) -> Result<Json<Picked>, ApiError> {
+async fn folder_dialog(_: Admin, State(state): State<AppState>, caller: Caller) -> Result<Json<FolderDialogReply>, ApiError> {
     caller.require_local("the folder dialog")?;
     let dialog = state.folder_dialog.clone().ok_or_else(|| ApiError::Conflict("this server cannot show a folder dialog".into()))?;
     let picked = dialog().await.map_err(|reason| ApiError::Conflict(format!("the folder dialog could not open: {reason}")))?;
     let path = picked.map(|path| path.canonicalize().unwrap_or(path).to_string_lossy().into_owned());
-    Ok(Json(Picked { path }))
+    Ok(Json(FolderDialogReply { path }))
 }

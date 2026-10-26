@@ -6,8 +6,7 @@ use axum::{
     http::StatusCode,
     routing::{get, put},
 };
-use oxilabel_core::{Footprint, Label, LabelDefinition, PointShape, annotation::LabelUsage};
-use serde::Deserialize;
+use oxilabel_core::{Footprint, Label, LabelDefinition, PointShape, annotation::LabelUsage, api::DeleteLabelQuery};
 use sqlx::{
     Row, Sqlite, SqliteConnection, SqlitePool,
     query::Query as SqlQuery,
@@ -99,18 +98,12 @@ async fn update_label(
     Ok(Json(label))
 }
 
-#[derive(Deserialize)]
-struct DeleteQuery {
-    #[serde(default)]
-    confirm: bool,
-}
-
 /// Deletes a label. If annotations use it they are deleted too, but only with `?confirm=true`.
 async fn delete_label(
     _: Admin,
     State(pool): State<SqlitePool>,
     Path((project, id)): Path<(i64, i64)>,
-    Query(query): Query<DeleteQuery>,
+    Query(query): Query<DeleteLabelQuery>,
 ) -> Result<StatusCode, ApiError> {
     let mut tx = pool.begin().await?;
     let name: String = sqlx::query("SELECT name FROM labels WHERE project_id = ? AND id = ?")

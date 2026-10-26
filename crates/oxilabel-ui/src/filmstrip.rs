@@ -5,7 +5,7 @@
 
 use leptos::{ev, prelude::*, task::spawn_local};
 use leptos_router::hooks::use_navigate;
-use oxilabel_core::{Image, ImageFilter, ImageNeighbours, ImageStatus};
+use oxilabel_core::{Image, ImageFilter, ImageNeighbours, ImageStatus, api::NeighboursQuery};
 
 use oxilabel_core::keymap::Action;
 
@@ -17,7 +17,7 @@ use crate::{
 };
 
 /// Images on each side of the current one in the filmstrip.
-const NEIGHBOURS: usize = 6;
+const NEIGHBOURS: i64 = 6;
 /// The two presses of gg must come this close together (milliseconds).
 const DOUBLE_KEY: f64 = 800.0;
 
@@ -47,19 +47,13 @@ impl ImageNav {
             image: id,
             ids: LocalResource::new(move || {
                 let query = filter.get().to_query();
-                async move {
-                    let pairs: Vec<(&str, &str)> = query.iter().map(|(key, value)| (*key, value.as_str())).collect();
-                    api::get_with_query::<Vec<i64>>(&format!("/api/projects/{project}/image-ids"), &pairs).await
-                }
+                async move { api::get_with_query::<Vec<i64>>(&format!("/api/projects/{project}/image-ids"), &query).await }
             }),
             neighbours: LocalResource::new(move || {
                 changed.track();
                 let mut query = filter.get().to_query();
-                query.push(("count", NEIGHBOURS.to_string()));
-                async move {
-                    let pairs: Vec<(&str, &str)> = query.iter().map(|(key, value)| (*key, value.as_str())).collect();
-                    api::get_with_query::<ImageNeighbours>(&format!("/api/projects/{project}/images/{id}/neighbours"), &pairs).await
-                }
+                query.extend(NeighboursQuery { count: NEIGHBOURS }.to_query());
+                async move { api::get_with_query::<ImageNeighbours>(&format!("/api/projects/{project}/images/{id}/neighbours"), &query).await }
             }),
             annotated: RwSignal::new(image.annotated),
             changed,

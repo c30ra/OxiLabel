@@ -14,9 +14,8 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
     },
 };
-use oxilabel_core::Progress;
+use oxilabel_core::{Progress, api::ErrorReply};
 use serde::Serialize;
-use serde_json::json;
 use tokio::sync::{oneshot, watch};
 
 use crate::error::ApiError;
@@ -64,7 +63,7 @@ impl Streaming {
         }
         let (progress, mut changes) = watch::channel(Progress::default());
         changes.mark_unchanged();
-        let (finished, mut outcome) = oneshot::channel();
+        let (finished, outcome) = oneshot::channel();
         let work = work(Reporter(Some(progress)));
         // On its own task, so that it goes on between the events' polls.
         tokio::spawn(async move { finished.send(work.await) });
@@ -90,8 +89,8 @@ impl Streaming {
 fn last_event<T: Serialize>(result: Result<Result<T, ApiError>, oneshot::error::RecvError>) -> Event {
     match result {
         Ok(Ok(result)) => json_event("done", &result),
-        Ok(Err(err)) => json_event("error", &json!({ "error": err.public().1 })),
-        Err(_) => json_event("error", &json!({ "error": "internal error" })),
+        Ok(Err(err)) => json_event("error", &ErrorReply::new(err.public().1)),
+        Err(_) => json_event("error", &ErrorReply::new("internal error")),
     }
 }
 

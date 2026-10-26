@@ -4,7 +4,8 @@ use std::cell::RefCell;
 
 use gloo_net::http::{Request, RequestBuilder, Response};
 use leptos::prelude::{Callable, Callback};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use oxilabel_core::api::{ErrorReply, FolderDialogReply, HostReply, QueryPairs};
+use serde::{Serialize, de::DeserializeOwned};
 
 thread_local! {
     static ON_SIGNED_OUT: RefCell<Option<Callback<()>>> = const { RefCell::new(None) };
@@ -24,24 +25,19 @@ fn signed_out_if_unauthorized(status: u16) {
     }
 }
 
-#[derive(Deserialize)]
-struct ErrorBody {
-    error: String,
-}
-
 pub async fn get<T: DeserializeOwned>(url: &str) -> Result<T, String> {
     read_json(check(Request::get(&absolute(url)).send().await).await?).await
 }
 
-/// GET with query parameters, which are URL-encoded.
+/// GET with shared query parameters, which are URL-encoded.
 pub async fn get_with_query<T: DeserializeOwned>(
     url: &str,
-    query: &[(&str, &str)],
+    query: &QueryPairs,
 ) -> Result<T, String> {
     read_json(
         check(
             Request::get(&absolute(url))
-                .query(query.iter().copied())
+                .query(query.iter().map(|(key, value)| (*key, value.as_str())))
                 .send()
                 .await,
         )
@@ -87,12 +83,7 @@ pub async fn put_detailed<B: Serialize, T: DeserializeOwned>(
     })?;
     let status = response.status();
     if !response.ok() {
-        signed_out_if_unauthorized(status);
-        let message = match response.json::<ErrorBody>().await {
-            Ok(body) => body.error,
-            Err(_) => format!("Request failed ({status})"),
-        };
-        return Err(Failure { status, message });
+        return Err(failure(response).await);
     }
     read_json(response)
         .await
@@ -143,30 +134,27 @@ async fn check(result: Result<Response, gloo_net::Error>) -> Result<Response, St
     if response.ok() {
         return Ok(response);
     }
-    signed_out_if_unauthorized(response.status());
-    Err(match response.json::<ErrorBody>().await {
-        Ok(body) => body.error,
-        Err(_) => format!("Request failed ({})", response.status()),
-    })
+    Err(failure(response).await.message)
 }
 
-#[derive(Deserialize)]
-struct Host {
-    local: bool,
+/// Reads the one error envelope shared with the server, with the same fallback everywhere.
+async fn failure(response: Response) -> Failure {
+    let status = response.status();
+    signed_out_if_unauthorized(status);
+    let message = match response.json::<ErrorReply>().await {
+        Ok(body) => body.error,
+        Err(_) => format!("Request failed ({status})"),
+    };
+    Failure { status, message }
 }
 
 /// Whether this browser runs on the server's machine, which may use any folder of it (ADR 0003).
 pub async fn on_server_machine() -> bool {
-    get::<Host>("/api/host").await.is_ok_and(|host| host.local)
-}
-
-#[derive(Deserialize)]
-struct Picked {
-    path: Option<String>,
+    get::<HostReply>("/api/host").await.is_ok_and(|host| host.local)
 }
 
 /// Shows the desktop's folder dialog on the server's machine: the chosen folder's absolute path,
 /// none if cancelled, or an error if the server cannot show one.
 pub async fn host_folder_dialog() -> Result<Option<String>, String> {
-    post::<_, Picked>("/api/host/folder-dialog", &()).await.map(|picked| picked.path)
+    post::<_, FolderDialogReply>("/api/host/folder-dialog", &()).await.map(|picked| picked.path)
 }

@@ -3,7 +3,7 @@
 
 use leptos::{prelude::*, task::spawn_local};
 use leptos_router::{components::A, hooks::use_navigate};
-use oxilabel_core::{FolderCount, ImportReport, ImportRequest, Label, LabelDefinition, NewProject, Project, ProjectSummary, ShapeType};
+use oxilabel_core::{FolderCount, ImportReport, ImportRequest, Label, LabelDefinition, NewProject, Project, ProjectSummary, ShapeType, api::BrowseQuery};
 
 use super::archive::ImportArchiveDialog;
 use crate::{
@@ -151,7 +151,7 @@ fn NewProjectDialog(sources: Vec<ProjectSummary>, on_close: impl Fn() + Copy + S
         });
         async move {
             match path {
-                Some(path) => api::get_with_query::<FolderCount>("/api/browse/count", &[("path", &path)]).await.map(Some),
+                Some(path) => api::get_with_query::<FolderCount>("/api/browse/count", &BrowseQuery { path, project: None }.to_query()).await.map(Some),
                 None => Ok(None),
             }
         }

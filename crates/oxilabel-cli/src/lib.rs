@@ -19,11 +19,13 @@ use reqwest::{
     blocking::{Client as Http, RequestBuilder, Response, multipart},
 };
 use oxilabel_core::{
-    Label, ProjectSummary,
+    ImageFilter, Label, ProjectSummary,
+    api::{ArchiveExportQuery, ErrorReply, with_query},
     export::{ExportFormat, ExportRequest, ExportResult, ImageMode, ImageSelection, Split},
     import::{ArchiveImportPlan, ArchiveImportReport, CvatImportPlan, CvatImportReport, LabelChoice},
     inference::{Model, RunRequest, RunState, RunStatus},
     job::Job,
+    user::Credentials,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -81,11 +83,6 @@ struct Client {
     http: Http,
 }
 
-#[derive(Deserialize)]
-struct ErrorBody {
-    error: String,
-}
-
 impl Client {
     fn open(config: &Path) -> Result<Self, CliError> {
         let text = fs::read_to_string(config.join("session")).map_err(|_| CliError("not signed in: run `oxilabel login --server URL --user NAME` first".into(), false))?;
@@ -104,7 +101,7 @@ impl Client {
             return Ok(response);
         }
         let status = response.status();
-        let message = response.json::<ErrorBody>().map(|body| body.error).unwrap_or_else(|_| format!("the server answered {status}"));
+        let message = error_message(response);
         match status {
             StatusCode::UNAUTHORIZED => fail(format!("{message} (the session ended: run `oxilabel login` again)")),
             _ => fail(message),
@@ -162,6 +159,12 @@ fn read<T: DeserializeOwned>(response: Response) -> Result<T, CliError> {
     response.json().map_err(|err| CliError(format!("the server's answer is unreadable: {err}"), false))
 }
 
+/// Reads the one error envelope shared with the server, with one fallback for a non-JSON reply.
+fn error_message(response: Response) -> String {
+    let status = response.status();
+    response.json::<ErrorReply>().map(|body| body.error).unwrap_or_else(|_| format!("the server answered {status}"))
+}
+
 fn file_part(path: &Path) -> Result<multipart::Part, CliError> {
     let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| "upload".into());
     let file = fs::File::open(path).map_err(|err| CliError(format!("cannot read {}: {err}", path.display()), false))?;
@@ -193,11 +196,11 @@ pub fn run(args: impl IntoIterator<Item = String>, out: &mut dyn Write, input: &
             };
             let response = http()?
                 .post(format!("{server}/api/login"))
-                .json(&serde_json::json!({"username": user, "password": password}))
+                .json(&Credentials { username: user.clone(), password })
                 .send()
                 .map_err(|err| CliError(format!("cannot reach {server}: {err}"), false))?;
             if !response.status().is_success() {
-                let message = response.json::<ErrorBody>().map(|body| body.error).unwrap_or_else(|_| "the sign-in was refused".into());
+                let message = error_message(response);
                 return fail(message);
             }
             let cookie = response
@@ -311,7 +314,7 @@ fn run_export(client: &Client, export: Export, out: &mut dyn Write) -> Result<()
             Some(Include::Copy) => true,
             Some(Include::Symlink) => return fail("a project archive includes images as copies or not at all (--include copy or none)"),
         };
-        let bytes = client.download(&format!("/api/projects/{}/archive?images={images}", project.id), &export.out)?;
+        let bytes = client.download(&with_query(&format!("/api/projects/{}/archive", project.id), &ArchiveExportQuery { images }.to_query()), &export.out)?;
         return writeln!(out, "Wrote the archive of \"{}\" to {} ({} bytes).", project.name, export.out.display(), bytes).map_err(|err| CliError(err.to_string(), false));
     }
     let formats: Vec<ExportFormat> = client.get("/api/exporters")?;
@@ -325,7 +328,8 @@ fn run_export(client: &Client, export: Export, out: &mut dyn Write) -> Result<()
         other => match other.strip_prefix("job:").and_then(|number| number.parse().ok()) {
             Some(number) => {
                 let job = client.job(project.id, number)?;
-                ImageSelection::Ids { ids: client.get(&format!("/api/projects/{}/image-ids?job={job}", project.id))? }
+                let query = ImageFilter { job: Some(job), ..Default::default() }.to_query();
+                ImageSelection::Ids { ids: client.get(&with_query(&format!("/api/projects/{}/image-ids", project.id), &query))? }
             }
             None => return fail(format!("--images {other}: write all, annotated or job:N")),
         },

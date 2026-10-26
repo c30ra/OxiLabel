@@ -6,7 +6,8 @@ use std::collections::BTreeSet;
 use leptos::{prelude::*, task::spawn_local};
 use leptos_router::hooks::use_navigate;
 use oxilabel_core::{
-    ImagePage,
+    ImageFilter, ImagePage,
+    api::ImagePageQuery,
     job::{Job, JobChange, NewJobs},
     user::User,
 };
@@ -57,13 +58,14 @@ pub fn JobsTab(project: i64) -> impl IntoView {
     let annotate = move |job: i64| {
         spawn_local(async move {
             let url = format!("/api/projects/{project}/images");
-            let job = job.to_string();
-            let first = async |status: &[(&str, &str)]| {
-                let query = [&[("job", job.as_str()), ("limit", "1")], status].concat();
+            let first = async |annotated: Option<bool>| {
+                let filter = ImageFilter { job: Some(job), annotated, ..Default::default() };
+                let mut query = filter.to_query();
+                query.extend(ImagePageQuery { limit: 1, ..Default::default() }.to_query());
                 api::get_with_query::<ImagePage>(&url, &query).await.map(|page| page.images.into_iter().next())
             };
-            let image = match first(&[("annotated", "false")]).await {
-                Ok(None) => first(&[]).await,
+            let image = match first(Some(false)).await {
+                Ok(None) => first(None).await,
                 found => found,
             };
             match image {

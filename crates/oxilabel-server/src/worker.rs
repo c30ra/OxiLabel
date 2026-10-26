@@ -9,8 +9,9 @@ use std::{
 };
 
 use oxilabel_core::{
+    api::ErrorReply,
     inference::Prediction,
-    worker::{ClassesReply, ErrorReply, HealthReply, PredictReply, PredictRequest, WorkerError, WorkerModel},
+    worker::{ClassesReply, HealthReply, PredictReply, PredictRequest, WorkerError, WorkerModel},
 };
 use serde::de::DeserializeOwned;
 

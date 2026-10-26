@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use leptos::{ev::MouseEvent, prelude::*, task::spawn_local};
-use oxilabel_core::{Image, ImageFilter, ImagePage, Label, RemovalReport, RemovalRequest, job::Job, view::View};
+use oxilabel_core::{Image, ImageFilter, ImagePage, Label, RemovalReport, RemovalRequest, api::ImagePageQuery, job::Job, view::View};
 use serde::{Deserialize, Serialize};
 
 use super::jobs::{CreateJobsDialog, job_name};
@@ -70,17 +70,9 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>, selected: RwSignal<BTreeSe
 
     let images = LocalResource::new(move || {
         let mut query = filter.get().to_query();
-        query.push(("offset", offset.get().to_string()));
-        query.push(("limit", page_size.get().to_string()));
+        query.extend(ImagePageQuery { offset: offset.get(), limit: page_size.get() }.to_query());
         version.track();
-        async move {
-            let pairs: Vec<(&str, &str)> = query
-                .iter()
-                .map(|(key, value)| (*key, value.as_str()))
-                .collect();
-            api::get_with_query::<ImagePage>(&format!("/api/projects/{project}/images"), &pairs)
-                .await
-        }
+        async move { api::get_with_query::<ImagePage>(&format!("/api/projects/{project}/images"), &query).await }
     });
     Effect::new(move |_| {
         if let Some(Ok(page)) = images.get() {
@@ -130,13 +122,9 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>, selected: RwSignal<BTreeSe
         busy.set(true);
         let query = filter.get_untracked().to_query();
         spawn_local(async move {
-            let pairs: Vec<(&str, &str)> = query
-                .iter()
-                .map(|(key, value)| (*key, value.as_str()))
-                .collect();
             match api::get_with_query::<Vec<i64>>(
                 &format!("/api/projects/{project}/image-ids"),
-                &pairs,
+                &query,
             )
             .await
             {
