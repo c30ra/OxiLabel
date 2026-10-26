@@ -12,6 +12,7 @@ mod inference;
 mod jobs;
 mod labels;
 mod progress;
+mod project_read_model;
 mod projects;
 mod thumbnails;
 mod tiles;
@@ -141,4 +142,9 @@ pub(crate) fn write_atomically_to(path: &Path, write: impl FnOnce(&mut fs::File)
 
 pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_atomically_to(path, |file| file.write_all(bytes))
+}
+
+/// `?, ?, …`: one SQL placeholder per column of a comma-separated column list.
+pub(crate) fn placeholders(columns: &str) -> String {
+    vec!["?"; columns.split(',').count()].join(", ")
 }

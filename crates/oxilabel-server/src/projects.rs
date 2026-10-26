@@ -11,7 +11,7 @@ use crate::{
     AppState,
     auth::{Admin, CurrentUser},
     error::ApiError,
-    jobs,
+    jobs, labels,
 };
 
 pub fn routes() -> Router<AppState> {
@@ -51,15 +51,9 @@ async fn copy_labels(conn: &mut SqliteConnection, source: i64, target: i64) -> R
         .await?
         .ok_or_else(|| ApiError::BadRequest(format!("there is no project {source} to copy labels from")))?
         .get("next_label_id");
-    sqlx::query(
-        "INSERT INTO labels (project_id, id, name, color, hotkey, shape_types, is_ignore, attributes, line_width, point_radius, point_shape, show_footprint, constraints) \
-         SELECT ?, id, name, color, hotkey, shape_types, is_ignore, attributes, line_width, point_radius, point_shape, show_footprint, constraints \
-         FROM labels WHERE project_id = ?",
-    )
-    .bind(target)
-    .bind(source)
-    .execute(&mut *conn)
-    .await?;
+    for label in labels::project_labels(conn, source).await? {
+        labels::store_label(conn, target, &label).await?;
+    }
     sqlx::query("UPDATE projects SET next_label_id = ? WHERE id = ?").bind(next).bind(target).execute(&mut *conn).await?;
     Ok(())
 }

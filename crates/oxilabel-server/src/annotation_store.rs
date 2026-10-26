@@ -4,16 +4,20 @@
 //! image's version so an editor holding the old one reloads. Only an editor's save sets the
 //! image's annotated status. The store works inside the caller's transaction.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::LazyLock};
 
 use oxilabel_core::{
     Label,
     annotation::{Annotation, ImageAnnotations, counts_as_annotated},
     import::SkipCount,
 };
-use sqlx::{Row, SqliteConnection};
+use sqlx::{
+    Row, Sqlite, SqliteConnection,
+    query::Query,
+    sqlite::{SqliteArguments, SqliteRow},
+};
 
-use crate::{error::ApiError, labels};
+use crate::{error::ApiError, labels, placeholders};
 
 /// The image's annotations in drawing order, with its version and annotated status; `NotFound`
 /// if the image is not in the project.
@@ -24,7 +28,7 @@ pub(crate) async fn load(conn: &mut SqliteConnection, project: i64, image: i64) 
         .fetch_optional(&mut *conn)
         .await?
         .ok_or(ApiError::NotFound)?;
-    let rows = sqlx::query("SELECT label_id, shape, source, confidence, attributes, hidden, locked, pending FROM annotations WHERE image_id = ? ORDER BY position")
+    let rows = sqlx::query(&LOAD)
         .bind(image)
         .fetch_all(&mut *conn)
         .await?;
@@ -151,9 +155,17 @@ fn sort_out(labels: &[Label], width: u32, height: u32, mut tagged: BTreeSet<i64>
     (fitting, refused)
 }
 
-/// Reads an annotation from a row with `label_id`, `shape`, `source`, `confidence`,
-/// `attributes`, `hidden`, `locked` and `pending`.
-pub(crate) fn annotation_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Annotation, ApiError> {
+/// The columns of an annotation row, in the order `bind_annotation` binds them; `annotation_from_row`
+/// reads them.
+pub(crate) const ANNOTATION_COLUMNS: &str = "label_id, shape, source, confidence, attributes, hidden, locked, pending";
+
+static LOAD: LazyLock<String> = LazyLock::new(|| format!("SELECT {ANNOTATION_COLUMNS} FROM annotations WHERE image_id = ? ORDER BY position"));
+static INSERT: LazyLock<String> = LazyLock::new(|| {
+    format!("INSERT INTO annotations (image_id, project_id, position, {ANNOTATION_COLUMNS}) VALUES (?, ?, ?, {})", placeholders(ANNOTATION_COLUMNS))
+});
+
+/// Reads an annotation from a row with the `ANNOTATION_COLUMNS`.
+pub(crate) fn annotation_from_row(row: &SqliteRow) -> Result<Annotation, ApiError> {
     let unreadable = |what: &str, err: serde_json::Error| ApiError::Internal(format!("stored {what} are unreadable: {err}"));
     let shape = serde_json::from_str(row.get("shape")).map_err(|err| unreadable("shapes", err))?;
     let attributes = serde_json::from_str(row.get("attributes")).map_err(|err| unreadable("attributes", err))?;
@@ -167,6 +179,19 @@ pub(crate) fn annotation_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Annot
         locked: row.get("locked"),
         pending: row.get("pending"),
     })
+}
+
+/// Binds the annotation's `ANNOTATION_COLUMNS`.
+fn bind_annotation<'q>(query: Query<'q, Sqlite, SqliteArguments<'q>>, annotation: &'q Annotation) -> Query<'q, Sqlite, SqliteArguments<'q>> {
+    query
+        .bind(annotation.label)
+        .bind(serde_json::to_string(&annotation.shape).expect("shapes serialize"))
+        .bind(&annotation.source)
+        .bind(annotation.confidence)
+        .bind(serde_json::to_string(&annotation.attributes).expect("attributes serialize"))
+        .bind(annotation.hidden)
+        .bind(annotation.locked)
+        .bind(annotation.pending)
 }
 
 /// Checks that `label` allows the annotation's shape, the shape lies in a `width` × `height`
@@ -184,24 +209,8 @@ pub(crate) fn check_annotation(label: &Label, annotation: &Annotation, width: u3
 /// Stores `annotations` on the image in order, the first at drawing position `first`.
 pub(crate) async fn insert_annotations(conn: &mut SqliteConnection, project: i64, image: i64, first: i64, annotations: &[Annotation]) -> Result<(), ApiError> {
     for (offset, annotation) in annotations.iter().enumerate() {
-        let shape = serde_json::to_string(&annotation.shape).expect("shapes serialize");
-        sqlx::query(
-            "INSERT INTO annotations (image_id, project_id, label_id, position, shape, source, confidence, attributes, hidden, locked, pending) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(image)
-        .bind(project)
-        .bind(annotation.label)
-        .bind(first + offset as i64)
-        .bind(shape)
-        .bind(&annotation.source)
-        .bind(annotation.confidence)
-        .bind(serde_json::to_string(&annotation.attributes).expect("attributes serialize"))
-        .bind(annotation.hidden)
-        .bind(annotation.locked)
-        .bind(annotation.pending)
-        .execute(&mut *conn)
-        .await?;
+        let insert = sqlx::query(&INSERT).bind(image).bind(project).bind(first + offset as i64);
+        bind_annotation(insert, annotation).execute(&mut *conn).await?;
     }
     Ok(())
 }
