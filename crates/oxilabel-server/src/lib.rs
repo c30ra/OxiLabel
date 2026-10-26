@@ -11,6 +11,7 @@ mod images;
 mod inference;
 mod jobs;
 mod labels;
+mod pre_annotation_run;
 mod progress;
 mod project_read_model;
 mod projects;
