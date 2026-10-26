@@ -4,7 +4,7 @@
 
 **Blocked by:** 02
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] Preview and commit both come from the same plan; no placeholder ids remain
 - [x] Planner tests (no database, no multipart) cover: label matched by name ignoring case, created, or skipped; image matched by name and size, ambiguous, size mismatch, found in the chosen folder; attributes and tags filtered; skipped reasons counted

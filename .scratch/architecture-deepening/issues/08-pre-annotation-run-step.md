@@ -4,7 +4,7 @@
 
 **Blocked by:** 01, 07
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] The per-image step is reachable without HTTP and without spawning a task
 - [x] Tests with the fake worker cover: below threshold dropped, class mapped to a label, unknown class skipped with its reason, shape refused by its label skipped, image removed during the run, cancel between images

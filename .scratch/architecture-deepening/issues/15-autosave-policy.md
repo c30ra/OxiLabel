@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] Save state, the saved revision and retrying live in the policy; the workspace has no autosave rules of its own
 - [x] Leaving during an in-flight save never sends a save on a stale version

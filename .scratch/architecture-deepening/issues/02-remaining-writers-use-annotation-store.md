@@ -4,7 +4,7 @@
 
 **Blocked by:** 01
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] No module except the store inserts, deletes or re-positions annotation rows, or bumps an image's version for an annotation change
 - [x] Importing a project archive whose image has a duplicate tag reports the problem and stores no duplicate

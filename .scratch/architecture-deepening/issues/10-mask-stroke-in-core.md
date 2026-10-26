@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] The stroke's mask logic compiles and is tested outside the browser
 - [x] Core tests cover: merge into the lowest-index same-label mask, locked and hidden masks untouched, erase to empty removes the mask, removals ordered so indices stay valid, the stop-at-edges limit

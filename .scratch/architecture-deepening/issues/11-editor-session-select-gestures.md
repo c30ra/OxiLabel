@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] Every Select-tool gesture runs through the session; the annotation layer holds no Select gesture rules
 - [x] Hit-testing and drawing handles use the same handle list

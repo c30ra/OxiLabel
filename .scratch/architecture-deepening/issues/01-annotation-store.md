@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] Editor saves and pre-annotation runs write annotations only through the store; their own INSERT, position and version SQL is gone
 - [x] The shallow insert helper the writers called is no longer used by them

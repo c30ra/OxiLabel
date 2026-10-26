@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] Exporters and the ghost both use the core footprint region; neither has its own footprint geometry
 - [x] A one-point polyline shows a dot in the ghost, as it does in the export

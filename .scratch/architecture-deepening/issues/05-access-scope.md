@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
 **Decision:** an image outside the annotator's jobs gives 404, like a project. Images are split by jobs, so in normal use an annotator never asks for one.
 

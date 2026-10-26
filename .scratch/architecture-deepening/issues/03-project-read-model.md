@@ -4,7 +4,7 @@
 
 **Blocked by:** 01
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] Exports and project archives no longer contain their own project, label, image or annotation queries
 - [x] Label and annotation column lists appear once each

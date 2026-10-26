@@ -1244,7 +1244,7 @@ tests.push({
 
       // A password reset ends anna's session: her next request brings back the sign-in form.
       await t.api.call('PUT', `/api/users/${annaId}`, { password: 'third password' });
-      await t.b.eval(`document.querySelector('a.tab[href="/projects/${t.project.id}"]').click(), 1`);
+      await t.b.eval(`document.querySelector('a.tab[href="/projects/${t.project.id}/jobs"]').click(), 1`);
       await t.b.waitFor(() => t.b.eval(`!!document.querySelector('form[aria-label="Sign in"]')`), 'the sign-in form after the reset');
 
       await signIn(t.b, t.base, { username: 'anna', password: 'third password' });
@@ -1774,9 +1774,19 @@ tests.push({
     await t.api.setAnnotations(t.project, [box(1, 10, 10, 50, 40), box(1, 0, 0, 400, 100), line]);
     await openWorkspace(t.b, t.base, t.project);
     await t.b.key('a');
-    await t.b.key('c', [KEY.ctrl]);
+    // Cutting keeps the shapes on the clipboard while they leave the image, so the label can
+    // drop the polyline shape type (a narrowing is refused while such annotations exist).
+    await t.b.key('x', [KEY.ctrl]);
+    await saved(t, (list) => list.length === 0, 'the cut shapes');
     await changeLabel(t, 3, { shape_types: ['rectangle'] });
-    await openFromFilmstrip(t, other);
+    // A label changed elsewhere reaches the editor only when it loads its labels: open the other
+    // image from the grid, which mounts the workspace afresh.
+    await clickIn(t, '.crumbs a[href="/"]');
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('a.project-card')`), 'the project cards');
+    await clickIn(t, `a.project-card[href$="/projects/${t.project.id}"]`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.grid li a.open')`), 'the grid');
+    await clickIn(t, `.grid li a.open[href$="/images/${other.image}"]`);
+    await t.b.waitFor(() => t.b.eval(`document.querySelector('canvas.annotations')?.dataset.count === '0'`), 'the other image');
     await t.b.key('v', [KEY.ctrl]);
     const list = await saved({ ...t, project: other }, (list) => list.length === 1, 'the pasted shape');
     equal(corners(list[0]), [10, 10, 50, 40], 'the shape that fits');

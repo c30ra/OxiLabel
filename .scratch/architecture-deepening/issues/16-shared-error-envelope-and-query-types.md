@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] The error envelope is one type in core, produced by the server and read once by the UI and once by the CLI
 - [x] The host dialog replies and login credentials are no longer defined twice or built as raw JSON

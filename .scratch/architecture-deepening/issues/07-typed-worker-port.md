@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] Worker requests and replies are typed in core; no JSON is built or read by key for them in the server
 - [x] The worker's default address is defined once on the Rust side

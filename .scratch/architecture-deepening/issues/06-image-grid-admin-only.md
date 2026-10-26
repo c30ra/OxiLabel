@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] An annotator opening a project lands on Jobs; the Images tab is hidden for them
 - [x] An annotator going to the grid's address sees the note, not the grid
