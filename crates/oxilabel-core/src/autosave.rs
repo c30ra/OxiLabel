@@ -145,15 +145,20 @@ impl Autosave {
         self.state = SaveState::Saved;
     }
 
-    /// A pre-annotation run's results (at image `version`) joined the editor, now at `revision`.
-    /// The editor's own changes are then saved on top of that version.
-    pub fn run_merged(&mut self, version: i64, revision: u64) -> Action {
+    /// A pre-annotation run's results (at image `version`) joined the editor, which went from
+    /// revision `before` to `after`. The editor's own unsaved changes are then saved on top of
+    /// that version; without any, the editor now matches the server.
+    pub fn run_merged(&mut self, version: i64, before: u64, after: u64) -> Action {
         self.version = version;
+        if self.state == SaveState::Saved && !self.has_unsaved(before) {
+            self.saved_revision = after;
+            return Action::Nothing;
+        }
         // A save made during the run was refused because of it; the next one is not.
         if matches!(self.state, SaveState::Conflict(_)) {
             self.state = SaveState::Unsaved;
         }
-        self.edited(revision)
+        self.edited(after)
     }
 
     /// The user left the image (or the page) with the editor at `revision`. A save in flight is
@@ -271,16 +276,29 @@ mod tests {
         autosave.edited(1);
         autosave.timer_fired(1);
         autosave.save_finished(SaveOutcome::Stale("run".into()), 1);
-        assert_eq!(autosave.run_merged(5, 2), Action::StartTimer);
+        assert_eq!(autosave.run_merged(5, 1, 2), Action::StartTimer);
         assert_eq!(autosave.state(), &SaveState::Unsaved);
         assert_eq!(autosave.timer_fired(2), Action::Save { base_version: 5 });
     }
 
     #[test]
-    fn a_merged_run_without_changes_rebases_quietly() {
+    fn a_merged_run_without_own_changes_matches_the_server() {
         let mut autosave = Autosave::new(3, 0);
-        assert_eq!(autosave.run_merged(5, 1), Action::StartTimer);
-        assert_eq!(autosave.timer_fired(1), Action::Save { base_version: 5 });
+        assert_eq!(autosave.run_merged(5, 0, 1), Action::Nothing);
+        assert_eq!(autosave.state(), &SaveState::Saved);
+        assert!(!autosave.has_unsaved(1));
+        assert_eq!(autosave.edited(1), Action::Nothing);
+        autosave.edited(2);
+        assert_eq!(autosave.timer_fired(2), Action::Save { base_version: 5 });
+    }
+
+    #[test]
+    fn a_merged_run_keeps_own_unsaved_changes_and_saves_them_on_its_version() {
+        let mut autosave = Autosave::new(3, 0);
+        autosave.edited(1);
+        assert_eq!(autosave.run_merged(5, 1, 2), Action::StartTimer);
+        assert_eq!(autosave.state(), &SaveState::Unsaved);
+        assert_eq!(autosave.timer_fired(2), Action::Save { base_version: 5 });
     }
 
     #[test]

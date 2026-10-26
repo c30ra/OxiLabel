@@ -152,9 +152,10 @@ fn Workspace(
         spawn_local(async move {
             match api::get::<ImageAnnotations>(&url.get_value()).await {
                 Ok(latest) => {
+                    let before = editor.revision.get_untracked();
                     editor.merge_pre_annotations(&run.model, &latest.annotations);
-                    let revision = editor.revision.get_untracked();
-                    autosave.act(move |policy| policy.run_merged(latest.version, revision));
+                    let after = editor.revision.get_untracked();
+                    autosave.act(move |policy| policy.run_merged(latest.version, before, after));
                 }
                 Err(message) => editor.notice.set(Some(message)),
             }
