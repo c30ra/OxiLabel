@@ -1,10 +1,17 @@
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use leptos::{ev, prelude::*, task::spawn_local};
 use leptos_router::{components::A, hooks::use_params_map};
 use oxilabel_core::{
     Image, ImageFilter, Label, Project,
     annotation::{Annotation, ImageAnnotations, SaveAnnotations},
+    autosave::{Action, Autosave, SaveOutcome, SaveState},
     editor::Session,
     inference::RunStatus,
     geometry::Point,
@@ -80,16 +87,6 @@ pub fn WorkspacePage() -> impl IntoView {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-enum SaveState {
-    Saved,
-    Unsaved,
-    Saving,
-    Failed(String),
-    /// The image changed elsewhere; saving stops until the user reloads.
-    Conflict(String),
-}
-
 #[component]
 fn Workspace(
     project: Project,
@@ -117,91 +114,17 @@ fn Workspace(
     let image_filter = image_filter::shared(project.id);
     let nav = ImageNav::new(project.id, &image, image_filter);
     let filter_labels = labels.clone();
-    // Autosave: the version the editor is based on and the last revision the server has.
-    let version = RwSignal::new(annotations.version);
-    let saved_revision = RwSignal::new(0_u64);
-    let state = RwSignal::new(SaveState::Saved);
-    let retry = RwSignal::new(0_u32);
-    let timer = StoredValue::new(0_u64);
-
-    let save = move || {
-        if matches!(
-            state.get_untracked(),
-            SaveState::Saving | SaveState::Conflict(_)
-        ) {
-            return;
-        }
-        let revision = editor.peek(Session::revision);
-        if revision == saved_revision.get_untracked() {
-            state.set(SaveState::Saved);
-            return;
-        }
-        let request = SaveAnnotations {
-            base_version: version.get_untracked(),
-            annotations: editor.peek(|session| session.annotations().to_vec()),
-        };
-        state.set(SaveState::Saving);
-        spawn_local(async move {
-            match api::put_detailed::<_, ImageAnnotations>(&url.get_value(), &request).await {
-                Ok(saved) => {
-                    version.set(saved.version);
-                    // Saving sets the image's status from its annotations.
-                    nav.annotated.set(saved.annotated);
-                    saved_revision.set(revision);
-                    state.set(SaveState::Saved);
-                    // Edits made while saving are saved next.
-                    if editor.peek(Session::revision) != revision {
-                        retry.update(|n| *n += 1);
-                    }
-                }
-                Err(failure) if failure.status == 409 => {
-                    state.set(SaveState::Conflict(failure.message))
-                }
-                Err(failure) => state.set(SaveState::Failed(failure.message)),
-            }
-        });
-    };
+    let autosave = Autosaver::new(editor, nav, url.get_value(), annotations.version);
+    let state = autosave.state;
     Effect::new(move |_| {
         let revision = editor.revision();
-        retry.track();
-        if revision == saved_revision.get_untracked()
-            || matches!(state.get_untracked(), SaveState::Conflict(_))
-        {
-            return;
-        }
-        if state.get_untracked() != SaveState::Saving {
-            state.set(SaveState::Unsaved);
-        }
-        let token = timer.get_value() + 1;
-        timer.set_value(token);
-        set_timeout(
-            move || {
-                if timer.get_value() == token {
-                    save();
-                }
-            },
-            AUTOSAVE_DELAY,
-        );
+        autosave.act(move |policy| policy.edited(revision));
     });
+    let save = move || autosave.act(move |policy| policy.retry(editor.peek(Session::revision)));
     // Leaving the image saves at once; closing the tab with unsaved work asks first.
-    {
-        let url = url.get_value();
-        on_cleanup(move || {
-            if editor.peek(Session::revision) != saved_revision.get_untracked()
-                && !matches!(state.get_untracked(), SaveState::Conflict(_))
-            {
-                let request = SaveAnnotations {
-                    base_version: version.get_untracked(),
-                    annotations: editor.peek(|session| session.annotations().to_vec()),
-                };
-                spawn_local(async move {
-                    let _ = api::put_detailed::<_, ImageAnnotations>(&url, &request).await;
-                });
-            }
-        });
-    }
+    on_cleanup(move || autosave.leave());
     let before_unload = window_event_listener(ev::beforeunload, move |ev| {
-        if editor.peek(Session::revision) != saved_revision.get_untracked() {
+        if autosave.with(|policy| policy.has_unsaved(editor.peek(Session::revision))) {
             ev.prevent_default();
             ev.set_return_value("");
         }
@@ -213,10 +136,12 @@ fn Workspace(
             match api::get::<ImageAnnotations>(&url.get_value()).await {
                 Ok(latest) => {
                     editor.update(|session| session.reset(conformed(&labels_for_reload.get_value(), latest.annotations)));
-                    version.set(latest.version);
                     nav.annotated.set(latest.annotated);
-                    saved_revision.set(editor.peek(Session::revision));
-                    state.set(SaveState::Saved);
+                    let revision = editor.peek(Session::revision);
+                    autosave.act(move |policy| {
+                        policy.reloaded(latest.version, revision);
+                        Action::Nothing
+                    });
                 }
                 Err(message) => editor.notice.set(Some(message)),
             }
@@ -229,13 +154,10 @@ fn Workspace(
         spawn_local(async move {
             match api::get::<ImageAnnotations>(&url.get_value()).await {
                 Ok(latest) => {
+                    let before = editor.peek(Session::revision);
                     editor.update(|session| session.merge_pre_annotations(&run.model, &latest.annotations));
-                    version.set(latest.version);
-                    // A save made during the run was refused because of it; this one is not.
-                    if matches!(state.get_untracked(), SaveState::Conflict(_)) {
-                        state.set(SaveState::Unsaved);
-                    }
-                    retry.update(|n| *n += 1);
+                    let after = editor.peek(Session::revision);
+                    autosave.act(move |policy| policy.run_merged(latest.version, before, after));
                 }
                 Err(message) => editor.notice.set(Some(message)),
             }
@@ -319,6 +241,136 @@ fn Workspace(
             </div>
             <Filmstrip nav=nav editor=editor />
         </div>
+    }
+}
+
+/// The workspace's side of autosave: the debounce timer, sending saves and the indicator's
+/// state. When to save is [`Autosave`]'s call.
+#[derive(Clone, Copy)]
+struct Autosaver {
+    saver: StoredValue<Saver>,
+    state: RwSignal<SaveState>,
+}
+
+impl Autosaver {
+    fn new(editor: Editor, nav: ImageNav, url: String, version: i64) -> Self {
+        let state = RwSignal::new(SaveState::Saved);
+        let saver = Saver {
+            shared: Arc::new(Shared {
+                policy: Mutex::new(Autosave::new(version, editor.peek(Session::revision))),
+                timer: AtomicU64::new(0),
+                left_with: Mutex::new(None),
+                url,
+            }),
+            editor,
+            nav,
+            state,
+        };
+        Self {
+            saver: StoredValue::new(saver),
+            state,
+        }
+    }
+
+    fn with<R>(self, f: impl FnOnce(&mut Autosave) -> R) -> R {
+        let saver = self.saver.get_value();
+        let mut policy = saver.shared.policy.lock().unwrap();
+        f(&mut policy)
+    }
+
+    /// Feeds the policy an input and does what it answers.
+    fn act(self, input: impl FnOnce(&mut Autosave) -> Action) {
+        self.saver.get_value().act(input);
+    }
+
+    /// The image is left: the editor is about to go, so its last state is kept for the saves
+    /// still to come.
+    fn leave(self) {
+        let saver = self.saver.get_value();
+        let revision = saver.editor.peek(Session::revision);
+        *saver.shared.left_with.lock().unwrap() = Some((revision, saver.editor.peek(|session| session.annotations().to_vec())));
+        saver.act(move |policy| policy.left(revision));
+    }
+}
+
+struct Shared {
+    policy: Mutex<Autosave>,
+    /// Bumped by every restart of the debounce timer; only the latest one fires.
+    timer: AtomicU64,
+    /// The editor's revision and annotations when the image was left.
+    left_with: Mutex<Option<(u64, Vec<Annotation>)>>,
+    url: String,
+}
+
+/// Outlives the workspace: a save sent while leaving finishes after its signals are gone.
+#[derive(Clone)]
+struct Saver {
+    shared: Arc<Shared>,
+    editor: Editor,
+    nav: ImageNav,
+    state: RwSignal<SaveState>,
+}
+
+impl Saver {
+    fn revision(&self) -> u64 {
+        match &*self.shared.left_with.lock().unwrap() {
+            Some((revision, _)) => *revision,
+            None => self.editor.peek(Session::revision),
+        }
+    }
+
+    fn annotations(&self) -> Vec<Annotation> {
+        match &*self.shared.left_with.lock().unwrap() {
+            Some((_, annotations)) => annotations.clone(),
+            None => self.editor.peek(|session| session.annotations().to_vec()),
+        }
+    }
+
+    fn act(self, input: impl FnOnce(&mut Autosave) -> Action) {
+        let (action, state) = {
+            let mut policy = self.shared.policy.lock().unwrap();
+            let action = input(&mut policy);
+            (action, policy.state().clone())
+        };
+        self.state.try_set(state);
+        self.perform(action);
+    }
+
+    fn perform(self, action: Action) {
+        match action {
+            Action::Nothing => {}
+            Action::StartTimer => {
+                let token = self.shared.timer.fetch_add(1, Ordering::Relaxed) + 1;
+                set_timeout(
+                    move || {
+                        if self.shared.timer.load(Ordering::Relaxed) == token {
+                            let revision = self.revision();
+                            self.act(move |policy| policy.timer_fired(revision));
+                        }
+                    },
+                    AUTOSAVE_DELAY,
+                );
+            }
+            Action::Save { base_version } => {
+                let request = SaveAnnotations {
+                    base_version,
+                    annotations: self.annotations(),
+                };
+                spawn_local(async move {
+                    let outcome = match api::put_detailed::<_, ImageAnnotations>(&self.shared.url, &request).await {
+                        Ok(saved) => {
+                            // Saving sets the image's status from its annotations.
+                            self.nav.annotated.try_set(saved.annotated);
+                            SaveOutcome::Saved { version: saved.version }
+                        }
+                        Err(failure) if failure.status == 409 => SaveOutcome::Stale(failure.message),
+                        Err(failure) => SaveOutcome::Failed(failure.message),
+                    };
+                    let revision = self.revision();
+                    self.act(move |policy| policy.save_finished(outcome, revision));
+                });
+            }
+        }
     }
 }
 
