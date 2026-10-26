@@ -2,18 +2,16 @@
 //! pixels in the label colour at image resolution, scaled by the view; sprites of stored masks are
 //! cached, and a brush stroke updates only the pixels it touched.
 //!
-//! A brush stroke with label L extends every L mask it touches (merging them into one) or else
-//! becomes a new mask; the eraser removes pixels from every mask under it, of any label. A stroke
-//! is one undo step. A fuzzy fill's region is added or erased the same way.
+//! The stroke's mask logic lives in `oxilabel_core::stroke`; this only draws it.
 
 use std::collections::BTreeMap;
 
 use leptos::prelude::*;
 use oxilabel_core::{
-    annotation::{Annotation, Shape},
+    annotation::Annotation,
     geometry::Point,
-    history::Edit,
     mask::{Bitmap, Mask, PixelRect},
+    stroke::MaskStroke,
     view::View,
 };
 use wasm_bindgen::{Clamped, JsCast};
@@ -159,227 +157,57 @@ impl FillPreview {
     }
 }
 
-/// A brush or eraser stroke in progress.
+/// A brush or eraser stroke in progress: the core stroke and the sprites showing it.
 pub struct Stroke {
-    erase: bool,
-    label: i64,
-    radius: f64,
-    image: (u32, u32),
-    pub last: Point,
-    /// Brush: the stroke's pixels and those of the masks it joined.
-    painted: Bitmap,
+    pub core: MaskStroke,
+    /// Brush: the painted pixels (with the masks they joined).
     sprite: Option<Sprite>,
     color: String,
-    /// Brush: the annotations merged into `painted` (no longer drawn on their own).
-    merged: Vec<usize>,
-    /// Brush: decoded masks with the stroke's label, to check whether the stroke touches them.
-    candidates: BTreeMap<usize, Bitmap>,
-    /// Eraser: working copies of the masks it has touched, by annotation index.
-    erased: BTreeMap<usize, (Bitmap, Option<Sprite>, String)>,
-    /// "Stop at edges": the brush only reaches these pixels while `limited` (Shift inverts it
-    /// mid-stroke).
-    limit: Option<Bitmap>,
-    limited: bool,
+    /// Eraser: sprites of the masks it has touched, by annotation index, and their colours.
+    erased: BTreeMap<usize, (Option<Sprite>, String)>,
 }
 
 impl Stroke {
-    /// A stroke at `at`; its first dab comes with `extend(at, …)`.
-    pub fn start(erase: bool, label: i64, size: f64, image: (u32, u32), at: Point, color: String) -> Stroke {
-        Stroke { radius: size / 2.0, last: at, color, ..Stroke::empty(erase, label, image) }
+    /// A stroke at `at` in `color`; its first dab comes with `extend(at, …)`.
+    pub fn start(core: MaskStroke, color: String) -> Stroke {
+        Stroke { core, sprite: None, color, erased: BTreeMap::new() }
     }
 
-    fn empty(erase: bool, label: i64, image: (u32, u32)) -> Stroke {
-        Stroke {
-            erase,
-            label,
-            radius: 0.0,
-            image,
-            last: Point::new(0.0, 0.0),
-            painted: Bitmap::default(),
-            sprite: None,
-            color: String::new(),
-            merged: Vec::new(),
-            candidates: BTreeMap::new(),
-            erased: BTreeMap::new(),
-            limit: None,
-            limited: false,
-        }
-    }
-
-    /// Keeps the rest of the stroke inside `limit` (image pixels) while limited; what is
-    /// painted stays.
-    pub fn set_limit(&mut self, limit: Bitmap) {
-        self.limit = Some(limit);
-    }
-
-    pub fn limit(&mut self, on: bool) {
-        self.limited = on;
-    }
-
-    /// A finished stroke covering `region` (image pixels), e.g. a fuzzy fill.
-    pub fn from_region(erase: bool, label: i64, region: Bitmap, image: (u32, u32), annotations: &[Annotation]) -> Stroke {
-        let mut stroke = Stroke::empty(erase, label, image);
-        let Some(bounds) = region.bounds() else { return stroke };
-        for (index, annotation) in annotations.iter().enumerate() {
-            let Shape::Mask(mask) = &annotation.shape else { continue };
-            // Locked and hidden masks are left alone.
-            if annotation.locked || annotation.hidden {
-                continue;
-            }
-            if mask.area().intersection(&bounds).is_empty() {
-                continue;
-            }
-            let mut decoded = mask.to_bitmap();
-            if erase {
-                decoded.subtract(&region);
-                stroke.erased.insert(index, (decoded, None, String::new()));
-            } else if annotation.label == label && region.overlaps(&decoded, bounds) {
-                stroke.painted.merge(&decoded, image);
-                stroke.merged.push(index);
-            }
-        }
-        stroke.painted.merge(&region, image);
-        stroke
-    }
-
-    /// Drags the brush from the last position to `to`.
+    /// Drags the brush to `to` and updates the sprites it changed.
     pub fn extend(&mut self, to: Point, annotations: &[Annotation], colors: &dyn Fn(i64) -> String) {
-        let from = self.last;
-        self.last = to;
-        if self.erase {
-            self.erase_along(from, to, annotations, colors);
-        } else {
-            self.paint_along(from, to, annotations);
+        let change = self.core.segment(to, annotations);
+        if let Some(region) = change.painted {
+            Sprite::refresh(&mut self.sprite, self.core.painted(), region, &self.color);
+        }
+        for (index, region) in change.erased {
+            let Some(bitmap) = self.core.erased(index) else { continue };
+            match self.erased.get_mut(&index) {
+                Some((sprite, color)) => Sprite::refresh(sprite, bitmap, region, color),
+                None => {
+                    let color = annotations.get(index).map(|a| colors(a.label)).unwrap_or_default();
+                    self.erased.insert(index, (Sprite::new(bitmap, &color), color));
+                }
+            }
         }
     }
 
-    /// The pixels the brush covers from `from` to `to`, inside the limit if there is one.
-    fn dab(&self, from: Point, to: Point) -> (Bitmap, PixelRect) {
-        let mut dab = Bitmap::default();
-        let covered = dab.paint(from, to, self.radius, self.image);
-        if let (true, Some(limit)) = (self.limited, &self.limit) {
-            dab.keep_only(limit);
-        }
-        (dab, covered)
-    }
-
-    fn paint_along(&mut self, from: Point, to: Point, annotations: &[Annotation]) {
-        // Only the brush's own pixels join masks, not those of masks merged before.
-        let (dab, covered) = self.dab(from, to);
-        if covered.is_empty() {
-            return;
-        }
-        let area_before = self.painted.area;
-        self.painted.merge(&dab, self.image);
-        for (index, annotation) in annotations.iter().enumerate() {
-            let Shape::Mask(mask) = &annotation.shape else { continue };
-            // Locked and hidden masks are left alone.
-            if annotation.locked || annotation.hidden {
-                continue;
-            }
-            if annotation.label != self.label || self.merged.contains(&index) || mask.area().intersection(&covered).is_empty() {
-                continue;
-            }
-            let decoded = self.candidates.entry(index).or_insert_with(|| mask.to_bitmap());
-            if dab.overlaps(decoded, covered) {
-                self.painted.merge(decoded, self.image);
-                self.merged.push(index);
-                self.candidates.remove(&index);
-                // Its pixels may lie anywhere in the sprite: copy everything again.
-                self.sprite = None;
-            }
-        }
-        let region = if self.painted.area == area_before { covered } else { self.painted.area };
-        Sprite::refresh(&mut self.sprite, &self.painted, region, &self.color);
-    }
-
-    fn erase_along(&mut self, from: Point, to: Point, annotations: &[Annotation], colors: &dyn Fn(i64) -> String) {
-        let (dab, covered) = self.dab(from, to);
-        for (index, annotation) in annotations.iter().enumerate() {
-            let Shape::Mask(mask) = &annotation.shape else { continue };
-            // Locked and hidden masks are left alone.
-            if annotation.locked || annotation.hidden {
-                continue;
-            }
-            if mask.area().intersection(&covered).is_empty() {
-                continue;
-            }
-            let (bitmap, sprite, color) = self.erased.entry(index).or_insert_with(|| {
-                let color = colors(annotation.label);
-                let bitmap = mask.to_bitmap();
-                let sprite = Sprite::new(&bitmap, &color);
-                (bitmap, sprite, color)
-            });
-            let touched = bitmap.subtract(&dab);
-            Sprite::refresh(sprite, bitmap, touched, color);
-        }
-    }
-}
-
-impl Stroke {
     /// Draws annotation `index` as the stroke has changed it so far: as the eraser left it, or
     /// not at all if it joined the brush stroke. False if the stroke has not changed it.
     pub fn draw_changed(&self, context: &CanvasRenderingContext2d, view: View, index: usize, selected: bool) -> bool {
-        if let Some((bitmap, sprite, _)) = self.erased.get(&index) {
-            if let Some(sprite) = sprite {
+        if let Some((sprite, _)) = self.erased.get(&index) {
+            if let (Some(sprite), Some(bitmap)) = (sprite, self.core.erased(index)) {
                 sprite.draw(context, view, bitmap.area.left, bitmap.area.top, selected);
             }
             return true;
         }
-        self.merged.contains(&index)
+        self.core.is_merged(index)
     }
 
     /// Draws the brush stroke (with the masks it joined).
     pub fn draw_painted(&self, context: &CanvasRenderingContext2d, view: View) {
         if let Some(sprite) = &self.sprite {
-            sprite.draw(context, view, self.painted.area.left, self.painted.area.top, false);
-        }
-    }
-
-    /// The edit that makes the stroke permanent, if it changed anything: a new mask, or the
-    /// joined masks replaced by their union (at the place of the lowest one); for the eraser the
-    /// changed masks, and those left empty removed.
-    pub fn finish(self, annotations: &[Annotation]) -> Option<Edit> {
-        let mut changes = Vec::new();
-        let mut removals = Vec::new();
-        if self.erase {
-            for (index, (bitmap, ..)) in self.erased {
-                let Some(before) = annotations.get(index).cloned() else { continue };
-                match bitmap.to_mask().map(Shape::Mask) {
-                    Some(shape) if shape != before.shape => {
-                        changes.push(Edit::Replace { index, after: Annotation { shape, pending: false, ..before.clone() }, before })
-                    }
-                    Some(_) => {}
-                    None => removals.push(Edit::Remove { index, annotation: before }),
-                }
-            }
-        } else {
-            let shape = Shape::Mask(self.painted.to_mask()?);
-            let mut merged = self.merged;
-            merged.sort_unstable();
-            match merged.split_first() {
-                None => {
-                    let annotation = Annotation::manual(self.label, shape);
-                    changes.push(Edit::Add { index: annotations.len(), annotation });
-                }
-                Some((&first, others)) => {
-                    let before = annotations.get(first)?.clone();
-                    changes.push(Edit::Replace { index: first, after: Annotation { shape, pending: false, ..before.clone() }, before });
-                    for &index in others {
-                        if let Some(annotation) = annotations.get(index) {
-                            removals.push(Edit::Remove { index, annotation: annotation.clone() });
-                        }
-                    }
-                }
-            }
-        }
-        // Highest index first, so the other removals keep their positions.
-        removals.reverse();
-        changes.extend(removals);
-        match changes.len() {
-            0 => None,
-            1 => changes.pop(),
-            _ => Some(Edit::Batch(changes)),
+            let area = self.core.painted().area;
+            sprite.draw(context, view, area.left, area.top, false);
         }
     }
 }
