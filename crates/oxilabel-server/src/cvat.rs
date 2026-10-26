@@ -25,7 +25,7 @@ use sqlx::{Row, SqliteConnection};
 
 use crate::{
     AppState,
-    annotation_store::{check_annotation, insert_annotations},
+    annotation_store::{self, Replacing},
     auth::Admin,
     error::ApiError,
     host::Caller,
@@ -173,19 +173,6 @@ struct ProjectImage {
     annotations: i64,
 }
 
-/// Counts skipped shapes by reason, in the order reasons first appear.
-#[derive(Default)]
-struct Skipped(Vec<SkipCount>);
-
-impl Skipped {
-    fn add(&mut self, reason: String) {
-        match self.0.iter_mut().find(|skip| skip.reason == reason) {
-            Some(skip) => skip.count += 1,
-            None => self.0.push(SkipCount { reason, count: 1 }),
-        }
-    }
-}
-
 async fn run(conn: &mut SqliteConnection, project: i64, export: &CvatExport, plan: &CvatImportPlan, mut found: Found) -> Result<CvatImportReport, ApiError> {
     let existing = labels::project_labels(conn, project).await?;
 
@@ -256,7 +243,7 @@ async fn run(conn: &mut SqliteConnection, project: i64, export: &CvatExport, pla
         skipped: Vec::new(),
         committed: plan.commit,
     };
-    let mut skipped = Skipped::default();
+    let mut skipped = Vec::new();
     for cvat_image in &export.images {
         // Same file name (ignoring case), then same size; failing that, an image found in the
         // images folder, added now.
@@ -294,55 +281,42 @@ async fn run(conn: &mut SqliteConnection, project: i64, export: &CvatExport, pla
             report.annotated += 1;
         }
         for kind in &cvat_image.unsupported {
-            skipped.add(format!("{kind} shapes are not supported"));
+            SkipCount::tally(&mut skipped, format!("{kind} shapes are not supported"), 1);
         }
-        // Tags already on the image are not added again.
-        let mut tagged: BTreeSet<i64> = BTreeSet::new();
-        if !plan.replace {
-            let rows = sqlx::query("SELECT label_id FROM annotations WHERE image_id = ? AND json_extract(shape, '$.type') = 'tag'")
-                .bind(image.id)
-                .fetch_all(&mut *conn)
-                .await?;
-            tagged.extend(rows.iter().map(|row| row.get::<i64, _>("label_id")));
-        }
-        let mut added = Vec::new();
+        // Each annotation with the attribute values it leaves out.
+        let (mut added, mut dropped_values) = (Vec::new(), Vec::new());
         for cvat_annotation in &cvat_image.annotations {
             let Some(label) = targets.get(&cvat_annotation.label).and_then(Option::as_ref) else {
-                skipped.add(format!("label \"{}\" is skipped", cvat_annotation.label));
+                SkipCount::tally(&mut skipped, format!("label \"{}\" is skipped", cvat_annotation.label), 1);
                 continue;
             };
-            // The shape first, so a shape left out does not also count its attribute values.
-            let mut annotation = Annotation::manual(label.id, cvat_annotation.shape.clone());
-            if let Err(reason) = check_annotation(label, &annotation, image.width, image.height) {
-                skipped.add(reason);
-                continue;
-            }
-            annotation.attributes = attributes_of(cvat_annotation, label, &mut skipped);
-            if annotation.shape.is_tag() && !tagged.insert(label.id) {
-                skipped.add(format!("the image already has the tag \"{}\"", label.name));
-                continue;
-            }
-            added.push(annotation);
+            let (attributes, dropped) = attributes_of(cvat_annotation, label);
+            added.push(Annotation { attributes, ..Annotation::manual(label.id, cvat_annotation.shape.clone()) });
+            dropped_values.push(dropped);
         }
-        report.annotations += added.len();
-        let replaced = plan.replace && image.annotations > 0;
-        if plan.commit && (replaced || !added.is_empty()) {
-            let first = if plan.replace {
-                sqlx::query("DELETE FROM annotations WHERE image_id = ?").bind(image.id).execute(&mut *conn).await?;
-                0
-            } else {
-                sqlx::query("SELECT COALESCE(MAX(position) + 1, 0) AS next FROM annotations WHERE image_id = ?")
-                    .bind(image.id)
-                    .fetch_one(&mut *conn)
-                    .await?
-                    .get("next")
-            };
-            insert_annotations(conn, project, image.id, first, &added).await?;
-            // An editor holding the old version is told to reload.
-            sqlx::query("UPDATE images SET version = version + 1 WHERE id = ?").bind(image.id).execute(&mut *conn).await?;
+        // The store leaves out what does not fit, and tags already on the image.
+        let replacing = if plan.replace { Replacing::All } else { Replacing::Nothing };
+        let written = if plan.commit {
+            annotation_store::write(conn, project, image.id, replacing, added)
+                .await?
+                .ok_or_else(|| ApiError::Internal("a matched image is not in its project".into()))?
+        } else {
+            annotation_store::preview(conn, image.id, (image.width, image.height), &taken, replacing, added).await?
+        };
+        report.annotations += written.stored;
+        // A shape left out does not also count its attribute values.
+        for (index, dropped) in dropped_values.into_iter().enumerate() {
+            if written.left_out.binary_search(&index).is_err() {
+                for reason in dropped {
+                    SkipCount::tally(&mut skipped, reason.to_owned(), 1);
+                }
+            }
+        }
+        for skip in written.skipped {
+            SkipCount::tally(&mut skipped, skip.reason, skip.count);
         }
     }
-    report.skipped = skipped.0;
+    report.skipped = skipped;
     Ok(report)
 }
 
@@ -361,13 +335,13 @@ fn definition_of(label: &CvatLabel) -> LabelDefinition {
     }
 }
 
-/// The CVAT attribute values that `label` has an attribute for and that fit it; the others are
-/// counted as skipped.
-fn attributes_of(annotation: &CvatAnnotation, label: &Label, skipped: &mut Skipped) -> Attributes {
-    let mut values = Attributes::new();
+/// The CVAT attribute values that `label` has an attribute for and that fit it, and why each of
+/// the others is left out.
+fn attributes_of(annotation: &CvatAnnotation, label: &Label) -> (Attributes, Vec<&'static str>) {
+    let (mut values, mut dropped) = (Attributes::new(), Vec::new());
     for (name, text) in &annotation.attributes {
         let Some(definition) = label.attributes.iter().find(|definition| &definition.name == name) else {
-            skipped.add("attribute values with no matching attribute".into());
+            dropped.push("attribute values with no matching attribute");
             continue;
         };
         let value = match &definition.kind {
@@ -384,8 +358,8 @@ fn attributes_of(annotation: &CvatAnnotation, label: &Label, skipped: &mut Skipp
             Some(value) => {
                 values.insert(name.clone(), value);
             }
-            None => skipped.add("attribute values that do not fit their attribute".into()),
+            None => dropped.push("attribute values that do not fit their attribute"),
         }
     }
-    values
+    (values, dropped)
 }

@@ -6,7 +6,12 @@
 
 **Status:** ready-for-agent
 
-- [ ] Save state, the saved revision and retrying live in the policy; the workspace has no autosave rules of its own
-- [ ] Leaving during an in-flight save never sends a save on a stale version
-- [ ] Rust tests cover every transition, including an edit during a save, leaving during a save, a conflict then reload, and a conflict then a merged run
-- [ ] Browser autosave and conflict tests still pass
+- [x] Save state, the saved revision and retrying live in the policy; the workspace has no autosave rules of its own
+- [x] Leaving during an in-flight save never sends a save on a stale version
+- [x] Rust tests cover every transition, including an edit during a save, leaving during a save, a conflict then reload, and a conflict then a merged run
+- [x] Browser autosave and conflict tests still pass
+
+## Comments
+
+- Policy: `oxilabel_core::autosave::Autosave` (pure; inputs `edited`, `timer_fired`, `retry`, `save_finished(SaveOutcome)`, `reloaded`, `run_merged`, `left`; outputs `Action::{Nothing, StartTimer, Save { base_version }}` and `state()`/`has_unsaved`). `SaveState` moved there from `pages/workspace.rs`. Tests in the same file (`cargo test -p oxilabel-core autosave`).
+- Workspace: `Autosaver`/`Saver` in `pages/workspace.rs` keep only the timer token, the PUT and the indicator signal. The policy and the editor's last revision/annotations live in an `Arc` that outlives the component, so a save in flight when the image is left finishes and the rest goes out on the returned version.

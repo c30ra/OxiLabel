@@ -26,7 +26,6 @@ pub(crate) struct AccessScope {
     images_root: PathBuf,
 }
 
-
 /// An image the user may open: its facts and the file it is read from (ADR 0003).
 pub(crate) struct VisibleImage {
     pub image: Image,
@@ -67,16 +66,17 @@ impl AccessScope {
 
     /// The image, or `NotFound` if it does not exist or the user may not open it.
     pub(crate) async fn image(&self, conn: &mut SqliteConnection, image: i64) -> Result<VisibleImage, ApiError> {
-        self.image_where(self.sql(), conn, image, None).await
+        self.image_where(conn, image, None).await
     }
 
     /// The image of `project`, or `NotFound`: an image of another project, or of another user's
     /// job, is no different from one that does not exist.
     pub(crate) async fn project_image(&self, conn: &mut SqliteConnection, project: i64, image: i64) -> Result<VisibleImage, ApiError> {
-        self.image_where(self.sql(), conn, image, Some(project)).await
+        self.image_where(conn, image, Some(project)).await
     }
 
-    async fn image_where(&self, mut query: QueryBuilder<'_, Sqlite>, conn: &mut SqliteConnection, image: i64, project: Option<i64>) -> Result<VisibleImage, ApiError> {
+    async fn image_where(&self, conn: &mut SqliteConnection, image: i64, project: Option<i64>) -> Result<VisibleImage, ApiError> {
+        let mut query = self.sql();
         query.push(format!("SELECT id, hash, {IMAGE_COLUMNS} FROM visible_images images WHERE id = "));
         query.push_bind(image);
         if let Some(project) = project {

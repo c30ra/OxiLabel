@@ -6,7 +6,7 @@ use axum::{
     http::StatusCode,
     routing::{get, put},
 };
-use oxilabel_core::{Footprint, Label, LabelDefinition, PointShape, annotation::LabelUsage, attribute::Attributes};
+use oxilabel_core::{Footprint, Label, LabelDefinition, PointShape, annotation::LabelUsage};
 use serde::Deserialize;
 use sqlx::{
     Row, Sqlite, SqliteConnection, SqlitePool,
@@ -14,7 +14,12 @@ use sqlx::{
     sqlite::{SqliteArguments, SqliteRow},
 };
 
-use crate::{AppState, access_scope::AccessScope, auth::Admin, error::ApiError, placeholders, projects};
+use crate::{
+    AppState, access_scope::AccessScope, annotation_store,
+    auth::Admin,
+    error::ApiError,
+    placeholders, projects,
+};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -89,37 +94,9 @@ async fn update_label(
     }
     let label = Label::new(id, definition.validated(&others).map_err(ApiError::BadRequest)?);
     bind_label(sqlx::query(&UPDATE), &label).bind(project).bind(id).execute(&mut *tx).await?;
-    conform_attribute_values(&mut tx, project, &label).await?;
+    annotation_store::fit_to_label(&mut tx, project, &label).await?;
     tx.commit().await?;
     Ok(Json(label))
-}
-
-/// Makes the stored attribute values of `label`'s annotations fit its (changed) definitions:
-/// values of removed attributes go, values that no longer fit and missing ones become defaults.
-/// Images whose annotations change get a new version, so editors holding the old one reload.
-async fn conform_attribute_values(conn: &mut SqliteConnection, project: i64, label: &Label) -> Result<(), ApiError> {
-    let rows = sqlx::query("SELECT id, image_id, attributes FROM annotations WHERE project_id = ? AND label_id = ?")
-        .bind(project)
-        .bind(label.id)
-        .fetch_all(&mut *conn)
-        .await?;
-    let mut changed_images = std::collections::BTreeSet::new();
-    for row in rows {
-        let stored: Attributes = serde_json::from_str(row.get("attributes")).unwrap_or_default();
-        let conformed = label.conform_attributes(&stored);
-        if conformed != stored {
-            sqlx::query("UPDATE annotations SET attributes = ? WHERE id = ?")
-                .bind(serde_json::to_string(&conformed).expect("attributes serialize"))
-                .bind(row.get::<i64, _>("id"))
-                .execute(&mut *conn)
-                .await?;
-            changed_images.insert(row.get::<i64, _>("image_id"));
-        }
-    }
-    for image in changed_images {
-        sqlx::query("UPDATE images SET version = version + 1 WHERE id = ?").bind(image).execute(&mut *conn).await?;
-    }
-    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -150,16 +127,7 @@ async fn delete_label(
             "label \"{name}\" is used by {used} {noun}; confirm to delete them too"
         )));
     }
-    // The affected images change, so editors holding their old version must not save over them.
-    sqlx::query(
-        "UPDATE images SET version = version + 1 \
-         WHERE id IN (SELECT image_id FROM annotations WHERE project_id = ? AND label_id = ?)",
-    )
-    .bind(project)
-    .bind(id)
-    .execute(&mut *tx)
-    .await?;
-    // Its annotations go with it (foreign key cascade).
+    annotation_store::remove_label_annotations(&mut tx, project, id).await?;
     sqlx::query("DELETE FROM labels WHERE project_id = ? AND id = ?").bind(project).bind(id).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
