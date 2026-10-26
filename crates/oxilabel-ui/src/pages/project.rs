@@ -51,7 +51,7 @@ pub fn ProjectPage(tab: Tab) -> impl IntoView {
         let id = project_id.get();
         images_version.track();
         async move {
-            let Some(id) = id else { return true };
+            let Some(id) = id.filter(|_| admin) else { return true };
             api::get::<ImagePage>(&format!("/api/projects/{id}/images")).await.map_or(true, |page| page.total > 0)
         }
     });
@@ -85,13 +85,16 @@ pub fn ProjectPage(tab: Tab) -> impl IntoView {
                     <AccountMenu />
                 </header>
                 <nav class="tabs" aria-label="Project">
-                    <A href=format!("/projects/{id}") attr:class=class(Tab::Images)>"Images"</A>
+                    {admin.then(|| view! { <A href=format!("/projects/{id}") attr:class=class(Tab::Images)>"Images"</A> })}
                     <A href=format!("/projects/{id}/jobs") attr:class=class(Tab::Jobs)>"Jobs"</A>
                     <A href=format!("/projects/{id}/labels") attr:class=class(Tab::Labels)>"Labels"</A>
                     {admin.then(|| view! { <A href=format!("/projects/{id}/statistics") attr:class=class(Tab::Statistics)>"Statistics"</A> })}
                 </nav>
                 <main class="page">
                     {match tab {
+                        Tab::Images if !admin => view! {
+                            <p class="muted">"Only admins browse all images. "<A href=format!("/projects/{id}/jobs")>"Open your jobs"</A></p>
+                        }.into_any(),
                         Tab::Images => view! {
                             {move || match has_images.get() {
                                 Some(false) => view! { <GetStarted project=id on_import=move || importing.set(true) /> }.into_any(),
