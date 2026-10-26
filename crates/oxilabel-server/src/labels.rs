@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -6,13 +8,17 @@ use axum::{
 };
 use oxilabel_core::{Footprint, Label, LabelDefinition, PointShape, annotation::LabelUsage};
 use serde::Deserialize;
-use sqlx::{Row, SqliteConnection, SqlitePool, sqlite::SqliteRow};
+use sqlx::{
+    Row, Sqlite, SqliteConnection, SqlitePool,
+    query::Query as SqlQuery,
+    sqlite::{SqliteArguments, SqliteRow},
+};
 
 use crate::{
     AppState, annotation_store,
     auth::{Admin, CurrentUser},
     error::ApiError,
-    jobs, projects,
+    jobs, placeholders, projects,
 };
 
 pub fn routes() -> Router<AppState> {
@@ -54,25 +60,7 @@ pub(crate) async fn insert_label(conn: &mut SqliteConnection, project: i64, defi
 
 /// Writes `label` into the project as it is, id included.
 pub(crate) async fn store_label(conn: &mut SqliteConnection, project: i64, label: &Label) -> Result<(), ApiError> {
-    sqlx::query(
-        "INSERT INTO labels (project_id, id, name, color, hotkey, shape_types, is_ignore, attributes, line_width, point_radius, point_shape, show_footprint, constraints) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    )
-    .bind(project)
-    .bind(label.id)
-    .bind(&label.name)
-    .bind(&label.color)
-    .bind(&label.hotkey)
-    .bind(serde_json::to_string(&label.shape_types).expect("shape types serialize"))
-    .bind(label.ignore)
-    .bind(serde_json::to_string(&label.attributes).expect("attributes serialize"))
-    .bind(label.footprint.line_width)
-    .bind(label.footprint.point_radius)
-    .bind(label.footprint.point_shape.name())
-    .bind(label.show_footprint)
-    .bind(serde_json::to_string(&label.constraints).expect("constraints serialize"))
-    .execute(&mut *conn)
-    .await?;
+    bind_label(sqlx::query(&INSERT).bind(project).bind(label.id), label).execute(&mut *conn).await?;
     Ok(())
 }
 
@@ -85,7 +73,7 @@ async fn list_labels(user: CurrentUser, State(pool): State<SqlitePool>, Path(pro
 /// All labels of a project, or `NotFound` if the project does not exist.
 pub(crate) async fn project_labels(conn: &mut SqliteConnection, project: i64) -> Result<Vec<Label>, ApiError> {
     projects::ensure_exists(conn, project).await?;
-    let rows = sqlx::query("SELECT * FROM labels WHERE project_id = ? ORDER BY id")
+    let rows = sqlx::query(&SELECT)
         .bind(project)
         .fetch_all(&mut *conn)
         .await?;
@@ -105,25 +93,7 @@ async fn update_label(
         return Err(ApiError::NotFound);
     }
     let label = Label::new(id, definition.validated(&others).map_err(ApiError::BadRequest)?);
-    sqlx::query(
-        "UPDATE labels SET name = ?, color = ?, hotkey = ?, shape_types = ?, is_ignore = ?, attributes = ?, line_width = ?, point_radius = ?, \
-         point_shape = ?, show_footprint = ?, constraints = ? WHERE project_id = ? AND id = ?",
-    )
-    .bind(&label.name)
-    .bind(&label.color)
-    .bind(&label.hotkey)
-    .bind(serde_json::to_string(&label.shape_types).expect("shape types serialize"))
-    .bind(label.ignore)
-    .bind(serde_json::to_string(&label.attributes).expect("attributes serialize"))
-    .bind(label.footprint.line_width)
-    .bind(label.footprint.point_radius)
-    .bind(label.footprint.point_shape.name())
-    .bind(label.show_footprint)
-    .bind(serde_json::to_string(&label.constraints).expect("constraints serialize"))
-    .bind(project)
-    .bind(id)
-    .execute(&mut *tx)
-    .await?;
+    bind_label(sqlx::query(&UPDATE), &label).bind(project).bind(id).execute(&mut *tx).await?;
     annotation_store::fit_to_label(&mut tx, project, &label).await?;
     tx.commit().await?;
     Ok(Json(label))
@@ -186,6 +156,32 @@ async fn count_annotations(conn: &mut SqliteConnection, project: i64, label: i64
         .fetch_one(conn)
         .await?
         .get("n"))
+}
+
+/// The columns of a label row besides `project_id` and `id`, in the order `bind_label` binds them;
+/// `label_from_row` reads them.
+const LABEL_FIELDS: &str = "name, color, hotkey, shape_types, is_ignore, attributes, line_width, point_radius, point_shape, show_footprint, constraints";
+
+static SELECT: LazyLock<String> = LazyLock::new(|| format!("SELECT id, {LABEL_FIELDS} FROM labels WHERE project_id = ? ORDER BY id"));
+static INSERT: LazyLock<String> =
+    LazyLock::new(|| format!("INSERT INTO labels (project_id, id, {LABEL_FIELDS}) VALUES (?, ?, {})", placeholders(LABEL_FIELDS)));
+static UPDATE: LazyLock<String> =
+    LazyLock::new(|| format!("UPDATE labels SET ({LABEL_FIELDS}) = ({}) WHERE project_id = ? AND id = ?", placeholders(LABEL_FIELDS)));
+
+/// Binds the label's `LABEL_FIELDS`.
+fn bind_label<'q>(query: SqlQuery<'q, Sqlite, SqliteArguments<'q>>, label: &'q Label) -> SqlQuery<'q, Sqlite, SqliteArguments<'q>> {
+    query
+        .bind(&label.name)
+        .bind(&label.color)
+        .bind(&label.hotkey)
+        .bind(serde_json::to_string(&label.shape_types).expect("shape types serialize"))
+        .bind(label.ignore)
+        .bind(serde_json::to_string(&label.attributes).expect("attributes serialize"))
+        .bind(label.footprint.line_width)
+        .bind(label.footprint.point_radius)
+        .bind(label.footprint.point_shape.name())
+        .bind(label.show_footprint)
+        .bind(serde_json::to_string(&label.constraints).expect("constraints serialize"))
 }
 
 fn label_from_row(row: &SqliteRow) -> Label {

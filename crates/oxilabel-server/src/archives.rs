@@ -28,16 +28,17 @@ use oxilabel_core::{
 };
 use oxilabel_formats::archive::{ArchiveImage, ArchiveJob, ArchiveReader, ArchiveWriter, ProjectArchive};
 use serde::Deserialize;
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
 
 use crate::{
     AppState,
-    annotation_store::{self, Replacing, annotation_from_row},
+    annotation_store::{self, Replacing},
     auth::Admin,
     error::ApiError,
     host::Caller,
     images::{self, NewImage},
     labels,
+    project_read_model::{self, Pending},
 };
 
 pub fn routes() -> Router<AppState> {
@@ -60,11 +61,10 @@ struct ExportQuery {
     images: bool,
 }
 
-/// The project as an archive, read from the database.
-async fn project_archive(pool: &SqlitePool, project: i64) -> Result<ProjectArchive, ApiError> {
-    let mut conn = pool.acquire().await?;
-    let row = sqlx::query("SELECT name, next_label_id, next_job_number FROM projects WHERE id = ?").bind(project).fetch_optional(&mut *conn).await?.ok_or(ApiError::NotFound)?;
-    let labels = labels::project_labels(&mut conn, project).await?;
+/// The project as an archive, and each image's file.
+async fn project_archive(state: &AppState, project: i64) -> Result<(ProjectArchive, Vec<PathBuf>), ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    let read = project_read_model::read(&mut conn, &images::image_root(state)?, project, Pending::Include).await?;
     let jobs = sqlx::query("SELECT jobs.number, users.username FROM jobs LEFT JOIN users ON users.id = jobs.assignee_id WHERE jobs.project_id = ? ORDER BY jobs.number")
         .bind(project)
         .fetch_all(&mut *conn)
@@ -72,39 +72,32 @@ async fn project_archive(pool: &SqlitePool, project: i64) -> Result<ProjectArchi
         .iter()
         .map(|row| ArchiveJob { number: row.get("number"), assignee: row.get("username") })
         .collect();
-    let mut annotations: BTreeMap<i64, Vec<_>> = BTreeMap::new();
-    for row in sqlx::query("SELECT image_id, label_id, shape, source, confidence, attributes, hidden, locked, pending FROM annotations WHERE project_id = ? ORDER BY image_id, position")
-        .bind(project)
-        .fetch_all(&mut *conn)
-        .await?
-    {
-        annotations.entry(row.get("image_id")).or_default().push(annotation_from_row(&row)?);
-    }
-    let images = sqlx::query("SELECT images.id, path, hash, width, height, annotated, jobs.number FROM images LEFT JOIN jobs ON jobs.id = images.job_id WHERE images.project_id = ? ORDER BY path")
-        .bind(project)
-        .fetch_all(&mut *conn)
-        .await?
-        .iter()
-        .map(|row| ArchiveImage {
-            path: row.get("path"),
-            hash: row.get("hash"),
-            width: row.get("width"),
-            height: row.get("height"),
-            annotated: row.get("annotated"),
-            job: row.get("number"),
-            file: None,
-            annotations: annotations.remove(&row.get::<i64, _>("id")).unwrap_or_default(),
+    let (images, sources) = read
+        .images
+        .into_iter()
+        .map(|image| {
+            let archived = ArchiveImage {
+                path: image.path,
+                hash: image.hash,
+                width: image.width,
+                height: image.height,
+                annotated: image.annotated,
+                job: image.job,
+                file: None,
+                annotations: image.annotations,
+            };
+            (archived, image.source)
         })
-        .collect();
-    Ok(ProjectArchive { name: row.get("name"), next_label_id: row.get("next_label_id"), next_job_number: row.get("next_job_number"), labels, jobs, images })
+        .unzip();
+    let archive = ProjectArchive { name: read.name, next_label_id: read.next_label_id, next_job_number: read.next_job_number, labels: read.labels, jobs, images };
+    Ok((archive, sources))
 }
 
 /// The project as an archive file to download, with the image files if asked. Images whose file
 /// is gone are referred to only.
 async fn export_archive(_: Admin, State(state): State<AppState>, UrlPath(project): UrlPath<i64>, Query(query): Query<ExportQuery>) -> Result<impl IntoResponse, ApiError> {
-    let mut archive = project_archive(&state.pool, project).await?;
+    let (mut archive, sources) = project_archive(&state, project).await?;
     let name = archive.name.clone();
-    let root = images::image_root(&state)?;
     let folder = state.export_dir.clone();
     let file = tokio::task::spawn_blocking(move || -> Result<fs::File, ApiError> {
         fs::create_dir_all(&folder).map_err(internal)?;
@@ -113,14 +106,13 @@ async fn export_archive(_: Admin, State(state): State<AppState>, UrlPath(project
         if query.images {
             // Copies with the same content share one file in the archive.
             let mut added: BTreeMap<String, String> = BTreeMap::new();
-            for image in &mut archive.images {
+            for (image, source) in archive.images.iter_mut().zip(&sources) {
                 if let Some(name) = added.get(&image.hash) {
                     image.file = Some(name.clone());
                     continue;
                 }
-                let path = root.join(&image.path);
-                let Ok(mut file) = fs::File::open(&path) else { continue };
-                let extension = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_else(|| "img".into());
+                let Ok(mut file) = fs::File::open(source) else { continue };
+                let extension = source.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_else(|| "img".into());
                 let name = writer.add_image(&image.hash, &extension, &mut file).map_err(internal)?;
                 added.insert(image.hash.clone(), name.clone());
                 image.file = Some(name);
