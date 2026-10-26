@@ -127,16 +127,21 @@ pub(crate) fn validated(definitions: Vec<AttributeDefinition>) -> Result<Vec<Att
     Ok(definitions)
 }
 
+/// Whether every value is one of `definitions` and suits it. Missing values count as the default.
+pub(crate) fn check_attributes(label: &str, definitions: &[AttributeDefinition], values: &Attributes) -> Result<(), String> {
+    for (name, value) in values {
+        let definition = definitions.iter().find(|definition| &definition.name == name);
+        let definition = definition.ok_or_else(|| format!("\"{label}\" has no attribute \"{name}\""))?;
+        definition.check(value)?;
+    }
+    Ok(())
+}
+
 impl Label {
     /// Whether every value is one of this label's attributes and suits it. Missing values count
     /// as the default.
     pub fn check_attributes(&self, values: &Attributes) -> Result<(), String> {
-        for (name, value) in values {
-            let definition = self.attributes.iter().find(|definition| &definition.name == name);
-            let definition = definition.ok_or_else(|| format!("\"{}\" has no attribute \"{name}\"", self.name))?;
-            definition.check(value)?;
-        }
-        Ok(())
+        check_attributes(&self.name, &self.attributes, values)
     }
 
     /// `values` made to fit this label: values that suit its attributes are kept, the others

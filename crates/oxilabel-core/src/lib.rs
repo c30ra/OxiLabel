@@ -27,7 +27,7 @@ pub mod worker;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{attribute::AttributeDefinition, constraint::ShapeConstraints};
+use crate::{annotation::Shape, attribute::{AttributeDefinition, Attributes}, constraint::ShapeConstraints};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Project {
@@ -264,6 +264,31 @@ impl LabelDefinition {
         self.constraints = self.constraints.validated()?;
         Ok(self)
     }
+
+    /// Checks that this label allows `shape`, that it lies in a `width` × `height` image, and
+    /// that its attribute values suit the label. Import planners use this before labels exist.
+    pub fn check_annotation(&self, shape: &Shape, values: &Attributes, width: u32, height: u32) -> Result<(), String> {
+        check_annotation(&self.name, &self.shape_types, &self.attributes, shape, values, width, height)
+    }
+}
+
+/// The annotation rule shared by stored labels and definitions that are not stored yet.
+fn check_annotation(
+    name: &str,
+    shape_types: &[ShapeType],
+    attributes: &[AttributeDefinition],
+    shape: &Shape,
+    values: &Attributes,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    let shape_type = shape.shape_type();
+    if !shape_types.contains(&shape_type) {
+        let shape_name = serde_json::to_value(shape_type).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
+        return Err(format!("label \"{name}\" does not allow {shape_name} shapes"));
+    }
+    shape.validate(width, height)?;
+    crate::attribute::check_attributes(name, attributes, values)
 }
 
 fn is_hex_color(color: &str) -> bool {
@@ -284,6 +309,11 @@ impl Label {
     pub fn definition(&self) -> LabelDefinition {
         let Label { name, color, hotkey, shape_types, ignore, attributes, footprint, show_footprint, constraints, .. } = self.clone();
         LabelDefinition { name, color, hotkey, shape_types, ignore, attributes, footprint, show_footprint, constraints }
+    }
+
+    /// Checks an annotation against this stored label and its image.
+    pub fn check_annotation(&self, shape: &Shape, values: &Attributes, width: u32, height: u32) -> Result<(), String> {
+        check_annotation(&self.name, &self.shape_types, &self.attributes, shape, values, width, height)
     }
 }
 

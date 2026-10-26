@@ -3,6 +3,7 @@ mod annotations;
 mod archives;
 mod auth;
 mod cvat;
+mod cvat_plan;
 pub mod enhance;
 mod error;
 mod exports;

@@ -84,8 +84,6 @@ pub(crate) enum Replacing<'a> {
 pub(crate) struct Written {
     pub stored: usize,
     pub skipped: Vec<SkipCount>,
-    /// The positions, in the list given, of the annotations left out, in order.
-    pub left_out: Vec<usize>,
 }
 
 /// Puts `annotations` on the image in place of `replacing`, on top of the annotations it keeps.
@@ -109,29 +107,12 @@ pub(crate) async fn write(conn: &mut SqliteConnection, project: i64, image: i64,
     Ok(Some(written(fitting.len(), refused)))
 }
 
-/// What `write` would store and leave out, writing nothing: for previews of imports whose labels
-/// or images do not exist yet. `labels` stand for the project's and `width` × `height` for the
-/// image's size; an `image` id that no image has stands for a new image.
-pub(crate) async fn preview(
-    conn: &mut SqliteConnection,
-    image: i64,
-    (width, height): (u32, u32),
-    labels: &[Label],
-    replacing: Replacing<'_>,
-    annotations: Vec<Annotation>,
-) -> Result<Written, ApiError> {
-    let tagged = kept_tags(conn, image, replacing).await?;
-    let (fitting, refused) = sort_out(labels, width, height, tagged, annotations);
-    Ok(written(fitting.len(), refused))
-}
-
 fn written(stored: usize, refused: Vec<(usize, String)>) -> Written {
-    let (mut skipped, mut left_out) = (Vec::new(), Vec::with_capacity(refused.len()));
-    for (index, reason) in refused {
+    let mut skipped = Vec::new();
+    for (_, reason) in refused {
         SkipCount::tally(&mut skipped, reason, 1);
-        left_out.push(index);
     }
-    Written { stored, skipped, left_out }
+    Written { stored, skipped }
 }
 
 /// The labels the image has as tags among the annotations a write in place of `replacing` keeps.
@@ -307,13 +288,7 @@ fn bind_annotation<'q>(query: Query<'q, Sqlite, SqliteArguments<'q>>, annotation
 /// Checks that `label` allows the annotation's shape, the shape lies in a `width` × `height`
 /// image, and its attribute values suit the label.
 fn check_annotation(label: &Label, annotation: &Annotation, width: u32, height: u32) -> Result<(), String> {
-    let shape_type = annotation.shape.shape_type();
-    if !label.shape_types.contains(&shape_type) {
-        let name = serde_json::to_value(shape_type).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
-        return Err(format!("label \"{}\" does not allow {name} shapes", label.name));
-    }
-    annotation.shape.validate(width, height)?;
-    label.check_attributes(&annotation.attributes)
+    label.check_annotation(&annotation.shape, &annotation.attributes, width, height)
 }
 
 /// Stores `annotations` on the image in order, the first at drawing position `first`.
