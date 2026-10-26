@@ -25,7 +25,7 @@ use sqlx::{Row, SqliteConnection};
 
 use crate::{
     AppState,
-    annotations::{check_annotation, insert_annotations},
+    annotation_store::{check_annotation, insert_annotations},
     auth::Admin,
     error::ApiError,
     host::Caller,

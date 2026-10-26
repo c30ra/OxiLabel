@@ -26,7 +26,7 @@ use sqlx::Row;
 use tokio_util::io::ReaderStream;
 use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
-use crate::{AppState, auth::Admin, annotations::annotation_from_row, error::ApiError, labels, write_atomically_to};
+use crate::{AppState, annotation_store::annotation_from_row, auth::Admin, error::ApiError, labels, write_atomically_to};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
