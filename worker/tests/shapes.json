@@ -1,0 +1,20 @@
+[
+  {"helper": "rectangle", "args": [9, 6, 1, 1],
+   "shape": {"type": "rectangle", "min": {"x": 1.0, "y": 1.0}, "max": {"x": 9.0, "y": 6.0}}},
+  {"helper": "oriented_rectangle", "args": [10, 5, 4, 2, 0.5],
+   "shape": {"type": "oriented_rectangle", "centre": {"x": 10.0, "y": 5.0}, "width": 4.0, "height": 2.0, "angle": 0.5}},
+  {"helper": "oriented_from_corners", "args": [[[0, 0], [4, 0], [4, 2], [0, 2]]],
+   "shape": {"type": "oriented_rectangle", "centre": {"x": 2.0, "y": 1.0}, "width": 4.0, "height": 2.0, "angle": 0.0}},
+  {"helper": "polygon", "args": [[[0, 0], [4, 0], [0, 3]]],
+   "shape": {"type": "polygon", "points": [{"x": 0.0, "y": 0.0}, {"x": 4.0, "y": 0.0}, {"x": 0.0, "y": 3.0}]}},
+  {"helper": "polyline", "args": [[[0, 0], [4, 4]]],
+   "shape": {"type": "polyline", "points": [{"x": 0.0, "y": 0.0}, {"x": 4.0, "y": 4.0}]}},
+  {"helper": "points", "args": [[[3, 3], [5, 1]]],
+   "shape": {"type": "points", "points": [{"x": 3.0, "y": 3.0}, {"x": 5.0, "y": 1.0}]}},
+  {"helper": "ellipse", "args": [10, 5, 4, 2, 0.25],
+   "shape": {"type": "ellipse", "centre": {"x": 10.0, "y": 5.0}, "rx": 4.0, "ry": 2.0, "angle": 0.25}},
+  {"helper": "tag", "args": [],
+   "shape": {"type": "tag"}},
+  {"helper": "mask", "args": [[[0, 0, 0, 0], [0, 1, 1, 0], [0, 0, 1, 0]]],
+   "shape": {"type": "mask", "left": 1, "top": 1, "width": 2, "height": 2, "rle": [0, 2, 1, 1]}}
+]
