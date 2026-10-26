@@ -1,0 +1,50 @@
+# Development tasks: `mise tasks` lists them, `mise run <task>` runs one.
+# The server settings below are for local development; override any of them in mise.local.toml.
+
+[env]
+OXILABEL_ADDR = "127.0.0.1:3111"
+OXILABEL_WEB_ROOT = "{{config_root}}/crates/oxilabel-ui/dist"
+# The folder the import dialog browses (here the author's defect_detection project next to OxiLabel).
+# From this machine, Browse… in the New project dialog opens the desktop's own folder dialog.
+OXILABEL_IMAGES_ROOT = "{{config_root}}/../../python/defect_detection"
+OXILABEL_DATABASE = "sqlite://{{config_root}}/data/oxilabel.db?mode=rwc"
+OXILABEL_CACHE_DIR = "{{config_root}}/data/cache"
+OXILABEL_EXPORT_DIR = "{{config_root}}/data/exports"
+# Images uploaded from browsers on other machines are kept here (ADR 0003).
+OXILABEL_UPLOAD_DIR = "{{config_root}}/data/uploads"
+
+[tasks.build-ui]
+description = "Build the web UI into crates/oxilabel-ui/dist"
+run = "scripts/build-ui.sh"
+
+[tasks.build]
+description = "Build the UI and the release server"
+depends = ["build-ui"]
+run = "cargo build --release -p oxilabel-server"
+
+[tasks.serve]
+description = "Build everything and run the server on OXILABEL_ADDR (data in ./data)"
+depends = ["build"]
+run = ["mkdir -p data", "target/release/oxilabel-server"]
+
+[tasks.test]
+description = "Unit and HTTP API tests"
+run = "cargo test --workspace --exclude oxilabel-ui"
+
+[tasks.clippy]
+description = "Clippy for the native crates and the WASM UI"
+run = [
+  "cargo clippy --workspace --exclude oxilabel-ui --all-targets",
+  "cargo clippy -p oxilabel-ui --target wasm32-unknown-unknown",
+]
+
+[tasks.ui-test]
+description = "Browser tests in headless Zen (pass a name filter after --)"
+env = { OXILABEL_UI_TEST_BROWSER = "flatpak run app.zen_browser.zen" }
+run = "scripts/ui-test.sh"
+
+[tasks.check]
+description = "Clippy, tests and browser tests"
+depends = ["clippy", "test"]
+run = "scripts/ui-test.sh"
+env = { OXILABEL_UI_TEST_BROWSER = "flatpak run app.zen_browser.zen" }
