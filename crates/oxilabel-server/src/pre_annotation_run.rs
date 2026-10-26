@@ -21,6 +21,7 @@ use sqlx::SqlitePool;
 use crate::{
     annotation_store::{self, Replacing, Written},
     error::ApiError,
+    images::source_file,
     worker::WorkerPort,
 };
 
@@ -85,7 +86,7 @@ impl PreAnnotationRun {
         let Some(path) = path else {
             return skip(status, REMOVED);
         };
-        let Ok(bytes) = tokio::fs::read(self.root.join(&path)).await else {
+        let Ok(bytes) = tokio::fs::read(source_file(&self.root, &path)).await else {
             return skip(status, "image files missing");
         };
         let request = PredictRequest { model: WorkerModel::from(&self.model), image: bytes };

@@ -12,9 +12,8 @@ use axum::{
     routing::get,
 };
 use image::{DynamicImage, ImageFormat};
-use sqlx::Row;
 
-use crate::{AppState, auth::CurrentUser, error::ApiError, jobs, write_atomically};
+use crate::{AppState, access_scope::AccessScope, error::ApiError, write_atomically};
 
 /// Thumbnails fit in a square of this many pixels.
 const THUMBNAIL_SIZE: u32 = 256;
@@ -23,16 +22,11 @@ pub fn routes() -> Router<AppState> {
     Router::new().route("/api/images/{id}/thumbnail", get(thumbnail))
 }
 
-async fn thumbnail(user: CurrentUser, State(state): State<AppState>, UrlPath(id): UrlPath<i64>) -> Result<impl IntoResponse, ApiError> {
-    let row = sqlx::query("SELECT path, hash FROM images WHERE id = ?")
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await?
-        .ok_or(ApiError::NotFound)?;
-    jobs::ensure_image_access(&mut *state.pool.acquire().await?, &user, id).await?;
-    let source = state.images_root.join(row.get::<String, _>("path"));
+async fn thumbnail(scope: AccessScope, State(state): State<AppState>, UrlPath(id): UrlPath<i64>) -> Result<impl IntoResponse, ApiError> {
+    let visible = scope.image(&mut *state.pool.acquire().await?, id).await?;
+    let source = visible.source;
     // Named by content hash, so identical images share one cached thumbnail.
-    let cached = state.cache_dir.join("thumbnails").join(format!("{}.jpg", row.get::<String, _>("hash")));
+    let cached = state.cache_dir.join("thumbnails").join(format!("{}.jpg", visible.hash));
 
     let bytes = tokio::task::spawn_blocking(move || cached_thumbnail(&source, &cached))
         .await

@@ -1,3 +1,4 @@
+mod access_scope;
 mod annotation_store;
 mod annotations;
 mod archives;
