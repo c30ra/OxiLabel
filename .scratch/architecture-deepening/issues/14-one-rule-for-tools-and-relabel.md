@@ -6,7 +6,7 @@
 
 **Status:** ready-for-agent
 
-**Open question:** after choosing Brush from the rail, should the last eraser or fuzzy fill mode be kept (as the rail does today) or reset (as the B key does)? Ask the author before building.
+**Decision:** choosing Brush resets to plain painting from every entry point (key, pie, rail, Q tap), as the B key does today; the last eraser or fuzzy fill mode is not kept.
 
 - [ ] Keys, pie, rail and tap all switch tools through one session rule
 - [ ] The side panel and the label pie relabel through one session rule; the side panel's duplicate-tag gap is closed
