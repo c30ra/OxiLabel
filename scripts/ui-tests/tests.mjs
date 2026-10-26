@@ -1322,10 +1322,11 @@ tests.push({
       await t.b.waitFor(() => t.b.eval(`/^\\/projects\\/${p}\\/images\\/\\d+$/.test(location.pathname) && !!document.querySelector('canvas.annotations')`), 'the workspace');
       const first = await t.b.eval('location.pathname');
       await t.b.waitFor(() => t.b.eval(`document.querySelectorAll('.filmstrip a.thumb').length === 2`), 'her two images in the filmstrip');
+      const at = async () => [await t.b.eval('location.pathname'), await t.b.eval(`document.querySelector('.image-position')?.textContent`)];
       await t.b.key('j');
-      await t.b.waitFor(async () => (await t.b.eval('location.pathname')) !== first && !!(await t.b.eval(`document.querySelector('canvas.annotations')`)), 'the next image of her job');
+      await t.b.waitFor(async () => { const [path, position] = await at(); return path !== first && position === '2 / 2'; }, 'the next image of her job');
       await t.b.key('k');
-      await t.b.waitFor(async () => (await t.b.eval('location.pathname')) === first, 'back on the first image');
+      await t.b.waitFor(async () => { const [path, position] = await at(); return path === first && position === '1 / 2'; }, 'back on the first image');
     } finally {
       await signOut(t.b, t.base);
       await signIn(t.b, t.base, ADMIN);
