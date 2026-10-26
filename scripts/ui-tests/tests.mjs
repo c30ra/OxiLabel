@@ -1309,13 +1309,24 @@ tests.push({
     try {
       await signIn(t.b, t.base, anna);
       await t.b.waitFor(() => t.b.eval(`document.querySelectorAll('a.project-card').length === 1`), 'only the project with her job');
-      await t.b.goto(`${t.base}/projects/${p}`);
-      await t.b.waitFor(async () => (await gridCount()) === 2, 'only her two images');
-      await t.b.goto(`${t.base}/projects/${p}/jobs`);
-      await t.b.waitFor(() => t.b.eval(`document.querySelectorAll('.jobs-table tbody tr').length === 1`), 'only her job');
+      await t.b.eval(`document.querySelector('a.project-card').click(), 1`);
+      await t.b.waitFor(() => t.b.eval(`location.pathname === '/projects/${p}/jobs' && document.querySelectorAll('.jobs-table tbody tr').length === 1`), 'her project opening on her job');
+      equal(await t.b.eval(`!!document.querySelector('a.tab[href="/projects/${p}"]')`), false, 'images tab for annotators');
       equal(await t.b.eval(`!!document.querySelector('a.tab[href$="/statistics"]')`), false, 'statistics tab for annotators');
+      await t.b.goto(`${t.base}/projects/${p}`);
+      await t.b.waitFor(() => t.b.eval(`document.querySelector('main.page')?.textContent.includes('Only admins browse all images')`), 'the grid refusing anna');
+      equal(await gridCount(), 0, 'grid for annotators');
+      await t.b.eval(`document.querySelector('main.page a[href="/projects/${p}/jobs"]').click(), 1`);
+      await t.b.waitFor(() => t.b.eval(`document.querySelectorAll('.jobs-table tbody tr').length === 1`), 'back on her job');
       await t.b.eval(`document.querySelector('.jobs-table button.annotate').click(), 1`);
       await t.b.waitFor(() => t.b.eval(`/^\\/projects\\/${p}\\/images\\/\\d+$/.test(location.pathname) && !!document.querySelector('canvas.annotations')`), 'the workspace');
+      const first = await t.b.eval('location.pathname');
+      await t.b.waitFor(() => t.b.eval(`document.querySelectorAll('.filmstrip a.thumb').length === 2`), 'her two images in the filmstrip');
+      const at = async () => [await t.b.eval('location.pathname'), await t.b.eval(`document.querySelector('.image-position')?.textContent`)];
+      await t.b.key('j');
+      await t.b.waitFor(async () => { const [path, position] = await at(); return path !== first && position === '2 / 2'; }, 'the next image of her job');
+      await t.b.key('k');
+      await t.b.waitFor(async () => { const [path, position] = await at(); return path === first && position === '1 / 2'; }, 'back on the first image');
     } finally {
       await signOut(t.b, t.base);
       await signIn(t.b, t.base, ADMIN);

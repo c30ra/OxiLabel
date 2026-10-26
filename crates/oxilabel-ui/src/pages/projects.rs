@@ -82,7 +82,7 @@ fn ProjectCard(project: ProjectSummary, admin: bool, on_delete: impl Fn(ProjectS
     let plural = |n: i64, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
     let target = project.clone();
     view! {
-        <a class="project-card" href=format!("/projects/{}", project.id)>
+        <a class="project-card" href=if admin { format!("/projects/{}", project.id) } else { format!("/projects/{}/jobs", project.id) }>
             <span class="title">
                 <span class="name">{project.name.clone()}</span>
                 <span class="percent">{format!("{percent}%")}</span>

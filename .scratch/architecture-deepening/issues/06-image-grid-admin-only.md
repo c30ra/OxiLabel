@@ -6,7 +6,11 @@
 
 **Status:** ready-for-agent
 
-- [ ] An annotator opening a project lands on Jobs; the Images tab is hidden for them
-- [ ] An annotator going to the grid's address sees the note, not the grid
-- [ ] Admins see the grid exactly as before
-- [ ] Browser test: sign in as an annotator, open a project, open a job's first image, move with j and k within the job
+- [x] An annotator opening a project lands on Jobs; the Images tab is hidden for them
+- [x] An annotator going to the grid's address sees the note, not the grid
+- [x] Admins see the grid exactly as before
+- [x] Browser test: sign in as an annotator, open a project, open a job's first image, move with j and k within the job
+
+## Comments
+
+- `pages/project.rs`: the Images tab link is admin-only; `Tab::Images` for an annotator renders "Only admins browse all images." with a link to the Jobs tab (like Models/Users), and the image-count probe is skipped for them. `pages/projects.rs`: an annotator's project card links to `/projects/{id}/jobs`. The editor (filmstrip, j/k, Ctrl+Enter) is untouched; the server already scopes an annotator's image ids to their jobs. Browser test: the existing "assigned jobs" test now walks the annotator through card → Jobs → the refused grid → the job's first image → j/k.
