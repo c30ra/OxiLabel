@@ -23,6 +23,7 @@ pub mod settings;
 pub mod stroke;
 pub mod user;
 pub mod view;
+pub mod worker;
 
 use serde::{Deserialize, Serialize};
 

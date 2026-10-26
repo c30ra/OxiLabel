@@ -1,65 +1,22 @@
 mod common;
 
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
+use std::time::Duration;
 
 use axum::{
-    Json, Router,
+    Router,
     http::{Method, StatusCode},
-    routing::{get, post},
 };
 use common::{TestApp, call, login, test_app, test_app_with_worker};
+use oxilabel_core::{
+    inference::DEFAULT_WORKER_URL,
+    worker::{PredictRequest, WorkerModel},
+};
+use oxilabel_server::fake_worker::{FakeRequest, FakeWorker};
 use serde_json::{Value, json};
 
-/// A worker implementing the contract: it predicts, for every image, a crack box, a "dent" box,
-/// a class no label has, and a polygon reaching outside the image. With `delay` it takes that
-/// long per image; with `failing` every prediction fails.
-#[derive(Clone, Default)]
-struct FakeWorker {
-    delay: Duration,
-    failing: bool,
-    /// Images predicted so far.
-    seen: Arc<AtomicUsize>,
-}
-
-impl FakeWorker {
-    /// Serves the worker on a free local port and returns its URL.
-    async fn start(self) -> String {
-        let app = Router::new()
-            .route("/health", get(|| async { Json(json!({"device": "fake gpu"})) }))
-            .route("/classes", post(|Json(model): Json<Value>| async move {
-                assert_eq!(model["weights"], json!("/models/fake.pt"));
-                Json(json!({"classes": ["crack", "dent", "smudge"]}))
-            }))
-            .route("/predict", post(move |Json(request): Json<Value>| {
-                let worker = self.clone();
-                async move {
-                    tokio::time::sleep(worker.delay).await;
-                    worker.seen.fetch_add(1, Ordering::SeqCst);
-                    if worker.failing {
-                        return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "out of GPU memory"}))));
-                    }
-                    // The image arrives as its bytes, base64 encoded.
-                    assert!(request["image"].as_str().is_some_and(|image| image.len() > 50), "{request}");
-                    assert_eq!(request["options"], json!({"conf": 0.25}));
-                    Ok(Json(json!({"predictions": [
-                        {"class": "crack", "confidence": 0.91, "shape": {"type": "rectangle", "min": {"x": 1.0, "y": 1.0}, "max": {"x": 9.0, "y": 6.0}}},
-                        {"class": "dent", "confidence": 0.4, "shape": {"type": "rectangle", "min": {"x": 2.0, "y": 2.0}, "max": {"x": 4.0, "y": 4.0}}},
-                        {"class": "smudge", "confidence": 0.8, "shape": {"type": "points", "points": [{"x": 3.0, "y": 3.0}]}},
-                        {"class": "crack", "confidence": 0.7, "shape": {"type": "polygon", "points": [{"x": 0.0, "y": 0.0}, {"x": 500.0, "y": 0.0}, {"x": 0.0, "y": 5.0}]}},
-                    ]})))
-                }
-            }));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        url
-    }
+/// How many images went to the worker.
+fn predicted(worker: &FakeWorker) -> usize {
+    worker.requests().iter().filter(|request| matches!(request, FakeRequest::Predict(_))).count()
 }
 
 /// A project with labels "crack" (boxes) and "chip" (boxes and polygons) and `count` 20 × 10
@@ -134,12 +91,15 @@ async fn models_are_registered_changed_and_deleted_by_admins() {
 
 #[tokio::test]
 async fn the_worker_health_and_a_models_classes_come_from_the_worker() {
-    let app = test_app_with_worker(Some(FakeWorker::default().start().await)).await;
+    let worker = FakeWorker::default();
+    let app = test_app_with_worker(Some(worker.clone().serve().await)).await;
     let (_, health) = call(&app, Method::GET, "/api/worker", None).await;
     assert_eq!(health, json!({"reachable": true, "device": "fake gpu", "error": null}));
     let id = model(&app).await;
     let (status, classes) = call(&app, Method::GET, &format!("/api/models/{id}/classes"), None).await;
     assert_eq!((status, classes), (StatusCode::OK, json!(["crack", "dent", "smudge"])));
+    let fake = WorkerModel { adapter: "ultralytics".into(), weights: "/models/fake.pt".into(), options: json!({"conf": 0.25}).as_object().unwrap().clone() };
+    assert_eq!(worker.requests(), [FakeRequest::Classes(fake)], "the worker loads the model as registered");
 
     // Without a worker the health says so, and runs are refused.
     let lonely = test_app_with_worker(None).await;
@@ -152,10 +112,19 @@ async fn the_worker_health_and_a_models_classes_come_from_the_worker() {
 
 #[tokio::test]
 async fn a_run_makes_pending_pre_annotations_with_source_and_confidence() {
-    let app = test_app_with_worker(Some(FakeWorker::default().start().await)).await;
+    let worker = FakeWorker::default();
+    let app = test_app_with_worker(Some(worker.clone().serve().await)).await;
     let (p, images) = project(&app, 2).await;
     let m = model(&app).await;
     let status = run(&app, p, json!({"model": m, "image_ids": images})).await;
+    // Each image goes to the worker as its file's bytes, with the model's options.
+    let sent: Vec<_> = worker.requests().into_iter().map(|request| match request {
+        FakeRequest::Predict(PredictRequest { model, image }) => (model.options, image),
+        other => panic!("{other:?}"),
+    }).collect();
+    let file = |name: &str| std::fs::read(app.images.path().join(name)).unwrap();
+    let options = json!({"conf": 0.25}).as_object().unwrap().clone();
+    assert_eq!(sent, [(options.clone(), file("img0.png")), (options, file("img1.png"))]);
     assert_eq!((&status["state"], &status["total"], &status["done"], &status["created"]), (&json!("finished"), &json!(2), &json!(2), &json!(4)), "{status}");
     let skipped: Vec<_> = status["skipped"].as_array().unwrap().iter().map(|s| (s["reason"].as_str().unwrap().to_owned(), s["count"].as_i64().unwrap())).collect();
     assert_eq!(skipped, [
@@ -172,7 +141,7 @@ async fn a_run_makes_pending_pre_annotations_with_source_and_confidence() {
 
 #[tokio::test]
 async fn running_again_replaces_unreviewed_pre_annotations_and_keeps_the_rest() {
-    let app = test_app_with_worker(Some(FakeWorker::default().start().await)).await;
+    let app = test_app_with_worker(Some(FakeWorker::default().serve().await)).await;
     let (p, images) = project(&app, 1).await;
     let m = model(&app).await;
     run(&app, p, json!({"model": m, "image_ids": images})).await;
@@ -197,7 +166,7 @@ async fn running_again_replaces_unreviewed_pre_annotations_and_keeps_the_rest() 
 
 #[tokio::test]
 async fn exports_leave_out_unreviewed_pre_annotations() {
-    let app = test_app_with_worker(Some(FakeWorker::default().start().await)).await;
+    let app = test_app_with_worker(Some(FakeWorker::default().serve().await)).await;
     let (p, images) = project(&app, 1).await;
     let m = model(&app).await;
     run(&app, p, json!({"model": m, "image_ids": images})).await;
@@ -216,9 +185,9 @@ async fn exports_leave_out_unreviewed_pre_annotations() {
 
 #[tokio::test]
 async fn a_run_over_a_job_can_be_cancelled_and_reports_progress() {
-    let worker = FakeWorker { delay: Duration::from_millis(100), ..FakeWorker::default() };
-    let seen = worker.seen.clone();
-    let app = test_app_with_worker(Some(worker.start().await)).await;
+    let mut worker = FakeWorker::default();
+    worker.delay = Duration::from_millis(100);
+    let app = test_app_with_worker(Some(worker.clone().serve().await)).await;
     let (p, images) = project(&app, 6).await;
     let (_, jobs) = call(&app, Method::POST, &format!("/api/projects/{p}/jobs"), Some(json!({"image_ids": images}))).await;
     let m = model(&app).await;
@@ -233,12 +202,14 @@ async fn a_run_over_a_job_can_be_cancelled_and_reports_progress() {
     let done = status["done"].as_u64().unwrap();
     assert!((1..6).contains(&done), "{status}");
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(seen.load(Ordering::SeqCst) as u64 <= done + 1, "no more images go to the worker");
+    assert!(predicted(&worker) as u64 <= done + 1, "no more images go to the worker");
 }
 
 #[tokio::test]
 async fn a_failing_worker_ends_the_run_with_its_message() {
-    let app = test_app_with_worker(Some(FakeWorker { failing: true, ..FakeWorker::default() }.start().await)).await;
+    let mut worker = FakeWorker::default();
+    worker.failure = Some("out of GPU memory".into());
+    let app = test_app_with_worker(Some(worker.serve().await)).await;
     let (p, images) = project(&app, 2).await;
     let m = model(&app).await;
     let status = run(&app, p, json!({"model": m, "image_ids": images})).await;
@@ -248,7 +219,7 @@ async fn a_failing_worker_ends_the_run_with_its_message() {
 
 #[tokio::test]
 async fn annotators_run_models_only_on_images_of_their_jobs() {
-    let app = test_app_with_worker(Some(FakeWorker::default().start().await)).await;
+    let app = test_app_with_worker(Some(FakeWorker::default().serve().await)).await;
     let (p, images) = project(&app, 2).await;
     let m = model(&app).await;
     let (_, anna) = call(&app, Method::POST, "/api/users", Some(json!({"username": "anna", "password": "anna's password", "role": "annotator"}))).await;
@@ -264,8 +235,9 @@ async fn annotators_run_models_only_on_images_of_their_jobs() {
 
 #[tokio::test]
 async fn an_image_removed_during_a_run_is_skipped_and_statistics_wait_for_review() {
-    let worker = FakeWorker { delay: Duration::from_millis(150), ..FakeWorker::default() };
-    let app = test_app_with_worker(Some(worker.start().await)).await;
+    let mut worker = FakeWorker::default();
+    worker.delay = Duration::from_millis(150);
+    let app = test_app_with_worker(Some(worker.serve().await)).await;
     let (p, images) = project(&app, 3).await;
     let m = model(&app).await;
     let (_, started) = call(&app, Method::POST, &format!("/api/projects/{p}/pre-annotations"), Some(json!({"model": m, "image_ids": images}))).await;
@@ -286,13 +258,13 @@ async fn admins_set_where_the_worker_is_and_it_applies_at_once() {
     assert_eq!(settings, json!({"command": null, "url": null}));
     assert_eq!(call(&app, Method::GET, "/api/worker", None).await.1["reachable"], json!(false));
 
-    let url = FakeWorker::default().start().await;
+    let url = FakeWorker::default().serve().await;
     let (status, settings) = call(&app, Method::PUT, "/api/settings/worker", Some(json!({"url": format!(" {url}/ ")}))).await;
     assert_eq!((status, &settings), (StatusCode::OK, &json!({"command": null, "url": url})));
     assert_eq!(call(&app, Method::GET, "/api/worker", None).await.1["device"], json!("fake gpu"));
     // A command without a URL listens on the default one.
     let (_, settings) = call(&app, Method::PUT, "/api/settings/worker", Some(json!({"command": "exit 0"}))).await;
-    assert_eq!(settings, json!({"command": "exit 0", "url": "http://127.0.0.1:3112"}));
+    assert_eq!(settings, json!({"command": "exit 0", "url": DEFAULT_WORKER_URL}));
     let (status, _) = call(&app, Method::PUT, "/api/settings/worker", Some(json!({"url": "ftp://x"}))).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     call(&app, Method::PUT, "/api/settings/worker", Some(json!({}))).await;
@@ -323,7 +295,7 @@ async fn the_worker_command_is_started_by_the_server() {
 
 #[tokio::test]
 async fn a_confidence_threshold_leaves_out_less_certain_predictions() {
-    let app = test_app_with_worker(Some(FakeWorker::default().start().await)).await;
+    let app = test_app_with_worker(Some(FakeWorker::default().serve().await)).await;
     let (p, images) = project(&app, 1).await;
     let m = model(&app).await;
     let status = run(&app, p, json!({"model": m, "image_ids": images, "threshold": 0.5})).await;
