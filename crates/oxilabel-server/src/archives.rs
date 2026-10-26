@@ -32,7 +32,7 @@ use sqlx::{Row, SqlitePool};
 
 use crate::{
     AppState,
-    annotations::{annotation_from_row, check_annotation, insert_annotations},
+    annotation_store::{annotation_from_row, check_annotation, insert_annotations},
     auth::Admin,
     error::ApiError,
     host::Caller,

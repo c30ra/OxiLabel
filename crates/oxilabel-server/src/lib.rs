@@ -1,3 +1,4 @@
+mod annotation_store;
 mod annotations;
 mod archives;
 mod auth;

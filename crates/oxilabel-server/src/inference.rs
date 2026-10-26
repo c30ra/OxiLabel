@@ -28,7 +28,7 @@ use sqlx::{Row, SqliteConnection, SqlitePool};
 
 use crate::{
     AppState,
-    annotations::{check_annotation, insert_annotations},
+    annotation_store::{self, Replacing, Written},
     auth::{Admin, CurrentUser},
     error::ApiError,
     images, jobs, labels,
@@ -248,12 +248,7 @@ async fn start_run(user: CurrentUser, State(state): State<AppState>, Path(projec
 /// Runs the model image by image; between images it stops if cancelled.
 #[allow(clippy::too_many_arguments)]
 async fn run(state: AppState, worker: impl WorkerPort + 'static, id: u64, project: i64, model: ModelDefinition, labels: Vec<Label>, image_ids: Vec<i64>, threshold: Option<f64>, cancelled: Arc<AtomicBool>) {
-    let skip = |reason: String| {
-        state.runs.update(id, |status| match status.skipped.iter_mut().find(|skip| skip.reason == reason) {
-            Some(skip) => skip.count += 1,
-            None => status.skipped.push(SkipCount { reason, count: 1 }),
-        })
-    };
+    let skip = |reason: String| state.runs.update(id, |status| SkipCount::tally(&mut status.skipped, reason, 1));
     let fail = |error: String| state.runs.update(id, |status| (status.state, status.error) = (RunState::Failed, Some(error)));
     let root = match images::image_root(&state) {
         Ok(root) => root,
@@ -268,15 +263,14 @@ async fn run(state: AppState, worker: impl WorkerPort + 'static, id: u64, projec
             stopped = true;
             break;
         }
-        let row = match sqlx::query("SELECT path, width, height FROM images WHERE id = ?").bind(image).fetch_optional(&state.pool).await {
-            Ok(Some(row)) => row,
+        let path: String = match sqlx::query_scalar("SELECT path FROM images WHERE id = ?").bind(image).fetch_optional(&state.pool).await {
+            Ok(Some(path)) => path,
             Ok(None) => {
                 skip("images removed meanwhile".into());
                 continue;
             }
             Err(err) => return fail(err.to_string()),
         };
-        let (path, width, height): (String, u32, u32) = (row.get("path"), row.get("width"), row.get("height"));
         let Ok(bytes) = tokio::fs::read(root.join(&path)).await else {
             skip("image files missing".into());
             continue;
@@ -302,40 +296,35 @@ async fn run(state: AppState, worker: impl WorkerPort + 'static, id: u64, projec
                 skip(format!("no label for class \"{}\"", prediction.class));
                 continue;
             };
-            let annotation = Annotation {
+            made.push(Annotation {
                 source: Some(model.name.clone()),
                 confidence: Some(prediction.confidence),
                 pending: true,
                 ..Annotation::manual(label.id, prediction.shape)
-            };
-            match check_annotation(label, &annotation, width, height) {
-                Ok(()) => made.push(annotation),
-                Err(reason) => skip(reason),
-            }
+            });
         }
-        match replace_pending(&state.pool, project, image, &model.name, &made).await {
-            Ok(true) => state.runs.update(id, |status| (status.done, status.created) = (status.done + 1, status.created + made.len())),
-            Ok(false) => skip("images removed meanwhile".into()),
+        match replace_pending(&state.pool, project, image, &model.name, made).await {
+            Ok(Some(written)) => state.runs.update(id, |status| {
+                status.done += 1;
+                status.created += written.stored;
+                for skip in written.skipped {
+                    SkipCount::tally(&mut status.skipped, skip.reason, skip.count);
+                }
+            }),
+            Ok(None) => skip("images removed meanwhile".into()),
             Err(err) => return fail(format!("saving failed: {}", err.message())),
         }
     }
     state.runs.update(id, |status| status.state = if stopped { RunState::Cancelled } else { RunState::Finished });
 }
 
-/// Puts `made` on the image in place of the model's unreviewed pre-annotations there; false if
-/// the image is gone.
-async fn replace_pending(pool: &SqlitePool, project: i64, image: i64, model: &str, made: &[Annotation]) -> Result<bool, ApiError> {
+/// Puts `made` on the image in place of the model's unreviewed pre-annotations there, leaving out
+/// what the store refuses; `None` if the image is gone.
+async fn replace_pending(pool: &SqlitePool, project: i64, image: i64, model: &str, made: Vec<Annotation>) -> Result<Option<Written>, ApiError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    // An editor holding the old version is told to reload.
-    let bumped = sqlx::query("UPDATE images SET version = version + 1 WHERE id = ?").bind(image).execute(&mut *tx).await?;
-    if bumped.rows_affected() == 0 {
-        return Ok(false);
-    }
-    sqlx::query("DELETE FROM annotations WHERE image_id = ? AND pending AND source = ?").bind(image).bind(model).execute(&mut *tx).await?;
-    let first: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(position) + 1, 0) FROM annotations WHERE image_id = ?").bind(image).fetch_one(&mut *tx).await?;
-    insert_annotations(&mut tx, project, image, first, made).await?;
+    let written = annotation_store::write(&mut tx, project, image, Replacing::Pending { source: model }, made).await?;
     tx.commit().await?;
-    Ok(true)
+    Ok(written)
 }
 
 async fn visible_run(state: &AppState, user: &CurrentUser, id: u64) -> Result<(RunStatus, Arc<AtomicBool>), ApiError> {
