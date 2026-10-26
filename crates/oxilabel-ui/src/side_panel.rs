@@ -21,30 +21,30 @@ pub fn SidePanel(editor: Editor, labels: Vec<Label>, children: Children) -> impl
     let labels = StoredValue::new(labels);
     let label = move |id: i64| labels.with_value(|labels| labels.iter().find(|l| l.id == id).cloned());
     let tags = move || {
-        editor.annotations.with(|list| {
+        editor.with_annotations(|list| {
             list.iter().enumerate().filter(|(_, a)| a.shape.is_tag()).map(|(index, a)| (index, a.label)).collect::<Vec<_>>()
         })
     };
     // The single selected annotation and its label, if that label has attributes. A memo, so the
     // editor is rebuilt only when the selection or its label changes, not on every edit.
     let editing = Memo::new(move |_| {
-        let index = editor.selection.with(|set| (set.len() == 1).then(|| set.first().copied()).flatten())?;
-        let id = editor.annotations.with(|list| list.get(index).map(|a| a.label))?;
+        let index = Some(editor.selection()).filter(|set| set.len() == 1).and_then(|set| set.first().copied())?;
+        let id = editor.with_annotations(|list| list.get(index).map(|a| a.label))?;
         label(id).filter(|label| !label.attributes.is_empty()).map(|label| (index, label))
     });
 
     let collapsed = RwSignal::new(false);
     // Every annotation but the tags, in drawing order (the topmost last).
     let objects = move || {
-        editor.annotations.with(|list| list.iter().enumerate().filter(|(_, a)| !a.shape.is_tag()).map(|(i, a)| (i, a.clone())).collect::<Vec<_>>())
+        editor.with_annotations(|list| list.iter().enumerate().filter(|(_, a)| !a.shape.is_tag()).map(|(i, a)| (i, a.clone())).collect::<Vec<_>>())
     };
     let relabel = move |index: usize, id: i64| {
-        let Some(before) = editor.annotations.with_untracked(|list| list.get(index).cloned()) else { return };
+        let Some(before) = editor.peek(|session| session.annotations().get(index).cloned()) else { return };
         let Some(target) = label(id) else { return };
         // Relabelling a pre-annotation reviews it.
         let after = Annotation { label: id, attributes: target.conform_attributes(&before.attributes), pending: false, ..before.clone() };
         if after != before {
-            editor.apply(Edit::Replace { index, before, after });
+            editor.update(|session| session.apply(Edit::Replace { index, before, after }));
         }
     };
     let row = move |index: usize, annotation: Annotation| {
@@ -52,7 +52,7 @@ pub fn SidePanel(editor: Editor, labels: Vec<Label>, children: Children) -> impl
         let shape = annotation.shape.shape_type();
         let choices = labels.with_value(|labels| labels.iter().filter(|l| l.shape_types.contains(&shape)).cloned().collect::<Vec<_>>());
         let name = label(annotation.label).map(|l| l.name).unwrap_or_default();
-        let selected = move || editor.selection.with(|set| set.contains(&index));
+        let selected = move || editor.is_selected(index);
         let (hidden, locked, pending) = (annotation.hidden, annotation.locked, annotation.pending);
         view! {
             // Not "hidden"/"locked": the global .hidden class hides elements.
@@ -71,25 +71,25 @@ pub fn SidePanel(editor: Editor, labels: Vec<Label>, children: Children) -> impl
                         return;
                     }
                     if ev.shift_key() {
-                        editor.selection.update(|set| if !set.remove(&index) { set.insert(index); });
+                        editor.update(|session| session.toggle_selected(index));
                     } else {
-                        editor.selection.set(BTreeSet::from([index]));
+                        editor.update(|session| session.set_selection(BTreeSet::from([index])));
                     }
                 }>
                     <span class="detail">{describe(&annotation)}</span>
                 </button>
                 {pending.then(|| view! {
                     <button class="accept" title="Accept this pre-annotation" aria-label=format!("Accept {name}")
-                        on:click=move |_| editor.accept(&[index])>"✓"</button>
+                        on:click=move |_| editor.update(|session| session.accept(&[index]))>"✓"</button>
                 })}
                 <button class="hide" aria-pressed=hidden.to_string() title=if hidden { "Show" } else { "Hide" }
                     aria-label=format!("{} {name}", if hidden { "Show" } else { "Hide" })
-                    on:click=move |_| editor.set_flag(index, Some(!hidden), None)>
+                    on:click=move |_| editor.update(|session| session.set_flag(index, Some(!hidden), None))>
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d=if hidden { EYE_OFF } else { EYE } /></svg>
                 </button>
                 <button class="lock" aria-pressed=locked.to_string() title=if locked { "Unlock" } else { "Lock" }
                     aria-label=format!("{} {name}", if locked { "Unlock" } else { "Lock" })
-                    on:click=move |_| editor.set_flag(index, None, Some(!locked))>
+                    on:click=move |_| editor.update(|session| session.set_flag(index, None, Some(!locked)))>
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d=if locked { LOCKED } else { UNLOCKED } /></svg>
                 </button>
             </li>
@@ -116,7 +116,7 @@ pub fn SidePanel(editor: Editor, labels: Vec<Label>, children: Children) -> impl
                         </Show>
                     </Show>
                 </section>
-                <Show when=move || editor.annotations.with(|list| list.iter().any(|a| a.pending))>
+                <Show when=move || editor.with_annotations(|list| list.iter().any(|a| a.pending))>
                     <section class="review" aria-label="Pre-annotations to review">
                         <h4>
                             "To review"
@@ -124,22 +124,17 @@ pub fn SidePanel(editor: Editor, labels: Vec<Label>, children: Children) -> impl
                         </h4>
                         <label class="threshold" title="Pre-annotations less confident than this are hidden">
                             "Confidence from"
-                            <input type="range" min="0" max="1" step="0.05" prop:value=move || editor.pre_annotation_threshold.get().to_string()
+                            <input type="range" min="0" max="1" step="0.05" prop:value=move || editor.threshold().to_string()
                                 on:input:target={move |ev| if let Ok(value) = ev.target().value().parse::<f64>() {
-                                    editor.pre_annotation_threshold.set(value);
-                                    // What the threshold hides cannot stay selected.
-                                    let hidden: Vec<usize> = editor.annotations.with_untracked(|list| {
-                                        list.iter().enumerate().filter(|(_, a)| !a.shown(value)).map(|(index, _)| index).collect()
-                                    });
-                                    editor.selection.update(|set| set.retain(|index| !hidden.contains(index)));
+                                    editor.update(|session| session.set_threshold(value));
                                 }} />
-                            <span class="mono">{move || format!("{:.2}", editor.pre_annotation_threshold.get())}</span>
+                            <span class="mono">{move || format!("{:.2}", editor.threshold())}</span>
                         </label>
                         <div class="review-actions">
                             <button class="accept-shown" disabled=move || editor.pending().0.is_empty()
-                                on:click=move |_| editor.accept(&editor.pending().0)>{move || format!("Accept {}", editor.pending().0.len())}</button>
+                                on:click=move |_| editor.update(|session| session.accept(&session.pending().0))>{move || format!("Accept {}", editor.pending().0.len())}</button>
                             <button class="danger delete-below" disabled=move || editor.pending().1.is_empty()
-                                on:click=move |_| editor.remove_all(&editor.pending().1)>{move || format!("Delete {} below", editor.pending().1.len())}</button>
+                                on:click=move |_| editor.update(|session| session.remove_all(&session.pending().1))>{move || format!("Delete {} below", editor.pending().1.len())}</button>
                         </div>
                     </section>
                 </Show>
@@ -149,14 +144,14 @@ pub fn SidePanel(editor: Editor, labels: Vec<Label>, children: Children) -> impl
                         <ul>
                             {move || tags().into_iter().filter_map(|(index, id)| {
                                 let label = label(id)?;
-                                let selected = move || editor.selection.with(|set| set.contains(&index));
+                                let selected = move || editor.is_selected(index);
                                 Some(view! {
                                     <li class:selected=selected>
                                         <span class="swatch" style:background=label.color.clone()></span>
                                         <button class="name" title="Select this tag"
-                                            on:click=move |_| editor.selection.set(BTreeSet::from([index]))>{label.name.clone()}</button>
+                                            on:click=move |_| editor.update(|session| session.set_selection(BTreeSet::from([index])))>{label.name.clone()}</button>
                                         <button class="remove" title="Remove this tag" aria-label=format!("Remove tag {}", label.name)
-                                            on:click=move |_| editor.remove(index)>"×"</button>
+                                            on:click=move |_| editor.update(|session| session.remove(index))>"×"</button>
                                     </li>
                                 })
                             }).collect_view()}
@@ -202,17 +197,19 @@ fn AttributeEditor(editor: Editor, index: usize, label: Label) -> impl IntoView 
     let target = StoredValue::new(label.clone());
     // The current value of attribute `name`, its default if unset.
     let value = move |name: &str| {
-        editor.annotations.with(|list| {
+        editor.with_annotations(|list| {
             let annotation = list.get(index)?;
             target.with_value(|label| label.conform_attributes(&annotation.attributes)).remove(name)
         })
     };
     let set = move |name: String, value: AttributeValue| {
-        editor.change_selected(|annotation| {
-            let mut changed = annotation.clone();
-            changed.attributes = target.with_value(|label| label.conform_attributes(&annotation.attributes));
-            changed.attributes.insert(name.clone(), value.clone());
-            changed
+        editor.update(|session| {
+            session.change_selected(|annotation| {
+                let mut changed = annotation.clone();
+                changed.attributes = target.with_value(|label| label.conform_attributes(&annotation.attributes));
+                changed.attributes.insert(name.clone(), value.clone());
+                changed
+            })
         });
     };
     let text_of = |value: Option<AttributeValue>| match value {
@@ -278,7 +275,7 @@ fn AttributeEditor(editor: Editor, index: usize, label: Label) -> impl IntoView 
             .into_any(),
         }
     };
-    let kind = editor.annotations.with_untracked(|list| list.get(index).map(|a| a.shape.shape_type().name().to_lowercase())).unwrap_or_default();
+    let kind = editor.peek(|session| session.annotations().get(index).map(|a| a.shape.shape_type().name().to_lowercase())).unwrap_or_default();
     view! {
         <section class="attribute-editor" aria-label="Attributes of the selection">
             <h4>

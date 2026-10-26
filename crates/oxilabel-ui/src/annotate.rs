@@ -1,4 +1,7 @@
-//! Drawing and editing annotations on top of the tile viewer.
+//! Drawing and editing annotations on top of the tile viewer. The image's annotations, undo
+//! history, selection and the Select tool's gestures live in the editor session
+//! (`oxilabel_core::editor`); this layer is its adapter: browser events in, signals and canvas
+//! drawing out.
 //!
 //! Select (V) is the default tool: click picks the topmost shape, drag moves the selection, the
 //! handles of a single selected shape edit it (rectangle handles resize; vertices drag; the round
@@ -35,17 +38,18 @@ use leptos::{ev, html, prelude::*};
 use serde::{Deserialize, Serialize};
 use oxilabel_core::{
     Footprint, Label, ShapeType,
-    annotation::{Annotation, Shape, overlapping, topmost_at},
+    annotation::{Annotation, Shape},
     attribute::Attributes,
     clipboard,
     constraint::ShapeConstraints,
     edges::EdgeMap,
+    editor::{DRAG_THRESHOLD, HANDLE_REACH, MIN_SHAPE_SIZE, Modifiers, Options, Pointer, SNAP_DEGREES, Session, grip::GripKind, snap_turn},
     ellipse::Ellipse,
     fill::{FillSettings, grow},
-    geometry::{Handle, Point, Rect, snap_angle, steps_along, steps_towards},
+    geometry::{Point, Rect, snap_angle, steps_along, steps_towards},
     mask::{Bitmap, PixelRect},
     pyramid::Pyramid,
-    history::{Edit, History},
+    history::Edit,
     oriented::OrientedRect,
     keymap::Action,
     pie::{Compass, is_tap},
@@ -55,7 +59,7 @@ use oxilabel_core::{
 };
 
 use crate::{
-    draw::{self, Look, ROTATION_HANDLE_DISTANCE},
+    draw::{self, Look},
     analysis::Analysis,
     masks::{FillPreview, SpriteCache, Stroke},
     pie::{LabelSearch, Pie, PieAction, PieItem, PieMenu, SearchEntry, now},
@@ -64,15 +68,6 @@ use crate::{
     viewer::{context_2d, typing_in_a_field},
 };
 
-/// How far from a handle or a shape (in screen pixels) a click still hits it.
-const HANDLE_REACH: f64 = 8.0;
-const PICK_MARGIN: f64 = 4.0;
-/// A press that moves less than this (in screen pixels) is a click, not a drag.
-const DRAG_THRESHOLD: f64 = 4.0;
-/// Shapes smaller than this on screen are treated as accidental and not created.
-const MIN_SHAPE_SIZE: f64 = 3.0;
-/// Shift (or the snap option) turns lines and rotations in steps of this many degrees.
-const SNAP_DEGREES: f64 = 15.0;
 /// Distance between freehand polyline vertices, in image pixels, and its limits; `[` and `]`
 /// change it by this factor.
 pub const DEFAULT_SPACING: f64 = 20.0;
@@ -164,19 +159,21 @@ impl Tool {
 /// The tools a key selects directly (Tag opens its label pie instead).
 const KEY_TOOLS: [Tool; 7] = [Tool::Select, Tool::Rectangle, Tool::Polygon, Tool::Polyline, Tool::Points, Tool::Ellipse, Tool::Brush];
 
-/// The annotations of the open image and everything that changes them. All changes go through
-/// the undo history.
+/// The editor of the open image: its session (annotations, undo history, selection, the Select
+/// tool's gesture) and the tool state around it. Readers track the session through the getters
+/// below; every change goes through `update`, which notifies what changed.
 #[derive(Clone, Copy)]
 pub struct Editor {
-    pub annotations: RwSignal<Vec<Annotation>>,
-    history: StoredValue<History>,
-    /// Indices of the selected annotations.
-    pub selection: RwSignal<BTreeSet<usize>>,
+    session: StoredValue<Session>,
+    /// Notified when the annotations, the selection or the pre-annotation threshold change;
+    /// `changed` after every update (the gesture included).
+    annotations_changed: Trigger,
+    selection_changed: Trigger,
+    threshold_changed: Trigger,
+    changed: Trigger,
     pub tool: RwSignal<Tool>,
     /// The label new shapes get.
     pub label: RwSignal<Option<i64>>,
-    /// Increases with every edit, undo and redo; autosave compares it with the last saved one.
-    pub revision: RwSignal<u64>,
     /// A short hint for the user, e.g. why a shape could not be drawn.
     pub notice: RwSignal<Option<String>>,
     /// The drawing tools' options and the last tool, kept while moving between images.
@@ -187,8 +184,6 @@ pub struct Editor {
     pub usable_shapes: RwSignal<Vec<ShapeType>>,
     /// Whether a shape, stroke or other gesture is in progress (moving to another image waits).
     pub busy: RwSignal<bool>,
-    /// Pending pre-annotations less confident than this are neither drawn nor picked.
-    pub pre_annotation_threshold: RwSignal<f64>,
 }
 
 /// The drawing tools' options and the last tool. They belong to the workspace rather than to one
@@ -391,17 +386,17 @@ impl Editor {
         }
     }
 
-    pub fn new(annotations: Vec<Annotation>, label: Option<i64>, tools: Tools) -> Self {
+    pub fn new(session: Session, label: Option<i64>, tools: Tools) -> Self {
         Editor {
-            annotations: RwSignal::new(annotations),
-            history: StoredValue::new(History::default()),
-            selection: RwSignal::new(BTreeSet::new()),
+            session: StoredValue::new(session),
+            annotations_changed: Trigger::new(),
+            selection_changed: Trigger::new(),
+            threshold_changed: Trigger::new(),
+            changed: Trigger::new(),
             tool: RwSignal::new(Tool::Select),
             label: RwSignal::new(label),
-            revision: RwSignal::new(0),
             notice: RwSignal::new(None),
             tools,
-            pre_annotation_threshold: RwSignal::new(0.0),
             view_filter: RwSignal::new(None),
             usable_shapes: RwSignal::new(ShapeType::ALL.to_vec()),
             busy: RwSignal::new(false),
@@ -413,197 +408,87 @@ impl Editor {
         if filtered.get_untracked() { self.view_filter.get_untracked() } else { None }
     }
 
-    /// Replaces everything with `annotations` as loaded from the server; nothing to undo.
-    pub fn reset(&self, annotations: Vec<Annotation>) {
-        self.history.set_value(History::default());
-        self.selection.set(BTreeSet::new());
-        self.annotations.set(annotations);
+    /// Reads the session without tracking it.
+    pub fn peek<T>(&self, read: impl FnOnce(&Session) -> T) -> T {
+        self.session.with_value(read)
     }
 
-    pub fn apply(&self, edit: Edit) {
-        self.annotations.update(|list| self.history.update_value(|history| history.apply(list, edit)));
-        self.revision.update(|r| *r += 1);
-    }
-
-    pub fn undo(&self) {
-        let mut undone = false;
-        self.annotations.update(|list| self.history.update_value(|history| undone = history.undo(list)));
-        if undone {
-            self.selection.set(BTreeSet::new());
-            self.revision.update(|r| *r += 1);
+    /// Changes the session, then notifies whatever changed and shows its notice.
+    pub fn update<T>(&self, change: impl FnOnce(&mut Session) -> T) -> T {
+        let (revision, selection, threshold) = self.peek(|s| (s.revision(), s.selection().clone(), s.threshold()));
+        let mut notice = None;
+        let result = self
+            .session
+            .try_update_value(|session| {
+                let result = change(session);
+                notice = session.take_notice();
+                result
+            })
+            .expect("the editor's session lives as long as the editor");
+        let (changed_list, changed_selection, changed_threshold) =
+            self.peek(|s| (s.revision() != revision, *s.selection() != selection, s.threshold() != threshold));
+        if changed_list {
+            self.annotations_changed.notify();
         }
-    }
-
-    pub fn redo(&self) {
-        let mut redone = false;
-        self.annotations.update(|list| self.history.update_value(|history| redone = history.redo(list)));
-        if redone {
-            self.selection.set(BTreeSet::new());
-            self.revision.update(|r| *r += 1);
+        if changed_selection {
+            self.selection_changed.notify();
         }
-    }
-
-    /// The only selected annotation, if exactly one is selected.
-    pub fn single_selection(&self) -> Option<usize> {
-        self.selection.with_untracked(|set| if set.len() == 1 { set.first().copied() } else { None })
-    }
-
-    fn annotation(&self, index: usize) -> Option<Annotation> {
-        self.annotations.with_untracked(|list| list.get(index).cloned())
-    }
-
-    /// Replaces annotation `index`'s shape (one undo step) unless it is unchanged.
-    fn reshape(&self, index: usize, shape: Shape) {
-        let Some(before) = self.annotation(index) else { return };
-        if before.shape != shape {
-            // Editing a pre-annotation reviews it.
-            let after = Annotation { shape, pending: false, ..before.clone() };
-            self.apply(Edit::Replace { index, before, after });
+        if changed_threshold {
+            self.threshold_changed.notify();
         }
+        self.changed.notify();
+        if notice.is_some() {
+            self.notice.set(notice);
+        }
+        result
     }
 
-    /// Removes annotation `index` (one undo step) and clears the selection, whose indices would
-    /// no longer fit.
-    pub fn remove(&self, index: usize) {
-        let Some(annotation) = self.annotation(index) else { return };
-        self.selection.set(BTreeSet::new());
-        self.apply(Edit::Remove { index, annotation });
+    /// Reads the annotations (tracked).
+    pub fn with_annotations<T>(&self, read: impl FnOnce(&[Annotation]) -> T) -> T {
+        self.annotations_changed.track();
+        self.peek(|s| read(s.annotations()))
     }
 
-    /// Removes every selected annotation that is not locked, in one undo step.
-    pub fn delete_selected(&self) {
-        let selection = self.selection.get_untracked();
-        let locked = selection.iter().filter(|&&index| self.annotation(index).is_some_and(|a| a.locked)).count();
-        if locked > 0 {
-            let (shapes, verb) = if locked == 1 { ("shape", "stays") } else { ("shapes", "stay") };
-            self.notice.set(Some(format!("{locked} locked {shapes} {verb}: unlock them in the objects list first.")));
-        }
-        // Highest index first, so the others keep their positions while removing.
-        let removals: Vec<Edit> = self.annotations.with_untracked(|list| {
-            selection
-                .iter()
-                .rev()
-                .filter_map(|&index| {
-                    list.get(index)
-                        .filter(|a| !a.locked && a.shown(self.pre_annotation_threshold.get_untracked()))
-                        .map(|annotation| Edit::Remove { index, annotation: annotation.clone() })
-                })
-                .collect()
-        });
-        if removals.is_empty() {
-            return;
-        }
-        self.selection.set(BTreeSet::new());
-        self.apply(Edit::Batch(removals));
+    /// The selected indices (tracked).
+    pub fn selection(&self) -> BTreeSet<usize> {
+        self.selection_changed.track();
+        self.peek(|s| s.selection().clone())
     }
 
-    /// Sets annotation `index`'s hidden or locked flag (one undo step); hiding unselects it.
-    pub fn set_flag(&self, index: usize, hidden: Option<bool>, locked: Option<bool>) {
-        let Some(before) = self.annotation(index) else { return };
-        let after = Annotation { hidden: hidden.unwrap_or(before.hidden), locked: locked.unwrap_or(before.locked), ..before.clone() };
-        if after.hidden {
-            self.selection.update(|set| {
-                set.remove(&index);
-            });
-        }
-        if after != before {
-            self.apply(Edit::Replace { index, before, after });
-        }
+    /// Whether annotation `index` is selected (tracked).
+    pub fn is_selected(&self, index: usize) -> bool {
+        self.selection_changed.track();
+        self.peek(|s| s.selection().contains(&index))
     }
 
-    /// Replaces the selected annotations with `change` applied to each, in one undo step; those
-    /// it leaves unchanged are skipped.
-    pub fn change_selected(&self, change: impl Fn(&Annotation) -> Annotation) {
-        let selection = self.selection.get_untracked();
-        let edits: Vec<Edit> = self.annotations.with_untracked(|list| {
-            selection
-                .iter()
-                .filter_map(|&index| {
-                    // Shapes not shown are left alone (they cannot be selected on purpose);
-                    // changing a pre-annotation reviews it.
-                    let before = list.get(index).filter(|a| a.shown(self.pre_annotation_threshold.get_untracked()))?.clone();
-                    let after = Annotation { pending: false, ..change(&before) };
-                    (after != before).then_some(Edit::Replace { index, before, after })
-                })
-                .collect()
-        });
-        if !edits.is_empty() {
-            self.apply(Edit::Batch(edits));
-        }
+    /// Increases with every change to the annotations (tracked); autosave compares it with the
+    /// last saved one.
+    pub fn revision(&self) -> u64 {
+        self.annotations_changed.track();
+        self.peek(Session::revision)
     }
 
-    /// Replaces `source`'s pending pre-annotations with those it made in `latest` (the image as the
-    /// server now has it), in one undo step, keeping every other annotation as it is here.
-    pub fn merge_pre_annotations(&self, source: &str, latest: &[Annotation]) {
-        let ours = |a: &Annotation| a.pending && a.source.as_deref() == Some(source);
-        let mut edits: Vec<Edit> = self.annotations.with_untracked(|list| {
-            // Highest index first, so the others keep their positions while removing.
-            list.iter().enumerate().rev().filter(|(_, a)| ours(a)).map(|(index, a)| Edit::Remove { index, annotation: a.clone() }).collect()
-        });
-        let kept = self.annotations.with_untracked(Vec::len) - edits.len();
-        edits.extend(latest.iter().filter(|a| ours(a)).enumerate().map(|(offset, a)| Edit::Add { index: kept + offset, annotation: a.clone() }));
-        if !edits.is_empty() {
-            self.selection.set(BTreeSet::new());
-            self.apply(Edit::Batch(edits));
-        }
+    /// Pending pre-annotations less confident than this are neither drawn nor picked (tracked).
+    pub fn threshold(&self) -> f64 {
+        self.threshold_changed.track();
+        self.peek(Session::threshold)
     }
 
-    /// Marks the pending pre-annotations at `indices` reviewed, in one undo step.
-    pub fn accept(&self, indices: &[usize]) {
-        let edits: Vec<Edit> = self.annotations.with_untracked(|list| {
-            indices
-                .iter()
-                .filter_map(|&index| {
-                    let before = list.get(index).filter(|a| a.pending)?.clone();
-                    Some(Edit::Replace { index, after: Annotation { pending: false, ..before.clone() }, before })
-                })
-                .collect()
-        });
-        if !edits.is_empty() {
-            self.apply(Edit::Batch(edits));
-        }
-    }
-
-    /// The pending pre-annotations the user has not hidden: those shown (at or above the
-    /// threshold), and those below it.
+    /// The pending pre-annotations not hidden, shown and below the threshold (tracked).
     pub fn pending(&self) -> (Vec<usize>, Vec<usize>) {
-        let threshold = self.pre_annotation_threshold.get();
-        self.annotations.with(|list| {
-            list.iter()
-                .enumerate()
-                .filter(|(_, a)| a.pending && !a.hidden)
-                .map(|(index, _)| index)
-                .partition(|&index| list[index].confidence.unwrap_or(1.0) >= threshold)
-        })
+        self.annotations_changed.track();
+        self.threshold_changed.track();
+        self.peek(Session::pending)
     }
 
-    /// Removes the annotations at `indices` that are not locked, in one undo step, and clears the
-    /// selection.
-    pub fn remove_all(&self, indices: &[usize]) {
-        let removals: Vec<Edit> = self.annotations.with_untracked(|list| {
-            // Highest index first, so the others keep their positions while removing.
-            indices
-                .iter()
-                .rev()
-                .filter_map(|&index| list.get(index).filter(|a| !a.locked).map(|annotation| Edit::Remove { index, annotation: annotation.clone() }))
-                .collect()
-        });
-        if !removals.is_empty() {
-            self.selection.set(BTreeSet::new());
-            self.apply(Edit::Batch(removals));
-        }
+    /// Tracks every change to the session, its gesture included.
+    pub fn track_changes(&self) {
+        self.changed.track();
     }
 }
 
-/// How a box selection combines with what is already selected (Blender: drag, Shift+drag, Ctrl+drag).
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum BoxMode {
-    Replace,
-    Extend,
-    Subtract,
-}
-
-/// What the pointer is doing right now.
+/// What the pointer is doing right now with a drawing tool (the Select tool's gestures are the
+/// session's).
 #[derive(Debug, Clone, PartialEq)]
 enum Gesture {
     Idle,
@@ -630,30 +515,6 @@ enum Gesture {
     /// A fuzzy fill from `seed`, on the tiles of the viewed level; dragging from `anchor` changes
     /// the threshold from `base`. Once `released`, it is committed as soon as growing is complete.
     Filling { seed: Point, anchor: Point, base: f64, erase: bool, released: bool },
-    /// Dragging the handle of an ellipse's radius `axis` (0 for rx, 1 for ry).
-    Radius { index: usize, axis: usize, current: Ellipse },
-    /// Turning an ellipse by its rotation handle.
-    Turning { index: usize, before: Ellipse, current: Ellipse },
-    /// The selection moved together by (`dx`, `dy`), limited so every shape stays in the image.
-    Moving { grab: Point, dx: f64, dy: f64 },
-    Resizing { index: usize, handle: Handle, before: Rect, current: Rect },
-    /// Dragging one vertex (or rectangle corner) of annotation `index`.
-    Vertex { index: usize, vertex: usize, current: Shape },
-    Rotating { index: usize, before: OrientedRect, current: OrientedRect },
-    /// Dragging a selection box over empty space.
-    Selecting { start: Point, current: Point, mode: BoxMode },
-}
-
-/// What is under the pointer on the single selected shape.
-enum Grip {
-    Resize(Handle, Rect),
-    /// An ellipse's radius handle: 0 for rx, 1 for ry.
-    Radius(usize),
-    /// An ellipse's rotation handle.
-    Turn,
-    Vertex(usize),
-    Midpoint(usize),
-    Rotate(OrientedRect),
 }
 
 #[component]
@@ -697,8 +558,6 @@ pub fn AnnotationLayer(
     let defaults = move |id: i64| conform(id, &Attributes::new());
     let label_name = move |id: i64| all_labels.with_value(|labels| labels.iter().find(|l| l.id == id).map(|l| l.name.clone()).unwrap_or_default());
     let constraints_of = move |id: i64| all_labels.with_value(|labels| labels.iter().find(|l| l.id == id).map(|l| l.constraints).unwrap_or_default());
-    // Whether `annotation`'s label fixes the size of its shape: it can then not be resized.
-    let fixed_size = move |annotation: &Annotation| constraints_of(annotation.label).fixes(annotation.shape.shape_type());
     // The footprints the editor shows, by label (labels that show theirs).
     let footprints: StoredValue<HashMap<i64, Footprint>> =
         StoredValue::new(labels.iter().filter(|label| label.show_footprint).map(|label| (label.id, label.footprint)).collect());
@@ -726,58 +585,11 @@ pub fn AnnotationLayer(
         let screen = Point::new(f64::from(ev.client_x()) - rect.left(), f64::from(ev.client_y()) - rect.top());
         Some((screen, current.to_image(screen), current))
     };
-    // The box around every selected shape; moving keeps it inside the image.
-    let selection_bounds = move || {
-        let selection = editor.selection.get_untracked();
-        editor.annotations.with_untracked(|list| {
-            selection
-                .iter()
-                .filter_map(|&index| list.get(index).filter(|a| !a.shape.is_tag() && !a.locked && a.shown(editor.pre_annotation_threshold.get_untracked())).map(|a| a.shape.bounds()))
-                .reduce(|a, b| a.union(&b))
-        })
-    };
-    // The handle of the single selected shape under `point`, if any.
-    let grip_at = move |point: Point, scale: f64| -> Option<(usize, Grip)> {
-        let index = editor.single_selection()?;
-        let annotation = editor.annotation(index).filter(|a| !a.locked && a.shown(editor.pre_annotation_threshold.get_untracked()))?;
-        // A shape of fixed size moves and turns, but has no handles that resize it.
-        let fixed = fixed_size(&annotation);
-        let shape = annotation.shape;
-        let reach = HANDLE_REACH / scale;
-        let grip = match &shape {
-            Shape::Rectangle(_) if fixed => None,
-            Shape::Rectangle(rect) => rect.handle_at(point, reach).map(|handle| Grip::Resize(handle, *rect)),
-            Shape::OrientedRectangle(rect) => {
-                if rect.rotation_handle(ROTATION_HANDLE_DISTANCE / scale).distance(point) <= reach {
-                    Some(Grip::Rotate(*rect))
-                } else if fixed {
-                    None
-                } else {
-                    nearest(&shape.vertices(), point, reach).map(Grip::Vertex)
-                }
-            }
-            Shape::Ellipse(ellipse) => {
-                if ellipse.rotation_handle(ROTATION_HANDLE_DISTANCE / scale).distance(point) <= reach {
-                    Some(Grip::Turn)
-                } else {
-                    let radii = if fixed { Vec::new() } else { ellipse.radius_handles().to_vec() };
-                    nearest(&radii, point, reach)
-                        .map(Grip::Radius)
-                        .or_else(|| nearest(&shape.vertices(), point, reach).map(Grip::Vertex))
-                }
-            }
-            Shape::Mask(_) | Shape::Tag => None,
-            Shape::Polygon { .. } | Shape::Polyline { .. } | Shape::Points { .. } => {
-                nearest(&shape.vertices(), point, reach).map(Grip::Vertex).or_else(|| {
-                    let midpoints: Vec<Point> = match shape {
-                        Shape::Points { .. } => Vec::new(),
-                        _ => shape.edges().iter().map(|(a, b)| a.midpoint(*b)).collect(),
-                    };
-                    nearest(&midpoints, point, reach).map(Grip::Midpoint)
-                })
-            }
-        };
-        grip.map(|grip| (index, grip))
+    // A pointer event for the session, at `point` in the image.
+    let pointer_at = move |ev: &ev::MouseEvent, point: Point, current: View| Pointer {
+        at: point,
+        scale: current.scale,
+        modifiers: Modifiers { shift: ev.shift_key(), ctrl: ev.ctrl_key() || ev.meta_key(), alt: ev.alt_key() },
     };
 
     // Adds a finished shape with the current label, if it is valid and the label allows it.
@@ -792,8 +604,8 @@ pub fn AnnotationLayer(
             editor.notice.set(Some(format!("Not added: {reason}.")));
             return;
         }
-        let index = editor.annotations.with_untracked(Vec::len);
-        editor.apply(Edit::Add { index, annotation: Annotation { attributes: defaults(label), ..Annotation::manual(label, shape) } });
+        let annotation = Annotation { attributes: defaults(label), ..Annotation::manual(label, shape) };
+        editor.update(|session| session.apply(Edit::Add { index: session.annotations().len(), annotation }));
     };
     let finish_rectangle = move |start: Point, end: Point, square: bool, from_centre: bool, scale: f64| {
         let rect = Rect::from_drag(start, end, square, from_centre).clamped(width, height);
@@ -857,22 +669,28 @@ pub fn AnnotationLayer(
     let hover = RwSignal::new(None::<Point>);
     // The fuzzy fill's region before it is committed.
     let fill_preview = StoredValue::new_local(None::<FillPreview>);
-    // Drops whatever is being drawn, a stroke included.
+    // Drops whatever is being drawn, a stroke included, and the session's gesture.
     let cancel_gesture = move || {
         stroke.set_value(None);
         fill_preview.set_value(None);
         gesture.set(Gesture::Idle);
+        if editor.peek(Session::is_busy) {
+            editor.update(Session::cancel);
+        }
     };
     // Applies a finished stroke and drops the annotations it removed from the selection.
     let commit_stroke = move |outcome: StrokeOutcome| {
-        editor.selection.update(|selection| *selection = outcome.selection_after(selection));
-        editor.apply(with_defaults(outcome.edit, &defaults));
+        editor.update(|session| {
+            let selection = outcome.selection_after(session.selection());
+            session.set_selection(selection);
+            session.apply(with_defaults(outcome.edit, &defaults));
+        });
     };
     let finish_stroke = move || {
         gesture.set(Gesture::Idle);
         let mut done = None;
         stroke.update_value(|current| done = current.take());
-        let Some(outcome) = done.and_then(|done| editor.annotations.with_untracked(|list| done.core.finish(list))) else { return };
+        let Some(outcome) = done.and_then(|done| editor.peek(|session| done.core.finish(session.annotations()))) else { return };
         commit_stroke(outcome);
     };
 
@@ -950,7 +768,10 @@ pub fn AnnotationLayer(
         }
         let region = preview.region.scaled_up(preview.factor, image_size);
         let label = editor.label.get_untracked().unwrap_or_default();
-        let outcome = editor.annotations.with_untracked(|list| MaskStroke::from_region(erase, label, region, image_size, list).finish(list));
+        let outcome = editor.peek(|session| {
+            let list = session.annotations();
+            MaskStroke::from_region(erase, label, region, image_size, list).finish(list)
+        });
         if let Some(outcome) = outcome {
             commit_stroke(outcome);
         }
@@ -1089,9 +910,9 @@ pub fn AnnotationLayer(
     // just picked, or of the active tool. None at all allows every label.
     let target_shapes = move || -> Vec<ShapeType> {
         if relabel.get_value() {
-            let selection = editor.selection.get_untracked();
-            let mut types: Vec<ShapeType> = editor.annotations.with_untracked(|list| {
-                selection.iter().filter_map(|&index| list.get(index).map(|a| a.shape.shape_type())).collect()
+            let mut types: Vec<ShapeType> = editor.peek(|session| {
+                let list = session.annotations();
+                session.selection().iter().filter_map(|&index| list.get(index).map(|a| a.shape.shape_type())).collect()
             });
             types.sort_by_key(|t| *t as u8);
             types.dedup();
@@ -1260,7 +1081,7 @@ pub fn AnnotationLayer(
         close_pie();
         let centre = cursor_at.get_value();
         let selecting = editor.tool.get_untracked() == Tool::Select;
-        let has_selection = selecting && !editor.selection.with_untracked(BTreeSet::is_empty);
+        let has_selection = selecting && !editor.peek(|session| session.selection().is_empty());
         let opened = if labels_only || has_selection {
             relabel.set_value(has_selection);
             label_pie(centre, held)
@@ -1282,13 +1103,12 @@ pub fn AnnotationLayer(
     };
     // Adds `id` as a tag of the image, or removes it if the image has it.
     let toggle_tag = move |id: i64| {
-        let existing = editor.annotations.with_untracked(|list| list.iter().position(|a| a.shape.is_tag() && a.label == id));
+        let existing = editor.peek(|session| session.annotations().iter().position(|a| a.shape.is_tag() && a.label == id));
         match existing {
-            Some(index) => editor.remove(index),
+            Some(index) => editor.update(|session| session.remove(index)),
             None => {
-                let index = editor.annotations.with_untracked(Vec::len);
                 let annotation = Annotation { attributes: defaults(id), ..Annotation::manual(id, Shape::Tag) };
-                editor.apply(Edit::Add { index, annotation });
+                editor.update(|session| session.apply(Edit::Add { index: session.annotations().len(), annotation }));
             }
         }
     };
@@ -1303,15 +1123,21 @@ pub fn AnnotationLayer(
         match (relabelling, tool) {
             (true, _) => {
                 // An image has each tag once: a selected tag cannot become one it already has.
-                let tagged = editor.annotations.with_untracked(|list| list.iter().any(|a| a.shape.is_tag() && a.label == id));
-                if tagged && editor.selection.with_untracked(|set| set.iter().any(|&i| editor.annotation(i).is_some_and(|a| a.shape.is_tag()))) {
+                let (tagged, tags_selected) = editor.peek(|session| {
+                    let list = session.annotations();
+                    let tagged = list.iter().any(|a| a.shape.is_tag() && a.label == id);
+                    (tagged, session.selection().iter().any(|&i| list.get(i).is_some_and(|a| a.shape.is_tag())))
+                });
+                if tagged && tags_selected {
                     editor.notice.set(Some(format!("The image already has the tag “{}”.", label_name(id))));
                 }
-                editor.change_selected(|annotation| {
-                    if annotation.shape.is_tag() && tagged {
-                        return annotation.clone();
-                    }
-                    Annotation { label: id, attributes: conform(id, &annotation.attributes), ..annotation.clone() }
+                editor.update(|session| {
+                    session.change_selected(|annotation| {
+                        if annotation.shape.is_tag() && tagged {
+                            return annotation.clone();
+                        }
+                        Annotation { label: id, attributes: conform(id, &annotation.attributes), ..annotation.clone() }
+                    })
                 })
             }
             (false, Some(Tool::Tag)) => toggle_tag(id),
@@ -1514,69 +1340,6 @@ pub fn AnnotationLayer(
     });
 
     // ---- Pointer handling on the canvas.
-    let select_press = move |ev: &ev::PointerEvent, point: Point, current: View| {
-        let (extend, subtract) = (ev.shift_key(), ev.ctrl_key() || ev.meta_key());
-        if !extend && let Some((index, grip)) = grip_at(point, current.scale) {
-            let Some(shape) = editor.annotation(index).map(|a| a.shape) else { return };
-            match grip {
-                // Ctrl+click on a vertex removes it, if the shape keeps enough.
-                Grip::Vertex(vertex) if subtract => match shape.without_vertex(vertex) {
-                    Some(smaller) => editor.reshape(index, smaller),
-                    None => editor.notice.set(Some("That shape cannot lose another point.".into())),
-                },
-                _ if subtract => {}
-                Grip::Resize(handle, rect) => gesture.set(Gesture::Resizing { index, handle, before: rect, current: rect }),
-                Grip::Vertex(vertex) => gesture.set(Gesture::Vertex { index, vertex, current: shape }),
-                // Dragging an edge's "+" inserts a vertex there and drags it.
-                Grip::Midpoint(edge) => {
-                    if let Some(grown) = shape.with_inserted_vertex(edge + 1, point) {
-                        gesture.set(Gesture::Vertex { index, vertex: edge + 1, current: grown });
-                    }
-                }
-                Grip::Rotate(rect) => gesture.set(Gesture::Rotating { index, before: rect, current: rect }),
-                Grip::Radius(axis) => {
-                    let Shape::Ellipse(ellipse) = shape else { return };
-                    gesture.set(Gesture::Radius { index, axis, current: ellipse });
-                }
-                Grip::Turn => {
-                    let Shape::Ellipse(ellipse) = shape else { return };
-                    gesture.set(Gesture::Turning { index, before: ellipse, current: ellipse });
-                }
-            }
-            return;
-        }
-        let hit = editor.annotations.with_untracked(|list| topmost_at(list, point, PICK_MARGIN / current.scale, editor.pre_annotation_threshold.get_untracked()));
-        match hit {
-            // Shift+click toggles a shape, Ctrl+click removes it from the selection.
-            Some(index) if extend => editor.selection.update(|set| {
-                if !set.remove(&index) {
-                    set.insert(index);
-                }
-            }),
-            Some(index) if subtract => editor.selection.update(|set| {
-                set.remove(&index);
-            }),
-            // Dragging a selected shape moves the whole selection.
-            Some(index) => {
-                if !editor.selection.with_untracked(|set| set.contains(&index)) {
-                    editor.selection.set(BTreeSet::from([index]));
-                }
-                gesture.set(Gesture::Moving { grab: point, dx: 0.0, dy: 0.0 });
-            }
-            // On empty space a drag draws a selection box.
-            None => {
-                let mode = if extend {
-                    BoxMode::Extend
-                } else if subtract {
-                    BoxMode::Subtract
-                } else {
-                    editor.selection.set(BTreeSet::new());
-                    BoxMode::Replace
-                };
-                gesture.set(Gesture::Selecting { start: point, current: point, mode });
-            }
-        }
-    };
     let draw_press = move |ev: &ev::PointerEvent, tool: Tool, point: Point, current: View| {
         // Ctrl inverts a brush stroke: the brush erases, the eraser paints.
         let erasing = tool == Tool::Brush && editor.tools.eraser.get_untracked() != (ev.ctrl_key() || ev.meta_key());
@@ -1653,7 +1416,7 @@ pub fn AnnotationLayer(
                 update_limit(ev.shift_key(), current, false);
                 stroke.update_value(|s| {
                     if let Some(s) = s {
-                        editor.annotations.with_untracked(|list| s.extend(point, list, &color_of));
+                        editor.peek(|session| s.extend(point, session.annotations(), &color_of));
                     }
                 });
                 gesture.set(Gesture::Painting);
@@ -1707,7 +1470,7 @@ pub fn AnnotationLayer(
             canvas.set_pointer_capture(ev.pointer_id()).ok();
         }
         match editor.tool.get_untracked() {
-            Tool::Select => select_press(&ev, point, current),
+            Tool::Select => editor.update(|session| session.press(pointer_at(&ev, point, current))),
             tool => draw_press(&ev, tool, point, current),
         }
     };
@@ -1778,29 +1541,10 @@ pub fn AnnotationLayer(
                 update_limit(ev.shift_key(), current, false);
                 stroke.update_value(|current| {
                     if let Some(current) = current {
-                        editor.annotations.with_untracked(|list| current.extend(to, list, &color_of));
+                        editor.peek(|session| current.extend(to, session.annotations(), &color_of));
                     }
                 });
                 gesture.set(Gesture::Painting);
-            }
-            // The radius follows the handle, up to the largest that keeps the ellipse in the image.
-            Gesture::Radius { index, axis, current: ellipse } => {
-                let fits = |e: Ellipse| Shape::Ellipse(e).validate(image_size.0, image_size.1).is_ok();
-                let mut resized = ellipse.with_radius(axis, point);
-                if !fits(resized) {
-                    let wanted = ellipse.with_radius(axis, point);
-                    let (mut low, mut high) = (0.0, 1.0);
-                    for _ in 0..24 {
-                        let middle = (low + high) / 2.0;
-                        let towards = |from: f64, to: f64| from + (to - from) * middle;
-                        let between = Ellipse { rx: towards(ellipse.rx, wanted.rx), ry: towards(ellipse.ry, wanted.ry), ..ellipse };
-                        if fits(between) { (low, resized) = (middle, between) } else { high = middle }
-                    }
-                    if low == 0.0 {
-                        resized = ellipse;
-                    }
-                }
-                gesture.set(Gesture::Radius { index, axis, current: resized });
             }
             Gesture::Oriented { points, .. } => {
                 let current = snapped(points.last().copied(), inside(point), ev.shift_key() && points.len() == 1);
@@ -1814,41 +1558,24 @@ pub fn AnnotationLayer(
                 };
                 gesture.set(Gesture::Path { points, current });
             }
-            Gesture::Moving { grab, .. } => {
-                let Some(bounds) = selection_bounds() else { return };
-                let moved = bounds.moved_within(point.x - grab.x, point.y - grab.y, width, height);
-                gesture.set(Gesture::Moving { grab, dx: moved.min.x - bounds.min.x, dy: moved.min.y - bounds.min.y });
-            }
-            Gesture::Resizing { index, handle, before, .. } => {
-                gesture.set(Gesture::Resizing { index, handle, before, current: before.resized(handle, inside(point)) });
-            }
-            Gesture::Vertex { index, vertex, current: shape } => {
-                gesture.set(Gesture::Vertex { index, vertex, current: shape.with_vertex(vertex, inside(point)) });
-            }
-            Gesture::Rotating { index, before, .. } => {
-                let angle = snap_turn(before.angle_towards(point), ev.shift_key() != editor.tools.snap.get_untracked());
-                gesture.set(Gesture::Rotating { index, before, current: before.rotated_to(angle) });
-            }
-            Gesture::Turning { index, before, current: ellipse } => {
-                let turned = before.rotated_to(snap_turn(before.angle_towards(point), ev.shift_key() != editor.tools.snap.get_untracked()));
-                let fits = Shape::Ellipse(turned).validate(image_size.0, image_size.1).is_ok();
-                gesture.set(Gesture::Turning { index, before, current: if fits { turned } else { ellipse } });
-            }
-            Gesture::Selecting { start, mode, .. } => gesture.set(Gesture::Selecting { start, current: point, mode }),
-            Gesture::Idle => cursor.set(match (editor.tool.get_untracked(), grip_at(point, current.scale)) {
-                (Tool::Select, Some((_, Grip::Resize(handle, _)))) => handle.cursor(),
-                (Tool::Select, Some((_, Grip::Rotate(_)))) => "grab",
-                (Tool::Select, Some((_, Grip::Turn))) => "grab",
-                (Tool::Select, Some((_, Grip::Radius(0)))) => "ew-resize",
-                (Tool::Select, Some((_, Grip::Radius(_)))) => "ns-resize",
-                (Tool::Select, Some(_)) => "move",
+            // The Select tool's gestures are the session's.
+            Gesture::Idle if editor.peek(Session::is_busy) => editor.update(|session| session.move_to(pointer_at(&ev, point, current))),
+            Gesture::Idle => cursor.set(match editor.tool.get_untracked() {
+                Tool::Select => match editor.peek(|session| session.grip_at(point, current.scale)).map(|grip| grip.kind) {
+                    Some(GripKind::Resize(handle)) => handle.cursor(),
+                    Some(GripKind::Turn { .. }) => "grab",
+                    Some(GripKind::Radius(0)) => "ew-resize",
+                    Some(GripKind::Radius(_)) => "ns-resize",
+                    Some(GripKind::Vertex(_) | GripKind::Insert(_)) => "move",
+                    None => "default",
+                },
                 _ => "default",
             }),
         }
     };
 
     let on_pointer_up = move |ev: ev::PointerEvent| {
-        let Some((_, _, current)) = locate(&ev) else { return };
+        let Some((_, point, current)) = locate(&ev) else { return };
         match gesture.get_untracked() {
             // A click without dragging leaves the rectangle open for a second click.
             Gesture::Drawing { start, current: end, dragged: true, square, from_centre } => {
@@ -1876,68 +1603,8 @@ pub fn AnnotationLayer(
                     commit_fill();
                 }
             }
-            Gesture::Radius { index, current: ellipse, .. } => {
-                gesture.set(Gesture::Idle);
-                if ellipse.rx.min(ellipse.ry) * current.scale >= MIN_SHAPE_SIZE / 2.0 {
-                    editor.reshape(index, Shape::Ellipse(ellipse));
-                }
-            }
-            Gesture::Turning { index, current: ellipse, .. } => {
-                gesture.set(Gesture::Idle);
-                editor.reshape(index, Shape::Ellipse(ellipse));
-            }
-            Gesture::Moving { dx, dy, .. } => {
-                gesture.set(Gesture::Idle);
-                if dx != 0.0 || dy != 0.0 {
-                    let locked = editor.selection.with_untracked(|set| set.iter().any(|&i| editor.annotation(i).is_some_and(|a| a.locked)));
-                    if locked {
-                        editor.notice.set(Some("Locked shapes stay where they are: unlock them in the objects list first.".into()));
-                    }
-                    editor.change_selected(|annotation| {
-                        if annotation.locked {
-                            return annotation.clone();
-                        }
-                        Annotation { shape: annotation.shape.translated(dx, dy), ..annotation.clone() }
-                    });
-                }
-            }
-            Gesture::Resizing { index, before, current: after, .. } => {
-                gesture.set(Gesture::Idle);
-                let big_enough = after.width() * current.scale >= MIN_SHAPE_SIZE && after.height() * current.scale >= MIN_SHAPE_SIZE;
-                if after != before && big_enough {
-                    editor.reshape(index, Shape::Rectangle(after));
-                }
-            }
-            Gesture::Vertex { index, current: shape, .. } => {
-                gesture.set(Gesture::Idle);
-                match shape.validate(image_size.0, image_size.1) {
-                    Ok(()) => editor.reshape(index, shape),
-                    Err(reason) => editor.notice.set(Some(format!("Not changed: {reason}."))),
-                }
-            }
-            Gesture::Rotating { index, current: rect, .. } => {
-                gesture.set(Gesture::Idle);
-                let shape = Shape::OrientedRectangle(rect);
-                match shape.validate(image_size.0, image_size.1) {
-                    Ok(()) => editor.reshape(index, shape),
-                    Err(reason) => editor.notice.set(Some(format!("Not changed: {reason}."))),
-                }
-            }
-            Gesture::Selecting { start, current: end, mode } => {
-                gesture.set(Gesture::Idle);
-                let region = Rect::from_corners(start, end);
-                // A click without a drag only cleared the selection (or did nothing with Shift/Ctrl).
-                if region.width() * current.scale < DRAG_THRESHOLD && region.height() * current.scale < DRAG_THRESHOLD {
-                    return;
-                }
-                let hits = editor.annotations.with_untracked(|list| overlapping(list, region, editor.pre_annotation_threshold.get_untracked()));
-                editor.selection.update(|set| match mode {
-                    BoxMode::Replace | BoxMode::Extend => set.extend(hits),
-                    BoxMode::Subtract => hits.iter().for_each(|hit| {
-                        set.remove(hit);
-                    }),
-                });
-            }
+            // The Select tool's gestures are the session's.
+            Gesture::Idle if editor.peek(Session::is_busy) => editor.update(|session| session.release(pointer_at(&ev, point, current))),
             _ => {}
         }
     };
@@ -1996,17 +1663,8 @@ pub fn AnnotationLayer(
             }
         };
         if (is(Action::Undo) || is(Action::Redo)) && painting {
-        } else if is(Action::Redo) {
-            editor.redo();
-        } else if is(Action::Undo) {
-            editor.undo();
-        } else if is(Action::SelectNone) {
-            editor.selection.set(BTreeSet::new());
-        } else if is(Action::SelectAll) {
-            // Everything shown: hidden shapes are not picked.
-            let threshold = editor.pre_annotation_threshold.get_untracked();
-            let visible = editor.annotations.with_untracked(|list| list.iter().enumerate().filter(|(_, a)| a.shown(threshold)).map(|(i, _)| i).collect());
-            editor.selection.set(visible);
+        } else if let Some(action) = [Action::Redo, Action::Undo, Action::SelectNone, Action::SelectAll].into_iter().find(|&action| is(action)) {
+            editor.update(|session| session.key(action));
         } else if is(Action::Finish) && drawing_path {
             finish_path();
         } else if (smaller || larger) && tool == Tool::Brush && editor.tools.fill.get_untracked() {
@@ -2024,19 +1682,18 @@ pub fn AnnotationLayer(
         } else if is(Action::RemoveLastPoint) && drawing_path {
             undo_point();
         } else if is(Action::Cancel) {
+            // Esc first drops the shape being drawn; the session then ends its gesture or clears
+            // the selection; otherwise it returns to Select.
             if gesture.get_untracked() != Gesture::Idle {
                 cancel_gesture();
-            } else if !editor.selection.with_untracked(BTreeSet::is_empty) {
-                editor.selection.set(BTreeSet::new());
-            } else {
+            } else if !editor.update(|session| session.key(Action::Cancel)) {
                 editor.tool.set(Tool::Select);
             }
         } else if is(Action::Delete) {
-            editor.delete_selected();
+            editor.update(|session| session.key(Action::Delete));
         } else if is(Action::Copy) || is(Action::Cut) {
-            let selected: Vec<Annotation> = editor.selection.with_untracked(|selection| {
-                editor.annotations.with_untracked(|list| selection.iter().filter_map(|&index| list.get(index).cloned()).collect())
-            });
+            let selected: Vec<Annotation> =
+                editor.peek(|session| session.selection().iter().filter_map(|&index| session.annotations().get(index).cloned()).collect());
             let copies = clipboard::copied(&selected);
             // Tags are not copied, so a selection of tags alone keeps the clipboard as it was.
             if copies.is_empty() {
@@ -2045,10 +1702,12 @@ pub fn AnnotationLayer(
             CLIPBOARD.set(Some((project, copies)));
             if is(Action::Cut) {
                 // Cut removes only what it copied: tags stay.
-                editor.selection.update(|selection| {
-                    editor.annotations.with_untracked(|list| selection.retain(|&index| list.get(index).is_some_and(|a| !a.shape.is_tag())))
+                editor.update(|session| {
+                    let list = session.annotations();
+                    let copied = session.selection().iter().copied().filter(|&index| list.get(index).is_some_and(|a| !a.shape.is_tag())).collect();
+                    session.set_selection(copied);
+                    session.delete_selected();
                 });
-                editor.delete_selected();
             }
         } else if is(Action::Paste) {
             let copies = CLIPBOARD.with_borrow(|copied| copied.as_ref().filter(|(of, _)| *of == project).map(|(_, copies)| copies.clone()));
@@ -2057,13 +1716,15 @@ pub fn AnnotationLayer(
             editor.tool.set(Tool::Select);
             let pasted = all_labels.with_value(|labels| clipboard::paste(&copies, labels, image_size.0, image_size.1));
             editor.notice.set(pasted.notice());
-            let start = editor.annotations.with_untracked(Vec::len);
-            let count = pasted.annotations.len();
-            if count > 0 {
-                let adds = pasted.annotations.into_iter().enumerate().map(|(offset, annotation)| Edit::Add { index: start + offset, annotation });
-                editor.apply(Edit::Batch(adds.collect()));
-            }
-            editor.selection.set((start..start + count).collect());
+            editor.update(|session| {
+                let start = session.annotations().len();
+                let count = pasted.annotations.len();
+                if count > 0 {
+                    let adds = pasted.annotations.into_iter().enumerate().map(|(offset, annotation)| Edit::Add { index: start + offset, annotation });
+                    session.apply(Edit::Batch(adds.collect()));
+                }
+                session.set_selection((start..start + count).collect());
+            });
         } else if is(Action::Eraser) {
             // The brush in eraser mode (Blender has no eraser tool either).
             if brush_tool(Tool::Brush) {
@@ -2125,26 +1786,16 @@ pub fn AnnotationLayer(
         context.clear_rect(0.0, 0.0, css_width, css_height);
 
         let gesture = gesture.get_untracked();
-        let selection = editor.selection.get_untracked();
-        let single = editor.single_selection();
-        // Shapes being edited show their new form.
-        let shown_shape = |index: usize, annotation: &Annotation| match &gesture {
-            Gesture::Resizing { index: i, current, .. } if *i == index => Shape::Rectangle(*current),
-            Gesture::Vertex { index: i, current, .. } if *i == index => current.clone(),
-            Gesture::Rotating { index: i, current, .. } if *i == index => Shape::OrientedRectangle(*current),
-            Gesture::Radius { index: i, current, .. } | Gesture::Turning { index: i, current, .. } if *i == index => Shape::Ellipse(*current),
-            Gesture::Moving { dx, dy, .. } if selection.contains(&index) && !annotation.locked => annotation.shape.translated(*dx, *dy),
-            _ => annotation.shape.clone(),
-        };
-        let visible = |annotation: &Annotation| !annotation.shape.is_tag() && annotation.shown(editor.pre_annotation_threshold.get_untracked());
-        // The footprints of lines and points under everything else (see `draw::footprint`).
-        if prefs.settings.with_untracked(|s| s.show_footprint) {
-            let mut previous = ghosts.try_update_value(std::mem::take).unwrap_or_default();
-            let mut kept = HashMap::new();
-            editor.annotations.with_untracked(|list| {
+        editor.peek(|session| {
+            let (list, selection, threshold) = (session.annotations(), session.selection(), session.threshold());
+            let visible = |annotation: &Annotation| !annotation.shape.is_tag() && annotation.shown(threshold);
+            // The footprints of lines and points under everything else (see `draw::footprint`).
+            if prefs.settings.with_untracked(|s| s.show_footprint) {
+                let mut previous = ghosts.try_update_value(std::mem::take).unwrap_or_default();
+                let mut kept = HashMap::new();
                 for (index, annotation) in list.iter().enumerate().filter(|(_, a)| visible(a)) {
                     let Some(footprint) = footprints.with_value(|map| map.get(&annotation.label).copied()) else { continue };
-                    let shape = shown_shape(index, annotation);
+                    let shape = session.shown_shape(index, annotation).into_owned();
                     let outlines = match previous.remove(&index) {
                         Some((before, made_with, outlines)) if before == shape && made_with == footprint => outlines,
                         _ => match footprint.region(&shape, image_size) {
@@ -2155,19 +1806,18 @@ pub fn AnnotationLayer(
                     draw::footprint(&context, current, &outlines, &color_of(annotation.label));
                     kept.insert(index, (shape, footprint, outlines));
                 }
-            });
-            ghosts.set_value(kept);
-        }
-        editor.annotations.with_untracked(|list| {
+                ghosts.set_value(kept);
+            }
             for (index, annotation) in list.iter().enumerate() {
                 // Tags are chips over the image, not drawn on it; hidden shapes are not drawn.
                 if !visible(annotation) {
                     continue;
                 }
                 let selected = selection.contains(&index);
-                let shape = shown_shape(index, annotation);
+                // Shapes being edited show their new form.
+                let shape = session.shown_shape(index, annotation);
                 let color = color_of(annotation.label);
-                if let Shape::Mask(mask) = &shape {
+                if let Shape::Mask(mask) = &*shape {
                     // Masks the stroke changes are drawn by the stroke.
                     let shown = stroke.with_value(|s| s.as_ref().is_some_and(|s| s.draw_changed(&context, current, index, selected)));
                     if !shown {
@@ -2186,33 +1836,16 @@ pub fn AnnotationLayer(
                     let name = names.get(&annotation.label).cloned().unwrap_or_default();
                     draw::tag(&context, current.to_screen(shape.bounds().min), &name, &color);
                 }
-                // Handles only when one shape is selected: they edit that shape.
-                // A shape of fixed size has no handles that resize it.
-                if single == Some(index) {
-                    let fixed = fixed_size(annotation);
-                    match &shape {
-                        Shape::Rectangle(_) if fixed => {}
-                        Shape::Rectangle(rect) => draw::rectangle_handles(&context, current, *rect, &color),
-                        Shape::OrientedRectangle(rect) => {
-                            if !fixed {
-                                draw::vertex_handles(&context, current, &shape, &color, false);
-                            }
-                            draw::rotation_handle(&context, current, rect.rotation_handle(0.0), rect.rotation_handle(ROTATION_HANDLE_DISTANCE / current.scale), &color);
-                        }
-                        Shape::Points { .. } => draw::vertex_handles(&context, current, &shape, &color, false),
-                        Shape::Ellipse(ellipse) => {
-                            draw::vertex_handles(&context, current, &shape, &color, false);
-                            for handle in ellipse.radius_handles().into_iter().filter(|_| !fixed) {
-                                draw::radius_handle(&context, current, handle, &color);
-                            }
-                            draw::rotation_handle(&context, current, ellipse.rotation_handle(0.0), ellipse.rotation_handle(ROTATION_HANDLE_DISTANCE / current.scale), &color);
-                        }
-                        Shape::Polygon { .. } | Shape::Polyline { .. } => {
-                            draw::vertex_handles(&context, current, &shape, &color, true)
-                        }
-                        Shape::Mask(_) | Shape::Tag => {}
-                    }
+            }
+            // The handles of a single selected shape: the list the session hit-tests.
+            if let Some(annotation) = session.single_selection().and_then(|index| list.get(index)) {
+                let color = color_of(annotation.label);
+                for grip in session.grips(current.scale) {
+                    draw::grip(&context, current, grip, &color);
                 }
+            }
+            if let Some(region) = session.selection_box() {
+                draw::selection_box(&context, current, region);
             }
         });
         sprites.update_value(SpriteCache::sweep);
@@ -2247,7 +1880,6 @@ pub fn AnnotationLayer(
             }
         }
         match gesture {
-            Gesture::Selecting { start, current: end, .. } => draw::selection_box(&context, current, Rect::from_corners(start, end)),
             Gesture::Drawing { start, current: end, square, from_centre, .. } => {
                 let rect = Rect::from_drag(start, end, square, from_centre).clamped(width, height);
                 draw::shape(&context, current, &Shape::Rectangle(rect), Look { color: &pen, selected: false, dashed: true });
@@ -2276,9 +1908,7 @@ pub fn AnnotationLayer(
         view.track();
         size.track();
         gesture.track();
-        editor.annotations.track();
-        editor.pre_annotation_threshold.track();
-        editor.selection.track();
+        editor.track_changes();
         editor.label.track();
         editor.tool.track();
         editor.tools.oriented.track();
@@ -2289,7 +1919,18 @@ pub fn AnnotationLayer(
         hover.track();
         draw();
     });
-    Effect::new(move |_| editor.busy.set(gesture.with(|g| *g != Gesture::Idle)));
+    Effect::new(move |_| {
+        editor.track_changes();
+        let busy = gesture.with(|g| *g != Gesture::Idle) || editor.peek(Session::is_busy);
+        if editor.busy.get_untracked() != busy {
+            editor.busy.set(busy);
+        }
+    });
+    // The session's gestures follow the snap option.
+    Effect::new(move |_| {
+        let snap = editor.tools.snap.get();
+        editor.update(|session| session.set_options(Options { snap }));
+    });
     // Drop a half-drawn shape when the tool or a drawing mode changes.
     // Another label can fix another size, or none: drop a shape being placed.
     Effect::new(move |_| {
@@ -2315,15 +1956,15 @@ pub fn AnnotationLayer(
     view! {
         <PieMenu pie=pie pointer=pointer on_pick=choose on_background=background_click />
         <div class="tag-chips" aria-label="Image tags">
-            {move || editor.annotations.with(|list| {
+            {move || editor.with_annotations(|list| {
                 list.iter().enumerate().filter(|(_, a)| a.shape.is_tag()).map(|(index, a)| {
                     let name = label_name(a.label);
-                    let selected = move || editor.selection.with(|set| set.contains(&index));
+                    let selected = move || editor.is_selected(index);
                     view! {
                         <span class="tag-chip" class:selected=selected style:border-color=color_of(a.label)>
                             <span class="swatch" style:background=color_of(a.label)></span>
-                            <button class="name" title="Select this tag" on:click=move |_| editor.selection.set(BTreeSet::from([index]))>{name.clone()}</button>
-                            <button class="remove" title="Remove this tag" aria-label=format!("Remove tag {name}") on:click=move |_| editor.remove(index)>"×"</button>
+                            <button class="name" title="Select this tag" on:click=move |_| editor.update(|session| session.set_selection(BTreeSet::from([index])))>{name.clone()}</button>
+                            <button class="remove" title="Remove this tag" aria-label=format!("Remove tag {name}") on:click=move |_| editor.update(|session| session.remove(index))>"×"</button>
                         </span>
                     }
                 }).collect_view()
@@ -2336,9 +1977,9 @@ pub fn AnnotationLayer(
             class="annotations"
             node_ref=canvas_ref
             // Editor state for browser tests; not used for rendering.
-            data-count=move || editor.annotations.with(Vec::len)
-            data-selected={move || editor.selection.get().iter().map(usize::to_string).collect::<Vec<_>>().join(",")}
-            data-revision=move || editor.revision.get()
+            data-count=move || editor.with_annotations(<[Annotation]>::len)
+            data-selected={move || editor.selection().iter().map(usize::to_string).collect::<Vec<_>>().join(",")}
+            data-revision=move || editor.revision()
             data-drawing={move || match gesture.get() {
                 Gesture::Path { points, .. } | Gesture::Oriented { points, .. } | Gesture::Stroke { points, .. } => points.len(),
                 Gesture::Painting | Gesture::Filling { .. } => 1,
@@ -2355,17 +1996,6 @@ pub fn AnnotationLayer(
     }
 }
 
-/// Index of the point nearest to `to` within `reach`, if any.
-fn nearest(points: &[Point], to: Point, reach: f64) -> Option<usize> {
-    points
-        .iter()
-        .enumerate()
-        .map(|(index, point)| (index, point.distance(to)))
-        .filter(|(_, distance)| *distance <= reach)
-        .min_by(|a, b| a.1.total_cmp(&b.1))
-        .map(|(index, _)| index)
-}
-
 /// `edit` with new annotations given their label's default attribute values.
 fn with_defaults(edit: Edit, defaults: &dyn Fn(i64) -> Attributes) -> Edit {
     match edit {
@@ -2378,10 +2008,4 @@ fn with_defaults(edit: Edit, defaults: &dyn Fn(i64) -> Attributes) -> Edit {
         Edit::Batch(edits) => Edit::Batch(edits.into_iter().map(|edit| with_defaults(edit, defaults)).collect()),
         other => other,
     }
-}
-
-/// `angle` rounded to whole steps of `SNAP_DEGREES` when `snap` is on.
-fn snap_turn(angle: f64, snap: bool) -> f64 {
-    let step = SNAP_DEGREES.to_radians();
-    if snap { (angle / step).round() * step } else { angle }
 }

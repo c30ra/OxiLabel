@@ -12,6 +12,7 @@ use oxilabel_core::{
     Image, ImageFilter, Label, Project,
     annotation::{Annotation, ImageAnnotations, SaveAnnotations},
     autosave::{Action, Autosave, SaveOutcome, SaveState},
+    editor::Session,
     inference::RunStatus,
     geometry::Point,
     view::View,
@@ -99,7 +100,8 @@ fn Workspace(
     let space_held = RwSignal::new(false);
     let view_filter = ViewFilter::new(project.id);
     // Start with the first label; switching to a tool picks one that allows its shape.
-    let editor = Editor::new(conformed(&labels, annotations.annotations), labels.iter().map(|label| label.id).min(), tools);
+    let session = Session::new(conformed(&labels, annotations.annotations), labels.clone(), (image.width, image.height));
+    let editor = Editor::new(session, labels.iter().map(|label| label.id).min(), tools);
     let labels_for_reload = StoredValue::new(labels.clone());
     editor.usable_shapes.set(labels.iter().flat_map(|label| label.shape_types.iter().copied()).collect());
     let picker_labels = labels.clone();
@@ -115,14 +117,14 @@ fn Workspace(
     let autosave = Autosaver::new(editor, nav, url.get_value(), annotations.version);
     let state = autosave.state;
     Effect::new(move |_| {
-        let revision = editor.revision.get();
+        let revision = editor.revision();
         autosave.act(move |policy| policy.edited(revision));
     });
-    let save = move || autosave.act(move |policy| policy.retry(editor.revision.get_untracked()));
+    let save = move || autosave.act(move |policy| policy.retry(editor.peek(Session::revision)));
     // Leaving the image saves at once; closing the tab with unsaved work asks first.
     on_cleanup(move || autosave.leave());
     let before_unload = window_event_listener(ev::beforeunload, move |ev| {
-        if autosave.with(|policy| policy.has_unsaved(editor.revision.get_untracked())) {
+        if autosave.with(|policy| policy.has_unsaved(editor.peek(Session::revision))) {
             ev.prevent_default();
             ev.set_return_value("");
         }
@@ -133,9 +135,9 @@ fn Workspace(
         spawn_local(async move {
             match api::get::<ImageAnnotations>(&url.get_value()).await {
                 Ok(latest) => {
-                    editor.reset(conformed(&labels_for_reload.get_value(), latest.annotations));
+                    editor.update(|session| session.reset(conformed(&labels_for_reload.get_value(), latest.annotations)));
                     nav.annotated.set(latest.annotated);
-                    let revision = editor.revision.get_untracked();
+                    let revision = editor.peek(Session::revision);
                     autosave.act(move |policy| {
                         policy.reloaded(latest.version, revision);
                         Action::Nothing
@@ -152,9 +154,9 @@ fn Workspace(
         spawn_local(async move {
             match api::get::<ImageAnnotations>(&url.get_value()).await {
                 Ok(latest) => {
-                    let before = editor.revision.get_untracked();
-                    editor.merge_pre_annotations(&run.model, &latest.annotations);
-                    let after = editor.revision.get_untracked();
+                    let before = editor.peek(Session::revision);
+                    editor.update(|session| session.merge_pre_annotations(&run.model, &latest.annotations));
+                    let after = editor.peek(Session::revision);
                     autosave.act(move |policy| policy.run_merged(latest.version, before, after));
                 }
                 Err(message) => editor.notice.set(Some(message)),
@@ -255,7 +257,7 @@ impl Autosaver {
         let state = RwSignal::new(SaveState::Saved);
         let saver = Saver {
             shared: Arc::new(Shared {
-                policy: Mutex::new(Autosave::new(version, editor.revision.get_untracked())),
+                policy: Mutex::new(Autosave::new(version, editor.peek(Session::revision))),
                 timer: AtomicU64::new(0),
                 left_with: Mutex::new(None),
                 url,
@@ -285,8 +287,8 @@ impl Autosaver {
     /// still to come.
     fn leave(self) {
         let saver = self.saver.get_value();
-        let revision = saver.editor.revision.get_untracked();
-        *saver.shared.left_with.lock().unwrap() = Some((revision, saver.editor.annotations.get_untracked()));
+        let revision = saver.editor.peek(Session::revision);
+        *saver.shared.left_with.lock().unwrap() = Some((revision, saver.editor.peek(|session| session.annotations().to_vec())));
         saver.act(move |policy| policy.left(revision));
     }
 }
@@ -313,14 +315,14 @@ impl Saver {
     fn revision(&self) -> u64 {
         match &*self.shared.left_with.lock().unwrap() {
             Some((revision, _)) => *revision,
-            None => self.editor.revision.get_untracked(),
+            None => self.editor.peek(Session::revision),
         }
     }
 
     fn annotations(&self) -> Vec<Annotation> {
         match &*self.shared.left_with.lock().unwrap() {
             Some((_, annotations)) => annotations.clone(),
-            None => self.editor.annotations.get_untracked(),
+            None => self.editor.peek(|session| session.annotations().to_vec()),
         }
     }
 
