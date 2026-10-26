@@ -306,12 +306,20 @@ pub fn overlapping(annotations: &[Annotation], region: Rect, threshold: f64) -> 
         .collect()
 }
 
-/// All annotations of one image, in drawing order (the last one is on top), and the version they
-/// belong to. Every successful save increases the version by one.
+/// All annotations of one image, in drawing order (the last one is on top), the version they
+/// belong to and the image's annotated status. Every successful save increases the version by one
+/// and sets the status to [`counts_as_annotated`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ImageAnnotations {
     pub version: i64,
     pub annotations: Vec<Annotation>,
+    pub annotated: bool,
+}
+
+/// Whether saving these annotations marks the image annotated: it has at least one annotation or
+/// tag that is not a pending pre-annotation.
+pub fn counts_as_annotated(annotations: &[Annotation]) -> bool {
+    annotations.iter().any(|annotation| !annotation.pending)
 }
 
 /// Replaces an image's annotations. Rejected if the image is no longer at `base_version`.

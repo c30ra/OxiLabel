@@ -10,6 +10,7 @@ mod images;
 mod inference;
 mod jobs;
 mod labels;
+mod progress;
 mod projects;
 mod thumbnails;
 mod tiles;

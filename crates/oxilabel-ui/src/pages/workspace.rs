@@ -3,7 +3,7 @@ use std::time::Duration;
 use leptos::{ev, prelude::*, task::spawn_local};
 use leptos_router::{components::A, hooks::use_params_map};
 use oxilabel_core::{
-    Image, Label, Project,
+    Image, ImageFilter, Label, Project,
     annotation::{Annotation, ImageAnnotations, SaveAnnotations},
     inference::RunStatus,
     geometry::Point,
@@ -11,8 +11,9 @@ use oxilabel_core::{
 };
 
 use crate::{
-    annotate::{AnnotationLayer, Editor, Tool},
+    annotate::{AnnotationLayer, Editor, Tool, Tools},
     filmstrip::{Filmstrip, ImageNav, ImagePosition},
+    image_filter::{self, FilterPanel},
     api,
     pre_annotate::{RunPanel, RunScope},
     prefs::prefs,
@@ -43,6 +44,9 @@ pub fn WorkspacePage() -> impl IntoView {
         let parse = |key| params.get(key).and_then(|id| id.parse::<i64>().ok());
         parse("id").zip(parse("image"))
     });
+    // The tools' options and the last tool carry over to every image of the project opened in
+    // this browser tab.
+    let tools = Tools::for_project(ids.get_untracked().map(|(project, _)| project));
     let data = LocalResource::new(move || {
         let ids = ids.get();
         async move {
@@ -70,7 +74,7 @@ pub fn WorkspacePage() -> impl IntoView {
                 labels,
                 annotations,
             } = loaded;
-            view! { <Workspace project=project image=image labels=labels annotations=annotations /> }.into_any()
+            view! { <Workspace project=project image=image labels=labels annotations=annotations tools=tools /> }.into_any()
         }
     }
 }
@@ -91,13 +95,14 @@ fn Workspace(
     image: Image,
     labels: Vec<Label>,
     annotations: ImageAnnotations,
+    tools: Tools,
 ) -> impl IntoView {
     let view = RwSignal::new(None::<View>);
     let size = RwSignal::new((0.0, 0.0));
     let space_held = RwSignal::new(false);
     let view_filter = ViewFilter::new(project.id);
     // Start with the first label; switching to a tool picks one that allows its shape.
-    let editor = Editor::new(conformed(&labels, annotations.annotations), labels.iter().map(|label| label.id).min());
+    let editor = Editor::new(conformed(&labels, annotations.annotations), labels.iter().map(|label| label.id).min(), tools);
     let labels_for_reload = StoredValue::new(labels.clone());
     editor.usable_shapes.set(labels.iter().flat_map(|label| label.shape_types.iter().copied()).collect());
     let picker_labels = labels.clone();
@@ -107,6 +112,9 @@ fn Workspace(
         project.id, image.id
     ));
 
+    let image_filter = image_filter::shared(project.id);
+    let nav = ImageNav::new(project.id, &image, image_filter);
+    let filter_labels = labels.clone();
     // Autosave: the version the editor is based on and the last revision the server has.
     let version = RwSignal::new(annotations.version);
     let saved_revision = RwSignal::new(0_u64);
@@ -135,6 +143,8 @@ fn Workspace(
             match api::put_detailed::<_, ImageAnnotations>(&url.get_value(), &request).await {
                 Ok(saved) => {
                     version.set(saved.version);
+                    // Saving sets the image's status from its annotations.
+                    nav.annotated.set(saved.annotated);
                     saved_revision.set(revision);
                     state.set(SaveState::Saved);
                     // Edits made while saving are saved next.
@@ -202,6 +212,7 @@ fn Workspace(
                 Ok(latest) => {
                     editor.reset(conformed(&labels_for_reload.get_value(), latest.annotations));
                     version.set(latest.version);
+                    nav.annotated.set(latest.annotated);
                     saved_revision.set(editor.revision.get_untracked());
                     state.set(SaveState::Saved);
                 }
@@ -253,7 +264,6 @@ fn Workspace(
         }
     };
     let (image_id, image_size) = (image.id, (image.width, image.height));
-    let nav = ImageNav::new(project.id, &image);
     let prefs = prefs();
     let footprint_shown = move || prefs.settings.with(|s| s.show_footprint);
     let toggle_footprint = move |_| prefs.change(|s| s.show_footprint = !s.show_footprint, move |message| editor.notice.set(Some(message)));
@@ -272,6 +282,7 @@ fn Workspace(
                 </nav>
                 <div class="actions">
                     <ImagePosition nav=nav editor=editor />
+                    <ImageFilterChip filter=image_filter labels=filter_labels />
                     <SaveIndicator state=state on_retry=save on_reload=reload />
                     <LabelPicker labels=picker_labels editor=editor />
                     <button class="view-chip" title="View filter (hold O for the original)" aria-label="View filter"
@@ -435,4 +446,45 @@ fn conformed(labels: &[Label], annotations: Vec<Annotation>) -> Vec<Annotation> 
             None => annotation,
         })
         .collect()
+}
+
+/// The image filter of the grid, here choosing which images J, K and the filmstrip move through.
+#[component]
+fn ImageFilterChip(filter: RwSignal<ImageFilter>, labels: Vec<Label>) -> impl IntoView {
+    let open = RwSignal::new(false);
+    let count = move || {
+        let filter = filter.read();
+        image_filter::panel_count(&filter) + usize::from(filter.name.is_some()) + usize::from(filter.job.is_some() || filter.without_job)
+    };
+    let set_filter = move |change: &dyn Fn(&mut ImageFilter)| filter.update(|filter| change(filter));
+    let labels = Signal::stored(labels);
+    view! {
+        <div class="image-filter">
+            <button class="chip" class:active={move || count() > 0} aria-expanded=move || open.get().to_string()
+                title="Which images J, K and the filmstrip move through; the same filter as the image grid"
+                on:click=move |_| open.update(|open| *open = !*open)>
+                {move || match count() {
+                    0 => "Images: all".to_owned(),
+                    n => format!("Images · {n} filters"),
+                }}
+            </button>
+            <Show when=move || open.get()>
+                <div class="image-filter-popover" role="group" aria-label="Image filter"
+                    on:keydown=move |ev| if ev.key() == "Escape" { open.set(false) }>
+                    <input class="search" type="search" placeholder="Filter by path (regex)" aria-label="Filter by path, regular expression"
+                        prop:value=move || filter.read().name.clone().unwrap_or_default()
+                        on:input:target=move |ev| {
+                            let text = ev.target().value();
+                            set_filter(&|filter| filter.name = Some(text.clone()).filter(|t| !t.is_empty()));
+                        } />
+                    {move || (filter.read().job.is_some() || filter.read().without_job).then(|| view! {
+                        <p class="muted">"Only the images of the job chosen in the grid. "
+                            <button on:click=move |_| set_filter(&|f| { f.job = None; f.without_job = false; })>"Any job"</button>
+                        </p>
+                    })}
+                    <FilterPanel filter=filter set_filter=set_filter labels=labels />
+                </div>
+            </Show>
+        </div>
+    }
 }

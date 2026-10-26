@@ -93,9 +93,9 @@ async fn the_list_summarises_each_projects_images_and_labels() {
     let rectangle = json!({"label": 1, "shape": {"type": "rectangle", "min": {"x": 1.0, "y": 1.0}, "max": {"x": 5.0, "y": 5.0}}});
     call(&app, Method::PUT, &format!("/api/projects/{id}/images/{image}/annotations"), Some(json!({"base_version": 0, "annotations": [rectangle]}))).await;
 
-    // "Annotated" is the image status the annotator sets (ticket 11), not having annotations.
+    // Saving an annotation marked the image annotated (ticket 26).
     let (_, list) = call(&app, Method::GET, "/api/projects", None).await;
-    assert_eq!(list, json!([{"id": id, "name": "Cells", "images": 2, "annotated": 0, "jobs": 0, "label_colors": ["#e74c3c", "#3498db"]}]));
+    assert_eq!(list, json!([{"id": id, "name": "Cells", "images": 2, "annotated": 1, "jobs": 0, "label_colors": ["#e74c3c", "#3498db"]}]));
 }
 
 #[tokio::test]

@@ -314,7 +314,7 @@ async fn removing_images_takes_them_out_of_the_project_but_keeps_the_files() {
 
     let (status, report) = remove(&app, project, &[all[0], all[2]]).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(report, json!({"removed": 2}));
+    assert_eq!(report, json!({"removed": 2, "annotations": 0}));
 
     let page = list(&app, project, "").await;
     assert_eq!(page["total"], 1);
@@ -347,7 +347,7 @@ async fn images_of_another_project_are_not_removed() {
 
     let (status, report) = remove(&app, second, &theirs).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(report, json!({"removed": 0}));
+    assert_eq!(report, json!({"removed": 0, "annotations": 0}));
     assert_eq!(list(&app, first, "").await["total"], 1);
 }
 
@@ -498,4 +498,103 @@ async fn an_images_neighbours_come_in_path_order_with_its_position() {
     assert_eq!((around["position"].clone(), around["total"].clone()), (json!(2), json!(5)), "1-based position");
     let shown: Vec<i64> = around["images"].as_array().unwrap().iter().map(|i| i["id"].as_i64().unwrap()).collect();
     assert_eq!(shown, ids[0..4], "up to two before and two after, the image itself in between");
+}
+
+#[tokio::test]
+async fn images_sharing_a_file_name_are_listed_grouped_by_name() {
+    let app = test_app().await;
+    let project = new_project(&app).await;
+    write_png(app.images.path(), "a/cat.png", 2, 2, 1);
+    write_png(app.images.path(), "b/cat.png", 3, 3, 2);
+    write_png(app.images.path(), "a/dog.png", 2, 2, 3);
+    write_png(app.images.path(), "c/Cat.png", 2, 2, 4);
+    write_png(app.images.path(), "0/bird.png", 2, 2, 5);
+    write_png(app.images.path(), "z/bird.png", 2, 2, 6);
+    import_selection(&app, project, &["a", "b", "c", "0", "z"]).await;
+
+    assert_eq!(filtered(&app, project, "same_name=true").await, vec!["0/bird.png", "z/bird.png", "a/cat.png", "b/cat.png"]);
+    let (_, ids) = call(&app, Method::GET, &format!("/api/projects/{project}/image-ids?same_name=true"), None).await;
+    assert_eq!(ids.as_array().unwrap().len(), 4);
+    assert_eq!(filtered(&app, project, "same_name=true&name=cat").await, vec!["a/cat.png", "b/cat.png"]);
+}
+
+#[tokio::test]
+async fn listed_images_carry_their_file_creation_time_where_known() {
+    let app = test_app().await;
+    let project = new_project(&app).await;
+    write_png(app.images.path(), "a.png", 2, 2, 1);
+    import(&app, project, "a.png").await;
+    let image = &list(&app, project, "").await["images"][0];
+    let created = std::fs::metadata(app.images.path().join("a.png")).unwrap().created().is_ok();
+    assert_eq!(image["created"].is_string(), created);
+}
+
+/// A project with labels 1 and 2 and images a, b and c: a has a label-1 rectangle, b a label-2
+/// tag and a label-1 rectangle, c nothing. Returns (project, ids of a, b, c).
+async fn labelled_project(app: &TestApp) -> (i64, Vec<i64>) {
+    let project = new_project(app).await;
+    let labels = format!("/api/projects/{project}/labels");
+    call(app, Method::POST, &labels, Some(json!({"name": "defect", "color": "#e74c3c", "shape_types": ["rectangle"]}))).await;
+    call(app, Method::POST, &labels, Some(json!({"name": "good", "color": "#3498db", "shape_types": ["tag"]}))).await;
+    for (index, name) in ["a", "b", "c"].iter().enumerate() {
+        write_png(app.images.path(), &format!("set/{name}.png"), 10, 10, index as u8);
+    }
+    import(app, project, "set").await;
+    let all = ids(&list(app, project, "").await);
+    let rectangle = json!({"label": 1, "shape": {"type": "rectangle", "min": {"x": 1.0, "y": 1.0}, "max": {"x": 5.0, "y": 5.0}}});
+    let tag = json!({"label": 2, "shape": {"type": "tag"}});
+    for (image, annotations) in [(all[0], json!([rectangle])), (all[1], json!([tag, rectangle]))] {
+        let body = json!({"base_version": 0, "annotations": annotations});
+        let (status, _) = call(app, Method::PUT, &format!("/api/projects/{project}/images/{image}/annotations"), Some(body)).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    (project, all)
+}
+
+#[tokio::test]
+async fn images_can_be_filtered_by_the_labels_of_their_annotations_and_tags() {
+    let app = test_app().await;
+    let (project, _) = labelled_project(&app).await;
+    assert_eq!(filtered(&app, project, "labels=1").await, vec!["set/a.png", "set/b.png"]);
+    assert_eq!(filtered(&app, project, "labels=2").await, vec!["set/b.png"]);
+    assert_eq!(filtered(&app, project, "labels=1,2").await, vec!["set/a.png", "set/b.png"]);
+    let (status, _) = call(&app, Method::GET, &format!("/api/projects/{project}/images?labels=x"), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn a_dry_run_counts_the_annotations_a_removal_discards_without_removing() {
+    let app = test_app().await;
+    let (project, all) = labelled_project(&app).await;
+    let url = format!("/api/projects/{project}/image-removals");
+
+    let (_, report) = call(&app, Method::POST, &url, Some(json!({"ids": [all[1], all[2]], "dry_run": true}))).await;
+    assert_eq!(report, json!({"removed": 2, "annotations": 2}));
+    assert_eq!(list(&app, project, "").await["total"], 3);
+
+    let (_, report) = call(&app, Method::POST, &url, Some(json!({"ids": [all[1], all[2]]}))).await;
+    assert_eq!(report, json!({"removed": 2, "annotations": 2}));
+    assert_eq!(paths(&list(&app, project, "").await), vec!["set/a.png"]);
+}
+
+#[tokio::test]
+async fn neighbours_follow_the_filter_and_its_order_even_for_an_image_it_leaves_out() {
+    let app = test_app().await;
+    let project = new_project(&app).await;
+    write_png(app.images.path(), "a/cat.png", 2, 2, 1);
+    write_png(app.images.path(), "b/cat.png", 2, 2, 2);
+    write_png(app.images.path(), "a/dog.png", 2, 2, 3);
+    write_png(app.images.path(), "0/bird.png", 2, 2, 4);
+    write_png(app.images.path(), "z/bird.png", 2, 2, 5);
+    import_selection(&app, project, &["a", "b", "0", "z"]).await;
+    let all = list(&app, project, "").await;
+    let id = |path: &str| all["images"].as_array().unwrap().iter().find(|image| image["path"] == path).unwrap()["id"].as_i64().unwrap();
+    let around = |image: i64| format!("/api/projects/{project}/images/{image}/neighbours?count=5&same_name=true");
+
+    let (_, page) = call(&app, Method::GET, &around(id("a/cat.png")), None).await;
+    assert_eq!((page["position"].as_i64(), page["total"].as_i64()), (Some(3), Some(4)));
+    assert_eq!(paths(&page), vec!["0/bird.png", "z/bird.png", "a/cat.png", "b/cat.png"]);
+    // a/dog.png is no namesake; it sits after every cat.
+    let (_, page) = call(&app, Method::GET, &around(id("a/dog.png")), None).await;
+    assert_eq!(page["position"], 5);
 }

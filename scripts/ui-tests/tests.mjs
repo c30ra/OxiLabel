@@ -875,6 +875,47 @@ tests.push({
   },
 });
 
+tests.push({
+  name: 'drawing a shape marks the image annotated, and removing it unmarks the image',
+  async run(t) {
+    const annotated = async () => (await t.api.call('GET', `/api/projects/${t.project.id}/images/${t.project.image}`)).annotated;
+    const button = () => t.b.eval(`document.querySelector('button.mark-annotated').classList.contains('done')`);
+    const w = await openWorkspace(t.b, t.base, t.project);
+    equal([await annotated(), await button()], [false, false], 'a new image');
+    await t.b.key('r');
+    await t.b.click(...w.at(100, 100));
+    await t.b.move(...w.at(200, 180), 80);
+    await t.b.click(...w.at(300, 250));
+    await saved(t, (list) => list.length === 1, 'the rectangle to be saved');
+    await t.b.waitFor(async () => (await annotated()) && (await button()), 'the image marked annotated');
+    await t.b.key('z', [KEY.ctrl]);
+    await saved(t, (list) => list.length === 0, 'the undo to be saved');
+    await t.b.waitFor(async () => !(await annotated()) && !(await button()), 'the image unmarked');
+  },
+});
+
+tests.push({
+  name: 'tool options and the last tool are kept on the next image, which opens with Select',
+  async run(t) {
+    writeTestImage(join(t.work, 'images', 'next', 'a.png'), 120, 80);
+    await t.api.call('POST', `/api/projects/${t.project.id}/imports`, { paths: ['next'] });
+    const [first, second] = await t.api.call('GET', `/api/projects/${t.project.id}/image-ids`);
+    const w = await openWorkspace(t.b, t.base, { ...t.project, image: first }, [120, 80]);
+    await t.b.move(...w.at(60, 40));
+    await t.b.key('l');
+    await clickOption(t, 'Freehand');
+    await t.b.key('v');
+    await t.b.key('j');
+    await t.b.waitFor(async () => (await t.b.eval('location.pathname')).endsWith(`/images/${second}`)
+      && (await t.b.eval(`document.querySelector('.image-position')?.textContent`)) === '2 / 2', 'the next image');
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('canvas.annotations')`), 'its editor');
+    equal((await w.state()).tool, 'Select', 'the tool on the next image');
+    await t.b.key('q');
+    const state = await w.state();
+    equal([state.tool, state.pie, await toolOptions(t)], ['Polyline', null, 'Click | Freehand* | Snap to edgesShift'], 'after a tap of Q');
+  },
+});
+
 // Creating a project (design A: a dialog, then a get-started checklist).
 tests.push({
   name: 'New project opens a dialog that copies labels and imports a folder, then opens the project',
@@ -1729,5 +1770,94 @@ tests.push({
     const list = await saved({ ...t, project: other }, (list) => list.length === 1, 'the pasted shape');
     equal(corners(list[0]), [10, 10, 50, 40], 'the shape that fits');
     equal(await t.b.eval(`document.querySelector('.notice')?.textContent ?? null`), '2 shapes not pasted: 1 too big for this image, 1 shape type not allowed by its label.', 'notice');
+  },
+});
+
+tests.push({
+  name: 'tool options and the last tool survive reloading the editor',
+  async run(t) {
+    let w = await openWorkspace(t.b, t.base, t.project);
+    await t.b.move(...w.at(800, 500));
+    await t.b.key('l');
+    await clickOption(t, 'Freehand');
+    await t.b.key('v');
+    w = await openWorkspace(t.b, t.base, t.project);
+    equal((await w.state()).tool, 'Select', 'the tool after reloading');
+    await t.b.key('q');
+    equal([(await w.state()).tool, await toolOptions(t)], ['Polyline', 'Click | Freehand* | Snap to edgesShift'], 'after a tap of Q');
+  },
+});
+
+/** Imports two images named cat.png (in a and b) and a dog.png; a/cat.png gets a rectangle. */
+async function namesakes(t) {
+  writeTestImage(join(t.work, 'images', 'dup', 'a', 'cat.png'), 120, 80);
+  writeTestImage(join(t.work, 'images', 'dup', 'b', 'cat.png'), 90, 60);
+  writeTestImage(join(t.work, 'images', 'dup', 'a', 'dog.png'), 70, 50);
+  await t.api.call('POST', `/api/projects/${t.project.id}/imports`, { paths: ['dup'] });
+  const page = await t.api.call('GET', `/api/projects/${t.project.id}/images`);
+  const id = (path) => page.images.find((image) => image.path === path).id;
+  const [label] = await t.api.call('GET', `/api/projects/${t.project.id}/labels`);
+  const rectangle = { label: label.id, shape: { type: 'rectangle', min: { x: 1, y: 1 }, max: { x: 9, y: 9 } } };
+  await t.api.call('PUT', `/api/projects/${t.project.id}/images/${id('dup/a/cat.png')}/annotations`, { base_version: 0, annotations: [rectangle] });
+  return { a: id('dup/a/cat.png'), b: id('dup/b/cat.png'), label };
+}
+
+const sameNameCheckbox = `[...document.querySelectorAll('.filter-panel label.check')].find((x) => x.textContent.includes('Shared with another image')).querySelector('input')`;
+
+tests.push({
+  name: 'the grid groups images sharing a file name with their details, previews one, and warns before discarding annotations',
+  async run(t) {
+    await namesakes(t);
+    await t.b.goto(`${t.base}/projects/${t.project.id}`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.grid li')`), 'the grid');
+    await t.b.eval(`[...document.querySelectorAll('.toolbar button')].find((x) => x.textContent.startsWith('Filters')).click()`);
+    await t.b.eval(`${sameNameCheckbox}.click()`);
+    await t.b.waitFor(() => t.b.eval(`document.querySelectorAll('.name-group .grid li').length === 2`), 'one group of two');
+    equal(await t.b.eval(`document.querySelector('.name-group h4 .mono').textContent`), 'cat.png', 'the group name');
+    const details = await t.b.json(`[...document.querySelectorAll('.name-group .details')].map((x) => [...x.querySelectorAll('dt')].map((d) => d.textContent + ': ' + d.nextElementSibling.textContent).filter((l) => /Dimensions|Path/.test(l)))`);
+    equal(details, [['Path: dup/a/cat.png', 'Dimensions: 120 × 80 px'], ['Path: dup/b/cat.png', 'Dimensions: 90 × 60 px']], 'tile details');
+    equal(await t.b.eval(`[...document.querySelectorAll('.name-group .details dt')].some((d) => d.textContent === 'Modified')`), true, 'a modification date');
+
+    const thumb = await t.b.json(`document.querySelector('.name-group a.open').getBoundingClientRect()`);
+    await t.b.click(thumb.x + thumb.width / 2, thumb.y + thumb.height / 2);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.preview-dialog canvas.viewer')`), 'the zoomable preview');
+    equal(await t.b.eval('location.pathname'), `/projects/${t.project.id}`, 'still on the grid');
+    await t.b.key(KEY.escape);
+    await t.b.waitFor(() => t.b.eval(`!document.querySelector('.preview-dialog')`), 'the preview closed');
+
+    await t.b.eval(`document.querySelector('.name-group .pick').click()`);
+    await t.b.eval(`[...document.querySelectorAll('.selection-bar button')].find((x) => x.textContent.startsWith('Remove')).click()`);
+    await t.b.waitFor(() => t.b.eval(`document.querySelector('.selection-bar')?.textContent.includes('Its 1 annotation is discarded.')`), 'the annotation warning');
+
+    // The filter survives reloading the page.
+    await t.b.goto(`${t.base}/projects/${t.project.id}`);
+    await t.b.waitFor(() => t.b.eval(`document.querySelectorAll('.name-group .grid li').length === 2`), 'the group after reloading');
+  },
+});
+
+tests.push({
+  name: 'the editor moves through the images the grid filter shows, and its filter is the grid\'s',
+  async run(t) {
+    const { a, b } = await namesakes(t);
+    await t.b.goto(`${t.base}/projects/${t.project.id}`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.grid li')`), 'the grid');
+    await t.b.eval(`[...document.querySelectorAll('.toolbar button')].find((x) => x.textContent.startsWith('Filters')).click()`);
+    await t.b.eval(`${sameNameCheckbox}.click()`);
+    await t.b.waitFor(() => t.b.eval(`document.querySelectorAll('.name-group .grid li').length === 2`), 'the filtered grid');
+
+    await openWorkspace(t.b, t.base, { ...t.project, image: a }, [120, 80]);
+    const position = () => t.b.eval(`document.querySelector('.image-position')?.textContent`);
+    await t.b.waitFor(async () => (await position()) === '1 / 2', 'the position among namesakes');
+    equal(await t.b.eval(`document.querySelector('.image-filter button').textContent`), 'Images · 1 filters', 'the filter chip');
+    await t.b.key('j');
+    await t.b.waitFor(async () => (await t.b.eval('location.pathname')).endsWith(`/images/${b}`) && (await position()) === '2 / 2', 'the other cat');
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('canvas.annotations')`), 'its editor');
+
+    // Clearing it in the editor clears it in the grid.
+    await t.b.eval(`document.querySelector('.image-filter button').click()`);
+    await t.b.eval(`${sameNameCheckbox}.click()`);
+    await t.b.waitFor(async () => (await position()) === '3 / 4', 'every image');
+    await t.b.goto(`${t.base}/projects/${t.project.id}`);
+    await t.b.waitFor(() => t.b.eval(`document.querySelectorAll('.grid li').length === 4 && !document.querySelector('.name-group')`), 'the unfiltered grid');
   },
 });

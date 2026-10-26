@@ -1,28 +1,61 @@
 use std::collections::BTreeSet;
 
 use leptos::{ev::MouseEvent, prelude::*, task::spawn_local};
-use oxilabel_core::{Image, ImageFilter, ImagePage, RemovalReport, RemovalRequest, job::Job};
+use oxilabel_core::{Image, ImageFilter, ImagePage, Label, RemovalReport, RemovalRequest, job::Job, view::View};
+use serde::{Deserialize, Serialize};
 
 use super::jobs::{CreateJobsDialog, job_name};
 use crate::{
     account::is_admin,
     api,
     prefs::{prefs, press},
+    image_filter::{self, FilterPanel},
+    viewer::TileViewer,
 };
 use oxilabel_core::keymap::Action;
 
 const PAGE_SIZES: [i64; 4] = [30, 60, 120, 240];
-const BYTES_PER_MB: f64 = 1_000_000.0;
+/// The grid's page, kept in session storage so it survives reloading the page (the filter is
+/// kept with the editor's, see `image_filter`).
+#[derive(Serialize, Deserialize)]
+struct Saved {
+    offset: i64,
+    page_size: i64,
+    filters_open: bool,
+}
+
+fn storage_key(project: i64) -> String {
+    format!("oxilabel.image-grid.{project}")
+}
+
+fn storage() -> Option<web_sys::Storage> {
+    window().session_storage().ok().flatten()
+}
 
 /// Paged, filterable grid of the project's image thumbnails. `version` changes whenever images were added.
 /// Images can be selected (checkbox, or click once something is selected; shift-click for a range;
 /// A selects all matching images, Alt+A clears) and removed from the project.
 #[component]
 pub fn ImageSet(project: i64, version: RwSignal<u32>, selected: RwSignal<BTreeSet<i64>>) -> impl IntoView {
-    let offset = RwSignal::new(0_i64);
-    let page_size = RwSignal::new(60_i64);
-    let filter = RwSignal::new(ImageFilter::default());
-    let filters_open = RwSignal::new(false);
+    let saved = storage()
+        .and_then(|storage| storage.get_item(&storage_key(project)).ok().flatten())
+        .and_then(|text| serde_json::from_str::<Saved>(&text).ok());
+    let offset = RwSignal::new(saved.as_ref().map_or(0, |saved| saved.offset.max(0)));
+    let page_size = RwSignal::new(saved.as_ref().map_or(60, |saved| saved.page_size).clamp(1, 500));
+    let filters_open = RwSignal::new(saved.as_ref().is_some_and(|saved| saved.filters_open));
+    let filter = image_filter::shared(project);
+    Effect::new(move |_| {
+        let saved = Saved { offset: offset.get(), page_size: page_size.get(), filters_open: filters_open.get() };
+        if let (Some(storage), Ok(text)) = (storage(), serde_json::to_string(&saved)) {
+            storage.set_item(&storage_key(project), &text).ok();
+        }
+    });
+    let labels = LocalResource::new(move || async move {
+        api::get::<Vec<Label>>(&format!("/api/projects/{project}/labels")).await.unwrap_or_default()
+    });
+    let preview = RwSignal::new(None::<Image>);
+    // Annotations the confirmed removal would discard; `None` while they are counted.
+    let doomed = RwSignal::new(None::<u64>);
     let total = RwSignal::new(0_i64);
     let anchor = RwSignal::new(None::<usize>);
     let confirming = RwSignal::new(false);
@@ -52,6 +85,11 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>, selected: RwSignal<BTreeSe
     Effect::new(move |_| {
         if let Some(Ok(page)) = images.get() {
             total.set(page.total);
+            // The filter may have changed in the editor since this page was left.
+            let size = page_size.get_untracked();
+            if page.total > 0 && offset.get_untracked() >= page.total {
+                offset.set(((page.total - 1) / size) * size);
+            }
         }
     });
     let page_ids = move || match images.get() {
@@ -108,9 +146,20 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>, selected: RwSignal<BTreeSe
             busy.set(false);
         });
     };
+    let confirm = move || {
+        confirming.set(true);
+        doomed.set(None);
+        let request = RemovalRequest { ids: selected.get_untracked().into_iter().collect(), dry_run: true };
+        spawn_local(async move {
+            if let Ok(report) = api::post::<_, RemovalReport>(&format!("/api/projects/{project}/image-removals"), &request).await {
+                doomed.set(Some(report.annotations));
+            }
+        });
+    };
     let remove = move |_| {
         let request = RemovalRequest {
             ids: selected.get_untracked().into_iter().collect(),
+            dry_run: false,
         };
         busy.set(true);
         spawn_local(async move {
@@ -168,7 +217,7 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>, selected: RwSignal<BTreeSe
         } else if is(Action::Cancel) && has_selection {
             clear();
         } else if is(Action::Delete) && has_selection && admin {
-            confirming.set(true);
+            confirm();
         } else if is(Action::NextPage) {
             offset.update(|o| *o = (*o + size).min(((total.get_untracked() - 1).max(0) / size) * size));
         } else if is(Action::PreviousPage) {
@@ -180,18 +229,7 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>, selected: RwSignal<BTreeSe
     });
     on_cleanup(move || keys.remove());
 
-    let active_filters = move || {
-        let filter = filter.read();
-        [
-            filter.min_width.is_some() || filter.max_width.is_some(),
-            filter.min_height.is_some() || filter.max_height.is_some(),
-            filter.min_size.is_some() || filter.max_size.is_some(),
-            filter.modified_from.is_some() || filter.modified_to.is_some(),
-        ]
-        .into_iter()
-        .filter(|active| *active)
-        .count()
-    };
+    let active_filters = move || image_filter::panel_count(&filter.read());
 
     view! {
         <div class="image-set">
@@ -230,7 +268,7 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>, selected: RwSignal<BTreeSe
             </div>
 
             <Show when=move || filters_open.get()>
-                <FilterPanel filter=filter set_filter=set_filter />
+                <FilterPanel filter=filter set_filter=set_filter labels=Signal::derive(move || labels.get().unwrap_or_default()) />
             </Show>
 
             <Show when=move || !selected.read().is_empty()>
@@ -240,7 +278,15 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>, selected: RwSignal<BTreeSe
                         let noun = if count == 1 { "image" } else { "images" };
                         if confirming.get() {
                             view! {
-                                <span class="grow">{format!("Remove {count} {noun} from this project? The files stay on disk and can be imported again.")}</span>
+                                <span class="grow">
+                                    {format!("Remove {count} {noun} from this project? The files stay on disk and can be imported again.")}
+                                    {move || match doomed.get() {
+                                        Some(0) => None,
+                                        Some(1) => Some(view! { " " <strong class="warning">"Its 1 annotation is discarded."</strong> }.into_any()),
+                                        Some(n) => Some(view! { " " <strong class="warning">{format!("Their {n} annotations are discarded.")}</strong> }.into_any()),
+                                        None => Some(view! { <span class="muted">" Counting annotations…"</span> }.into_any()),
+                                    }}
+                                </span>
                                 <button on:click=move |_| confirming.set(false)>"Cancel"</button>
                                 <button class="danger" disabled=move || busy.get() on:click=remove>
                                     {move || if busy.get() { "Removing…" } else { "Remove" }}
@@ -253,7 +299,7 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>, selected: RwSignal<BTreeSe
                                 <button title="Alt+A" on:click=move |_| clear()>"Clear"</button>
                                 {admin.then(|| view! {
                                     <button class="create-jobs" on:click=move |_| creating_jobs.set(true)>"Create jobs…"</button>
-                                    <button class="danger" title="Delete" on:click=move |_| confirming.set(true)>"Remove from project…"</button>
+                                    <button class="danger" title="Delete" on:click=move |_| confirm()>"Remove from project…"</button>
                                 })}
                             }.into_any()
                         }
@@ -270,15 +316,37 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>, selected: RwSignal<BTreeSe
                         .into_any()
                 }
                 Some(Ok(page)) if page.total == 0 => view! { <p class="muted">"No images match the filter."</p> }.into_any(),
+                Some(Ok(page)) if filter.read_untracked().same_name => {
+                    // One grid per file name, with the details to choose which namesake to keep.
+                    let mut groups: Vec<(String, Vec<(usize, Image)>)> = Vec::new();
+                    for (index, image) in page.images.into_iter().enumerate() {
+                        let name = file_name(&image.path).to_owned();
+                        match groups.last_mut() {
+                            Some((last, members)) if *last == name => members.push((index, image)),
+                            _ => groups.push((name, vec![(index, image)])),
+                        }
+                    }
+                    groups.into_iter().map(|(name, members)| view! {
+                        <section class="name-group" aria-label=name.clone()>
+                            <h4><span class="mono">{name.clone()}</span><span class="muted">{format!(" · {} on this page", members.len())}</span></h4>
+                            <ul class="grid detailed" class:selecting=move || !selected.read().is_empty()>
+                                {members.into_iter().map(|(index, image)| view! {
+                                    <Tile project=project image=image selected=selected preview=Some(preview) on_click=move |shift| click(index, shift) />
+                                }).collect_view()}
+                            </ul>
+                        </section>
+                    }).collect_view().into_any()
+                }
                 Some(Ok(page)) => view! {
                     <ul class="grid" class:selecting=move || !selected.read().is_empty()>
                         {page.images.into_iter().enumerate().map(|(index, image)| {
-                            view! { <Tile project=project image=image selected=selected on_click=move |shift| click(index, shift) /> }
+                            view! { <Tile project=project image=image selected=selected preview=None on_click=move |shift| click(index, shift) /> }
                         }).collect_view()}
                     </ul>
                 }
                 .into_any(),
             }}
+            {move || preview.get().map(|image| view! { <Preview project=project image=image on_close=move || preview.set(None) /> })}
             <Show when=move || creating_jobs.get()>
                 <CreateJobsDialog project=project selected=selected
                     on_created=move || version.update(|v| *v += 1)
@@ -288,25 +356,25 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>, selected: RwSignal<BTreeSe
     }
 }
 
+/// One image of the grid. With `preview` the tile lists the image's file details, and clicking the
+/// thumbnail opens it there (zoomable) instead of in the editor.
 #[component]
 fn Tile(
     project: i64,
     image: Image,
     selected: RwSignal<BTreeSet<i64>>,
+    preview: Option<RwSignal<Option<Image>>>,
     on_click: impl Fn(bool) + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
     let id = image.id;
-    let name = image.path.rsplit('/').next().unwrap_or_default().to_owned();
-    let mut details = vec![
-        image.path.clone(),
-        format!("{} × {} px", image.width, image.height),
-    ];
-    details.extend(image.size.map(human_size));
-    details.extend(image.modified.clone());
+    let name = file_name(&image.path).to_owned();
+    let details = file_details(&image);
     let is_selected = move || selected.read().contains(&id);
+    let shown = image.clone();
+    let tooltip = details.iter().map(|(_, value)| value.as_str()).collect::<Vec<_>>().join("\n");
     view! {
         // A click opens the image, unless something is selected: then it adds to the selection.
-        <li title=details.join("\n") class:selected=is_selected
+        <li title=tooltip class:selected=is_selected
             on:click=move |ev: MouseEvent| if !selected.read_untracked().is_empty() {
                 ev.prevent_default();
                 on_click(ev.shift_key());
@@ -316,7 +384,11 @@ fn Tile(
                     ev.stop_propagation();
                     on_click(ev.shift_key());
                 } />
-            <a class="open" href=format!("/projects/{project}/images/{id}")>
+            <a class="open" href=format!("/projects/{project}/images/{id}")
+                on:click=move |ev: MouseEvent| if let Some(preview) = preview.filter(|_| selected.read_untracked().is_empty()) {
+                    ev.prevent_default();
+                    preview.set(Some(shown.clone()));
+                }>
                 <img loading="lazy" alt="" src=format!("/api/images/{id}/thumbnail") />
                 <span class="caption">
                     <span class=if image.annotated { "status-dot done" } else { "status-dot" }
@@ -327,8 +399,68 @@ fn Tile(
                     })}
                 </span>
             </a>
+            {preview.is_some().then(|| view! { <Details details=details.clone() /> })}
         </li>
     }
+}
+
+/// The file details of an image as (term, value) pairs: path, dimensions, size and dates.
+fn file_details(image: &Image) -> Vec<(&'static str, String)> {
+    let mut details = vec![("Path", image.path.clone()), ("Dimensions", format!("{} × {} px", image.width, image.height))];
+    details.extend(image.size.map(|size| ("Size", human_size(size))));
+    details.extend(image.created.clone().map(|date| ("Created", date)));
+    details.extend(image.modified.clone().map(|date| ("Modified", date)));
+    details
+}
+
+#[component]
+fn Details(details: Vec<(&'static str, String)>) -> impl IntoView {
+    view! {
+        <dl class="details">
+            {details.into_iter().map(|(term, value)| view! { <dt>{term}</dt><dd class="mono" title=value.clone()>{value.clone()}</dd> }).collect_view()}
+        </dl>
+    }
+}
+
+/// The image at full resolution in a dialog: scroll to zoom, drag with the middle button or
+/// Space held to pan, Home to fit.
+#[component]
+fn Preview(project: i64, image: Image, on_close: impl Fn() + Copy + Send + Sync + 'static) -> impl IntoView {
+    let id = image.id;
+    let details = file_details(&image);
+    let title = file_name(&image.path).to_owned();
+    let view = RwSignal::new(None::<View>);
+    let size = RwSignal::new((0.0, 0.0));
+    let space_held = RwSignal::new(false);
+    let loading = RwSignal::new(false);
+    let keys = window_event_listener(leptos::ev::keydown, move |ev| if ev.key() == "Escape" { on_close() });
+    on_cleanup(move || keys.remove());
+    view! {
+        <div class="backdrop" on:click=move |_| on_close()>
+            <div class="dialog preview-dialog" role="dialog" aria-modal="true" aria-labelledby="preview-title"
+                on:click=|ev| ev.stop_propagation()>
+                <div class="dialog-head">
+                    <div>
+                        <h2 id="preview-title">{title}</h2>
+                        <p class="muted">"Scroll to zoom, middle-drag to pan, Home to fit."</p>
+                    </div>
+                    <a class="button" href=format!("/projects/{project}/images/{id}")>"Open in editor"</a>
+                    <button class="icon" aria-label="Close" on:click=move |_| on_close()>"✕"</button>
+                </div>
+                <div class="preview-body">
+                    <TileViewer image=image view=view size=size space_held=space_held
+                        filter=Signal::stored(None) css_filter=Signal::stored(String::new()) loading=loading>
+                        ""
+                    </TileViewer>
+                    <Details details=details />
+                </div>
+            </div>
+        </div>
+    }
+}
+
+fn file_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or_default()
 }
 
 /// First/previous/next/last buttons, a page number field to jump to, and the page size.
@@ -382,68 +514,6 @@ fn Pager(
                 }).collect_view()}
             </select>
         </nav>
-    }
-}
-
-/// Width, height, file size and date bounds. Each field applies when it is changed.
-#[component]
-fn FilterPanel(
-    filter: RwSignal<ImageFilter>,
-    set_filter: impl Fn(&dyn Fn(&mut ImageFilter)) + Copy + Send + Sync + 'static,
-) -> impl IntoView {
-    let number = |text: &str| text.trim().parse::<u32>().ok();
-    let megabytes = |text: &str| {
-        text.trim()
-            .parse::<f64>()
-            .ok()
-            .filter(|mb| *mb >= 0.0)
-            .map(|mb| (mb * BYTES_PER_MB).round() as u64)
-    };
-    let show_mb = |bytes: Option<u64>| {
-        bytes
-            .map(|b| format!("{}", b as f64 / BYTES_PER_MB))
-            .unwrap_or_default()
-    };
-    let show = |value: Option<u32>| value.map(|v| v.to_string()).unwrap_or_default();
-    let text = |value: &Option<String>| value.clone().unwrap_or_default();
-    let date = |value: String| Some(value).filter(|v| !v.is_empty());
-
-    view! {
-        <div class="filter-panel" role="group" aria-label="Filters">
-            <fieldset>
-                <legend>"Width (px)"</legend>
-                <input type="number" min="0" placeholder="min" aria-label="Minimum width" prop:value=move || show(filter.read().min_width)
-                    on:change:target=move |ev| { let v = number(&ev.target().value()); set_filter(&|f| f.min_width = v) } />
-                <span class="muted">"–"</span>
-                <input type="number" min="0" placeholder="max" aria-label="Maximum width" prop:value=move || show(filter.read().max_width)
-                    on:change:target=move |ev| { let v = number(&ev.target().value()); set_filter(&|f| f.max_width = v) } />
-            </fieldset>
-            <fieldset>
-                <legend>"Height (px)"</legend>
-                <input type="number" min="0" placeholder="min" aria-label="Minimum height" prop:value=move || show(filter.read().min_height)
-                    on:change:target=move |ev| { let v = number(&ev.target().value()); set_filter(&|f| f.min_height = v) } />
-                <span class="muted">"–"</span>
-                <input type="number" min="0" placeholder="max" aria-label="Maximum height" prop:value=move || show(filter.read().max_height)
-                    on:change:target=move |ev| { let v = number(&ev.target().value()); set_filter(&|f| f.max_height = v) } />
-            </fieldset>
-            <fieldset>
-                <legend>"File size (MB)"</legend>
-                <input type="number" min="0" step="0.1" placeholder="min" aria-label="Minimum file size in MB" prop:value=move || show_mb(filter.read().min_size)
-                    on:change:target=move |ev| { let v = megabytes(&ev.target().value()); set_filter(&|f| f.min_size = v) } />
-                <span class="muted">"–"</span>
-                <input type="number" min="0" step="0.1" placeholder="max" aria-label="Maximum file size in MB" prop:value=move || show_mb(filter.read().max_size)
-                    on:change:target=move |ev| { let v = megabytes(&ev.target().value()); set_filter(&|f| f.max_size = v) } />
-            </fieldset>
-            <fieldset>
-                <legend>"Modified"</legend>
-                <input type="date" aria-label="Modified from" prop:value=move || text(&filter.read().modified_from)
-                    on:change:target=move |ev| { let v = date(ev.target().value()); set_filter(&|f| f.modified_from = v.clone()) } />
-                <span class="muted">"–"</span>
-                <input type="date" aria-label="Modified until" prop:value=move || text(&filter.read().modified_to)
-                    on:change:target=move |ev| { let v = date(ev.target().value()); set_filter(&|f| f.modified_to = v.clone()) } />
-            </fieldset>
-            <button on:click=move |_| set_filter(&|f| *f = ImageFilter { name: f.name.clone(), job: f.job, without_job: f.without_job, ..ImageFilter::default() })>"Clear filters"</button>
-        </div>
     }
 }
 

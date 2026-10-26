@@ -11,6 +11,8 @@ argon2 = "0.5"
 # The operating system's random numbers, for salts and session tokens.
 password-hash = { version = "0.5", features = ["getrandom"] }
 blake3 = "1"
+# Turns a long operation's progress into server-sent events.
+futures-util = { version = "0.3", default-features = false }
 ashpd = { version = "0.11", default-features = false, features = ["tokio"] }
 # Stops the worker's whole process group on shutdown.
 libc = "0.2"
@@ -26,7 +28,7 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 tower = "0.5"
 tower-http = { version = "0.6", features = ["fs", "set-header"] }
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "fs", "process", "signal", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "fs", "process", "signal", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["io"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 

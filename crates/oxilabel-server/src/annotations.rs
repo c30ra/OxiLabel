@@ -7,7 +7,7 @@ use axum::{
 };
 use oxilabel_core::{
     Label,
-    annotation::{Annotation, ImageAnnotations, SaveAnnotations},
+    annotation::{Annotation, ImageAnnotations, SaveAnnotations, counts_as_annotated},
 };
 use sqlx::{Row, SqliteConnection, SqlitePool};
 
@@ -39,12 +39,13 @@ async fn load_annotations(
     let mut conn = pool.acquire().await?;
     let (_, _, version) = image_in_project(&mut conn, project, image).await?;
     jobs::ensure_image_access(&mut conn, &user, image).await?;
+    let annotated = sqlx::query_scalar("SELECT annotated FROM images WHERE id = ?").bind(image).fetch_one(&mut *conn).await?;
     let rows = sqlx::query("SELECT label_id, shape, source, confidence, attributes, hidden, locked, pending FROM annotations WHERE image_id = ? ORDER BY position")
         .bind(image)
         .fetch_all(&mut *conn)
         .await?;
     let annotations = rows.iter().map(annotation_from_row).collect::<Result<_, ApiError>>()?;
-    Ok(Json(ImageAnnotations { version, annotations }))
+    Ok(Json(ImageAnnotations { version, annotations, annotated }))
 }
 
 /// Reads an annotation from a row with `label_id`, `shape`, `source`, `confidence`,
@@ -94,8 +95,11 @@ async fn save_annotations(
         }
     }
 
-    // Checking and bumping the version in one statement keeps concurrent saves safe.
-    let bumped = sqlx::query("UPDATE images SET version = version + 1 WHERE id = ? AND version = ?")
+    // Checking and bumping the version in one statement keeps concurrent saves safe. The status
+    // follows the work: the first reviewed annotation marks the image, removing the last unmarks it.
+    let annotated = counts_as_annotated(&request.annotations);
+    let bumped = sqlx::query("UPDATE images SET version = version + 1, annotated = ? WHERE id = ? AND version = ?")
+        .bind(annotated)
         .bind(image)
         .bind(request.base_version)
         .execute(&mut *tx)
@@ -107,7 +111,7 @@ async fn save_annotations(
     sqlx::query("DELETE FROM annotations WHERE image_id = ?").bind(image).execute(&mut *tx).await?;
     insert_annotations(&mut tx, project, image, 0, &request.annotations).await?;
     tx.commit().await?;
-    Ok(Json(ImageAnnotations { version: request.base_version + 1, annotations: request.annotations }))
+    Ok(Json(ImageAnnotations { version: request.base_version + 1, annotations: request.annotations, annotated }))
 }
 
 /// Checks that `label` allows the annotation's shape, the shape lies in a `width` × `height`

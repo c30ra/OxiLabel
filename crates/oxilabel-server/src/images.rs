@@ -8,6 +8,7 @@ use std::{
 use axum::{
     Json, Router,
     extract::{Path as UrlPath, Query, State},
+    response::Response,
     routing::{get, post, put},
 };
 use oxilabel_core::{
@@ -22,7 +23,9 @@ use crate::{
     auth::{Admin, CurrentUser},
     error::ApiError,
     host::Caller,
-    jobs, projects,
+    jobs,
+    progress::{Reporter, Streaming},
+    projects,
 };
 
 const SUPPORTED_EXTENSIONS: [&str; 7] = ["bmp", "jpeg", "jpg", "png", "tif", "tiff", "webp"];
@@ -129,9 +132,10 @@ async fn import_selection(
     _: Admin,
     State(state): State<AppState>,
     caller: Caller,
+    streaming: Streaming,
     UrlPath(project): UrlPath<i64>,
     Json(request): Json<ImportRequest>,
-) -> Result<Json<ImportReport>, ApiError> {
+) -> Result<Response, ApiError> {
     let mut conn = state.pool.acquire().await?;
     projects::ensure_exists(&mut conn, project).await?;
     if request.paths.is_empty() {
@@ -143,14 +147,19 @@ async fn import_selection(
     // Don't hold a database connection through a scan that may take minutes.
     drop(conn);
 
-    let (report, new_images) = tokio::task::spawn_blocking(move || scan(&root, &selection, known))
-        .await
-        .expect("image scan panicked");
-
-    let mut tx = state.pool.begin().await?;
-    add_images(&mut tx, project, &new_images).await?;
-    tx.commit().await?;
-    Ok(Json(report))
+    // Each file read is a step; closing the stream stops the scan and adds nothing.
+    Ok(streaming
+        .run(move |progress| async move {
+            let (report, new_images) = tokio::task::spawn_blocking(move || scan(&root, &selection, known, &progress))
+                .await
+                .expect("image scan panicked")
+                .ok_or_else(|| ApiError::Conflict("the import was cancelled".into()))?;
+            let mut tx = state.pool.begin().await?;
+            add_images(&mut tx, project, &new_images).await?;
+            tx.commit().await?;
+            Ok(report)
+        })
+        .await)
 }
 
 /// Records `new_images` in the project and returns their ids, in order.
@@ -158,7 +167,7 @@ pub(crate) async fn add_images(conn: &mut SqliteConnection, project: i64, new_im
     let mut ids = Vec::with_capacity(new_images.len());
     for image in new_images {
         let id = sqlx::query_scalar(
-            "INSERT INTO images (project_id, path, hash, width, height, size, modified_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
+            "INSERT INTO images (project_id, path, hash, width, height, size, modified_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
         )
         .bind(project)
         .bind(&image.path)
@@ -167,6 +176,7 @@ pub(crate) async fn add_images(conn: &mut SqliteConnection, project: i64, new_im
         .bind(image.height)
         .bind(image.file.size)
         .bind(image.file.modified_at)
+        .bind(image.file.created_at)
         .fetch_one(&mut *conn)
         .await?;
         ids.push(id);
@@ -209,17 +219,24 @@ async fn remove_images(
     if request.ids.is_empty() {
         return Err(ApiError::BadRequest("select at least one image".into()));
     }
-    let mut removed = 0;
+    let (mut removed, mut annotations) = (0, 0);
     for id in request.ids {
-        removed += sqlx::query("DELETE FROM images WHERE id = ? AND project_id = ?")
-            .bind(id)
-            .bind(project)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
+        let row = sqlx::query(
+            "SELECT (SELECT COUNT(*) FROM annotations WHERE image_id = images.id) AS annotations FROM images WHERE id = ? AND project_id = ?",
+        )
+        .bind(id)
+        .bind(project)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(row) = row else { continue };
+        removed += 1;
+        annotations += row.get::<i64, _>("annotations") as u64;
+        if !request.dry_run {
+            sqlx::query("DELETE FROM images WHERE id = ?").bind(id).execute(&mut *tx).await?;
+        }
     }
     tx.commit().await?;
-    Ok(Json(RemovalReport { removed }))
+    Ok(Json(RemovalReport { removed, annotations }))
 }
 
 pub(crate) fn image_root(state: &AppState) -> Result<PathBuf, ApiError> {
@@ -266,27 +283,28 @@ pub(crate) struct NewImage {
     file: FileInfo,
 }
 
-/// Size in bytes and modification time in Unix seconds, as stored in the `images` table.
+/// Size in bytes and modification and creation times in Unix seconds, as stored in the `images` table.
 #[derive(Clone, Copy)]
 struct FileInfo {
     size: i64,
     modified_at: Option<i64>,
+    created_at: Option<i64>,
 }
 
 impl FileInfo {
     fn of(metadata: &fs::Metadata) -> Self {
-        let modified_at = metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|age| age.as_secs() as i64);
-        FileInfo { size: metadata.len() as i64, modified_at }
+        let seconds = |time: std::io::Result<std::time::SystemTime>| {
+            time.ok().and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).map(|age| age.as_secs() as i64)
+        };
+        FileInfo { size: metadata.len() as i64, modified_at: seconds(metadata.modified()), created_at: seconds(metadata.created()) }
     }
 }
 
 /// Reads every image in the selection that is not already known. Folders are walked recursively;
 /// a file reached twice (selected on its own and through its folder) is handled once.
-fn scan(root: &Path, selection: &[PathBuf], mut known: Known) -> (ImportReport, Vec<NewImage>) {
+/// Reads the images in `selection` that `known` lacks, telling `progress` after each file; none
+/// if it says to stop.
+fn scan(root: &Path, selection: &[PathBuf], mut known: Known, progress: &Reporter) -> Option<(ImportReport, Vec<NewImage>)> {
     let mut files = BTreeSet::new();
     for path in selection {
         if path.is_dir() {
@@ -298,7 +316,11 @@ fn scan(root: &Path, selection: &[PathBuf], mut known: Known) -> (ImportReport, 
 
     let mut report = ImportReport::default();
     let mut new_images = Vec::new();
-    for file in files {
+    let total = files.len() as u64;
+    for (done, file) in files.into_iter().enumerate() {
+        if !progress.report(done as u64, total) {
+            return None;
+        }
         let path = relative_path(root, &file);
         if !is_supported(&file) {
             report.unsupported += 1;
@@ -318,7 +340,8 @@ fn scan(root: &Path, selection: &[PathBuf], mut known: Known) -> (ImportReport, 
             Err(reason) => report.failed.push(ImportFailure { path, reason }),
         }
     }
-    (report, new_images)
+    progress.report(total, total);
+    Some((report, new_images))
 }
 
 fn collect_files(dir: &Path, files: &mut BTreeSet<PathBuf>) {
@@ -382,10 +405,11 @@ async fn upload_images(
     let root = image_root(&state)?;
     let (report, new_images) = tokio::task::spawn_blocking({
         let stored = stored.clone();
-        move || scan(&root, &stored, known)
+        move || scan(&root, &stored, known, &Reporter::default())
     })
     .await
-    .expect("image scan panicked");
+    .expect("image scan panicked")
+    .expect("a scan reporting to no one runs to the end");
     let kept: BTreeSet<&str> = new_images.iter().map(|image| image.path.as_str()).collect();
     for file in &stored {
         if !kept.contains(file.to_string_lossy().as_ref()) {
@@ -424,10 +448,11 @@ fn read_image(file: &Path) -> Result<NewImage, String> {
     Ok(NewImage { path: String::new(), hash, width, height, file: info })
 }
 
-/// Fills in size and modification time for images recorded before they were stored.
-/// Files that are missing stay unknown.
+/// Fills in size, modification and creation time for images recorded before they were stored.
+/// Files that are missing stay unknown, and so do creation times the file system lacks (those
+/// files are looked at again on the next start).
 pub async fn backfill_file_info(pool: SqlitePool, root: PathBuf) {
-    let Ok(rows) = sqlx::query("SELECT id, path FROM images WHERE size IS NULL").fetch_all(&pool).await else { return };
+    let Ok(rows) = sqlx::query("SELECT id, path FROM images WHERE size IS NULL OR created_at IS NULL").fetch_all(&pool).await else { return };
     if rows.is_empty() {
         return;
     }
@@ -441,9 +466,10 @@ pub async fn backfill_file_info(pool: SqlitePool, root: PathBuf) {
     .unwrap_or_default();
     let Ok(mut tx) = pool.begin().await else { return };
     for (id, info) in found {
-        let updated = sqlx::query("UPDATE images SET size = ?, modified_at = ? WHERE id = ?")
+        let updated = sqlx::query("UPDATE images SET size = ?, modified_at = ?, created_at = ? WHERE id = ?")
             .bind(info.size)
             .bind(info.modified_at)
+            .bind(info.created_at)
             .bind(id)
             .execute(&mut *tx)
             .await;
@@ -491,6 +517,24 @@ fn push_filter(query: &mut QueryBuilder<'_, Sqlite>, project: i64, filter: &Imag
         }
         query.push(" AND path REGEXP ").push_bind(format!("(?i){name}"));
     }
+    if filter.same_name {
+        query
+            .push(" AND ")
+            .push(FILE_NAME)
+            .push(" IN (SELECT ")
+            .push(FILE_NAME)
+            .push(" FROM images WHERE project_id = ")
+            .push_bind(project)
+            .push(" GROUP BY 1 HAVING COUNT(*) > 1)");
+    }
+    if !filter.labels.is_empty() {
+        query.push(" AND id IN (SELECT image_id FROM annotations WHERE project_id = ").push_bind(project).push(" AND label_id IN (");
+        let mut ids = query.separated(", ");
+        for label in &filter.labels {
+            ids.push_bind(*label);
+        }
+        query.push("))");
+    }
     let bounds = [
         ("width >= ", filter.min_width.map(i64::from)),
         ("width <= ", filter.max_width.map(i64::from)),
@@ -516,6 +560,15 @@ fn push_filter(query: &mut QueryBuilder<'_, Sqlite>, project: i64, filter: &Imag
     Ok(())
 }
 
+/// An image's file name in SQL: its path after the last `/` (`rtrim` drops every character but `/`
+/// from the end).
+const FILE_NAME: &str = "substr(path, length(rtrim(path, replace(path, '/', ''))) + 1)";
+
+/// The order images are listed in: by path, or by file name first so namesakes are together.
+fn order(filter: &ImageFilter) -> String {
+    if filter.same_name { format!(" ORDER BY {FILE_NAME}, path") } else { " ORDER BY path".to_owned() }
+}
+
 fn is_date(text: &str) -> bool {
     let bytes = text.as_bytes();
     bytes.len() == 10
@@ -538,7 +591,8 @@ async fn list_images(
     let mut select = QueryBuilder::new(IMAGE_COLUMNS);
     push_filter(&mut select, project, &filter, user.job_owner())?;
     select
-        .push(" ORDER BY path LIMIT ")
+        .push(order(&filter))
+        .push(" LIMIT ")
         .push_bind(page.limit.clamp(1, MAX_PAGE_SIZE))
         .push(" OFFSET ")
         .push_bind(page.offset.max(0));
@@ -549,6 +603,7 @@ async fn list_images(
 /// Selects the columns `image_from_row` reads; callers append the conditions.
 const IMAGE_COLUMNS: &str = "SELECT id, path, width, height, annotated, size, \
      strftime('%Y-%m-%d %H:%M', modified_at, 'unixepoch', 'localtime') AS modified, \
+     strftime('%Y-%m-%d %H:%M', created_at, 'unixepoch', 'localtime') AS created, \
      (SELECT COUNT(*) FROM annotations WHERE annotations.image_id = images.id) AS annotation_count FROM images";
 
 fn image_from_row(row: &sqlx::sqlite::SqliteRow) -> Image {
@@ -561,6 +616,7 @@ fn image_from_row(row: &sqlx::sqlite::SqliteRow) -> Image {
         annotations: row.get("annotation_count"),
         size: row.get::<Option<i64>, _>("size").map(|size| size as u64),
         modified: row.get("modified"),
+        created: row.get("created"),
     }
 }
 
@@ -615,27 +671,33 @@ fn default_neighbours() -> i64 {
     6
 }
 
-/// An image's place among the project's images the user may open (by path) and up to `count`
-/// of those on each side, for the filmstrip.
+/// An image's place among the project's images the user may open that match the filter (in
+/// the order they are listed in) and up to `count` of those on each side, for the filmstrip.
+/// The image itself need not match: `position` is then where it would be.
 async fn neighbours(
     user: CurrentUser,
     State(pool): State<SqlitePool>,
     UrlPath((project, image)): UrlPath<(i64, i64)>,
     Query(query): Query<NeighboursQuery>,
+    Query(filter): Query<ImageFilter>,
 ) -> Result<Json<ImageNeighbours>, ApiError> {
     let path = visible_image(&pool, &user, project, image).await?.path;
     let count = query.count.clamp(0, 50);
-    let all = ImageFilter::default();
     let mut before = QueryBuilder::new("SELECT COUNT(*) AS n FROM images");
-    push_filter(&mut before, project, &all, user.job_owner())?;
-    before.push(" AND path < ").push_bind(&path);
+    push_filter(&mut before, project, &filter, user.job_owner())?;
+    if filter.same_name {
+        let name = path.rsplit('/').next().unwrap_or_default().to_owned();
+        before.push(format!(" AND ({FILE_NAME}, path) < (")).push_bind(name).push(", ").push_bind(&path).push(")");
+    } else {
+        before.push(" AND path < ").push_bind(&path);
+    }
     let before: i64 = before.build().fetch_one(&pool).await?.get("n");
     let mut total = QueryBuilder::new("SELECT COUNT(*) AS n FROM images");
-    push_filter(&mut total, project, &all, user.job_owner())?;
+    push_filter(&mut total, project, &filter, user.job_owner())?;
     let total: i64 = total.build().fetch_one(&pool).await?.get("n");
     let mut select = QueryBuilder::new(IMAGE_COLUMNS);
-    push_filter(&mut select, project, &all, user.job_owner())?;
-    select.push(" ORDER BY path LIMIT ").push_bind(2 * count + 1).push(" OFFSET ").push_bind((before - count).max(0));
+    push_filter(&mut select, project, &filter, user.job_owner())?;
+    select.push(order(&filter)).push(" LIMIT ").push_bind(2 * count + 1).push(" OFFSET ").push_bind((before - count).max(0));
     let rows = select.build().fetch_all(&pool).await?;
     // When fewer than `count` images come before, the window starts at the first and is shorter.
     let images: Vec<Image> = rows.iter().map(image_from_row).take((count + 1 + before.min(count)) as usize).collect();
@@ -653,7 +715,7 @@ async fn list_image_ids(
     jobs::ensure_project_visible(&mut conn, &user, project).await?;
     let mut select = QueryBuilder::new("SELECT id FROM images");
     push_filter(&mut select, project, &filter, user.job_owner())?;
-    select.push(" ORDER BY path");
+    select.push(order(&filter));
     let rows = select.build().fetch_all(&mut *conn).await?;
     Ok(Json(rows.iter().map(|row| row.get("id")).collect()))
 }

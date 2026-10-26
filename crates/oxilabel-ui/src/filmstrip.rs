@@ -1,11 +1,11 @@
 //! Moving through a project's images in the workspace: the image's position, the filmstrip of
 //! its neighbours with their status, the annotated status itself, and the keys: j next, k
 //! previous, gg first, G last (vim motions), Ctrl+Enter marks the image annotated and opens the
-//! next one.
+//! next one. Moving follows the image filter shared with the image grid (`image_filter`).
 
 use leptos::{ev, prelude::*, task::spawn_local};
 use leptos_router::hooks::use_navigate;
-use oxilabel_core::{Image, ImageNeighbours, ImageStatus};
+use oxilabel_core::{Image, ImageFilter, ImageNeighbours, ImageStatus};
 
 use oxilabel_core::keymap::Action;
 
@@ -28,7 +28,7 @@ type OpenUrl = Box<dyn Fn(&str)>;
 pub struct ImageNav {
     project: i64,
     image: i64,
-    /// Every image id of the project, in path order.
+    /// Every image id of the project matching the filter, in the order the grid lists them.
     ids: LocalResource<Result<Vec<i64>, String>>,
     neighbours: LocalResource<Result<ImageNeighbours, String>>,
     pub annotated: RwSignal<bool>,
@@ -39,16 +39,27 @@ pub struct ImageNav {
 }
 
 impl ImageNav {
-    pub fn new(project: i64, image: &Image) -> Self {
+    pub fn new(project: i64, image: &Image, filter: RwSignal<ImageFilter>) -> Self {
         let id = image.id;
         let changed = RwSignal::new(0_u32);
         ImageNav {
             project,
             image: id,
-            ids: LocalResource::new(move || async move { api::get::<Vec<i64>>(&format!("/api/projects/{project}/image-ids")).await }),
+            ids: LocalResource::new(move || {
+                let query = filter.get().to_query();
+                async move {
+                    let pairs: Vec<(&str, &str)> = query.iter().map(|(key, value)| (*key, value.as_str())).collect();
+                    api::get_with_query::<Vec<i64>>(&format!("/api/projects/{project}/image-ids"), &pairs).await
+                }
+            }),
             neighbours: LocalResource::new(move || {
                 changed.track();
-                async move { api::get::<ImageNeighbours>(&format!("/api/projects/{project}/images/{id}/neighbours?count={NEIGHBOURS}")).await }
+                let mut query = filter.get().to_query();
+                query.push(("count", NEIGHBOURS.to_string()));
+                async move {
+                    let pairs: Vec<(&str, &str)> = query.iter().map(|(key, value)| (*key, value.as_str())).collect();
+                    api::get_with_query::<ImageNeighbours>(&format!("/api/projects/{project}/images/{id}/neighbours"), &pairs).await
+                }
             }),
             annotated: RwSignal::new(image.annotated),
             changed,
@@ -67,14 +78,18 @@ impl ImageNav {
     }
 
     /// The image `step` places away (negative is back), the first (`i64::MIN`) or the last
-    /// (`i64::MAX`), if there is one.
+    /// (`i64::MAX`), if there is one. An open image the filter leaves out sits between the
+    /// matching images before and after it.
     fn target(&self, step: i64) -> Option<i64> {
         let ids = self.ids.get_untracked()?.ok()?;
-        let here = ids.iter().position(|&id| id == self.image)? as i64;
-        let index = match step {
-            i64::MIN => 0,
-            i64::MAX => ids.len() as i64 - 1,
-            step => here + step,
+        let index = match (step, ids.iter().position(|&id| id == self.image)) {
+            (i64::MIN, _) => 0,
+            (i64::MAX, _) => ids.len() as i64 - 1,
+            (step, Some(here)) => here as i64 + step,
+            (step, None) => {
+                let before = self.neighbours.get_untracked()?.ok()?.position - 1;
+                if step > 0 { before + step - 1 } else { before + step }
+            }
         };
         usize::try_from(index).ok().and_then(|index| ids.get(index).copied()).filter(|&id| id != self.image)
     }
@@ -111,8 +126,10 @@ impl ImageNav {
 pub fn ImagePosition(nav: ImageNav, editor: Editor) -> impl IntoView {
     let position = move || {
         let ids = nav.ids.get()?.ok()?;
-        let here = ids.iter().position(|&id| id == nav.image)?;
-        Some(format!("{} / {}", here + 1, ids.len()))
+        Some(match ids.iter().position(|&id| id == nav.image) {
+            Some(here) => format!("{} / {}", here + 1, ids.len()),
+            None => format!("– / {}", ids.len()),
+        })
     };
     view! {
         <span class="image-position mono">{position}</span>

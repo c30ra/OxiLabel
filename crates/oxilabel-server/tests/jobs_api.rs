@@ -236,7 +236,10 @@ async fn statistics_count_annotations_per_label_job_and_user() {
     save(&app, p, images[0], json!([rectangle(1), rectangle(1)])).await;
     save(&app, p, images[1], json!([rectangle(2)])).await;
     save(&app, p, images[2], json!([rectangle(1)])).await;
-    call(&app, Method::PUT, &format!("/api/projects/{p}/images/{}/status", images[0]), Some(json!({"annotated": true}))).await;
+    // Saving marked all three; b and c are unmarked by hand.
+    for image in [images[1], images[2]] {
+        call(&app, Method::PUT, &format!("/api/projects/{p}/images/{image}/status"), Some(json!({"annotated": false}))).await;
+    }
 
     let (status, statistics) = call(&app, Method::GET, &format!("/api/projects/{p}/statistics"), None).await;
     assert_eq!(status, StatusCode::OK);

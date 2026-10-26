@@ -299,6 +299,9 @@ pub struct Image {
     pub size: Option<u64>,
     /// File modification time as `YYYY-MM-DD HH:MM`, in the server's local time.
     pub modified: Option<String>,
+    /// File creation time, like `modified`; unknown where the file system does not record it.
+    #[serde(default)]
+    pub created: Option<String>,
 }
 
 /// Which images of a project to list. Every set field must match; `None` means no restriction.
@@ -323,6 +326,31 @@ pub struct ImageFilter {
     pub without_job: bool,
     /// Only images marked annotated (true) or not (false).
     pub annotated: Option<bool>,
+    /// Only images whose file name (the last part of the path) another image of the project
+    /// has too; they are listed by file name, so each group of namesakes is together.
+    #[serde(default)]
+    pub same_name: bool,
+    /// Only images with an annotation or tag of one of these labels. In a URL query they are
+    /// one comma-separated value.
+    #[serde(default, with = "comma_separated")]
+    pub labels: Vec<i64>,
+}
+
+mod comma_separated {
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+
+    pub fn serialize<S: Serializer>(ids: &[i64], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&super::join_ids(ids))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<i64>, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        text.split(',').filter(|id| !id.is_empty()).map(|id| id.trim().parse().map_err(D::Error::custom)).collect()
+    }
+}
+
+fn join_ids(ids: &[i64]) -> String {
+    ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",")
 }
 
 impl ImageFilter {
@@ -346,6 +374,8 @@ impl ImageFilter {
         push("job", self.job.map(|v| v.to_string()));
         push("without_job", self.without_job.then(|| "true".to_owned()));
         push("annotated", self.annotated.map(|v| v.to_string()));
+        push("same_name", self.same_name.then(|| "true".to_owned()));
+        push("labels", Some(join_ids(&self.labels)));
         pairs
     }
 
@@ -385,12 +415,18 @@ pub struct ImportRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemovalRequest {
     pub ids: Vec<i64>,
+    /// Only report what the removal would take out, without removing anything.
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
-/// How many images a removal took out; ids not in the project are ignored.
+/// How many images a removal took out, and how many annotations (tags included) went with them;
+/// ids not in the project are ignored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemovalReport {
     pub removed: u64,
+    #[serde(default)]
+    pub annotations: u64,
 }
 
 /// The folders and images directly inside one folder of the image root.
@@ -427,6 +463,13 @@ pub struct ImportReport {
     pub skipped: usize,
     pub unsupported: usize,
     pub failed: Vec<ImportFailure>,
+}
+
+/// How far a long operation is: `done` of `total` steps.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Progress {
+    pub done: u64,
+    pub total: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

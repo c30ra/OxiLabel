@@ -32,6 +32,7 @@ use std::{
 };
 
 use leptos::{ev, html, prelude::*};
+use serde::{Deserialize, Serialize};
 use oxilabel_core::{
     Footprint, Label, ShapeType,
     annotation::{Annotation, Shape, overlapping, topmost_at},
@@ -102,7 +103,7 @@ thread_local! {
     static CLIPBOARD: RefCell<Option<(i64, Vec<Annotation>)>> = const { RefCell::new(None) };
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Tool {
     Select,
     Rectangle,
@@ -177,6 +178,23 @@ pub struct Editor {
     pub revision: RwSignal<u64>,
     /// A short hint for the user, e.g. why a shape could not be drawn.
     pub notice: RwSignal<Option<String>>,
+    /// The drawing tools' options and the last tool, kept while moving between images.
+    pub tools: Tools,
+    /// The enhancement filter shown (its key; `None` for the original), set by the view filter.
+    pub view_filter: RwSignal<Option<String>>,
+    /// The shape types some label of the project allows; tools for others are disabled.
+    pub usable_shapes: RwSignal<Vec<ShapeType>>,
+    /// Whether a shape, stroke or other gesture is in progress (moving to another image waits).
+    pub busy: RwSignal<bool>,
+    /// Pending pre-annotations less confident than this are neither drawn nor picked.
+    pub pre_annotation_threshold: RwSignal<f64>,
+}
+
+/// The drawing tools' options and the last tool. They belong to the workspace rather than to one
+/// image's editor, so they stay the same when another image is opened, and are kept in session
+/// storage per project, so leaving the editor or reloading the page keeps them too.
+#[derive(Clone, Copy)]
+pub struct Tools {
     /// Rectangle options from the options pie: always square, always from the centre (Shift and
     /// Alt invert them while drawing), and three points for an oriented rectangle.
     pub square: RwSignal<bool>,
@@ -210,8 +228,6 @@ pub struct Editor {
     /// threshold), grown or shrunk by `edge_offset` image pixels.
     pub stop_at_edges: RwSignal<bool>,
     pub edge_offset: RwSignal<f64>,
-    /// The enhancement filter shown (its key; `None` for the original), set by the view filter.
-    pub view_filter: RwSignal<Option<String>>,
     /// Whether edge snapping, the edge-limited brush and the fuzzy fill analyse the filtered view
     /// instead of the original (ADR 0002).
     pub snap_filtered: RwSignal<bool>,
@@ -219,16 +235,114 @@ pub struct Editor {
     pub fill_filtered: RwSignal<bool>,
     /// The last drawing tool, label and modes, repeated by a tap of the pie key.
     pub last: RwSignal<Option<(Tool, i64, Modes)>>,
-    /// The shape types some label of the project allows; tools for others are disabled.
-    pub usable_shapes: RwSignal<Vec<ShapeType>>,
-    /// Whether a shape, stroke or other gesture is in progress (moving to another image waits).
-    pub busy: RwSignal<bool>,
-    /// Pending pre-annotations less confident than this are neither drawn nor picked.
-    pub pre_annotation_threshold: RwSignal<f64>,
+}
+
+/// What `Tools` keeps in session storage: options by name, and the last tool.
+#[derive(Default, Serialize, Deserialize)]
+struct SavedTools {
+    switches: HashMap<String, bool>,
+    numbers: HashMap<String, f64>,
+    last: Option<(Tool, i64, Modes)>,
+}
+
+impl Tools {
+    /// The options and last tool of `project` as last left in this browser tab, or the defaults.
+    pub fn for_project(project: Option<i64>) -> Self {
+        let tools = Tools::new();
+        let Some(project) = project else { return tools };
+        let key = format!("oxilabel.tools.{project}");
+        let storage = || window().session_storage().ok().flatten();
+        let saved: SavedTools = storage()
+            .and_then(|storage| storage.get_item(&key).ok().flatten())
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        for (name, signal) in tools.switches() {
+            if let Some(value) = saved.switches.get(name) {
+                signal.set(*value);
+            }
+        }
+        for (name, signal) in tools.numbers() {
+            if let Some(value) = saved.numbers.get(name).filter(|value| value.is_finite()) {
+                signal.set(*value);
+            }
+        }
+        tools.last.set(saved.last);
+        Effect::new(move |_| {
+            let saved = SavedTools {
+                switches: tools.switches().into_iter().map(|(name, signal)| (name.to_owned(), signal.get())).collect(),
+                numbers: tools.numbers().into_iter().map(|(name, signal)| (name.to_owned(), signal.get())).collect(),
+                last: tools.last.get(),
+            };
+            if let (Some(storage), Ok(text)) = (storage(), serde_json::to_string(&saved)) {
+                storage.set_item(&key, &text).ok();
+            }
+        });
+        tools
+    }
+
+    fn switches(&self) -> [(&'static str, RwSignal<bool>); 15] {
+        [
+            ("square", self.square),
+            ("from_centre", self.from_centre),
+            ("oriented", self.oriented),
+            ("snap", self.snap),
+            ("freehand", self.freehand),
+            ("single_point", self.single_point),
+            ("ellipse_from_centre", self.ellipse_from_centre),
+            ("eraser", self.eraser),
+            ("fill", self.fill),
+            ("contiguous", self.contiguous),
+            ("edge_snap", self.edge_snap),
+            ("stop_at_edges", self.stop_at_edges),
+            ("snap_filtered", self.snap_filtered),
+            ("edges_filtered", self.edges_filtered),
+            ("fill_filtered", self.fill_filtered),
+        ]
+    }
+
+    fn numbers(&self) -> [(&'static str, RwSignal<f64>); 7] {
+        [
+            ("spacing", self.spacing),
+            ("brush_size", self.brush_size),
+            ("threshold", self.threshold),
+            ("clean_up", self.clean_up),
+            ("max_fill", self.max_fill),
+            ("snap_radius", self.snap_radius),
+            ("edge_offset", self.edge_offset),
+        ]
+    }
+
+    fn new() -> Self {
+        Tools {
+            square: RwSignal::new(false),
+            from_centre: RwSignal::new(false),
+            oriented: RwSignal::new(false),
+            snap: RwSignal::new(false),
+            freehand: RwSignal::new(false),
+            spacing: RwSignal::new(DEFAULT_SPACING),
+            single_point: RwSignal::new(false),
+            ellipse_from_centre: RwSignal::new(true),
+            brush_size: RwSignal::new(DEFAULT_BRUSH_SIZE),
+            eraser: RwSignal::new(false),
+            fill: RwSignal::new(false),
+            threshold: RwSignal::new(DEFAULT_THRESHOLD),
+            contiguous: RwSignal::new(true),
+            clean_up: RwSignal::new(0.0),
+            max_fill: RwSignal::new(DEFAULT_MAX_FILL_PERCENT),
+            edge_snap: RwSignal::new(false),
+            snap_radius: RwSignal::new(DEFAULT_SNAP_RADIUS),
+            stop_at_edges: RwSignal::new(false),
+            edge_offset: RwSignal::new(0.0),
+            snap_filtered: RwSignal::new(false),
+            edges_filtered: RwSignal::new(false),
+            fill_filtered: RwSignal::new(false),
+            last: RwSignal::new(None),
+        }
+    }
 }
 
 /// The tools' drawing modes, remembered with the last tool.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Modes {
     oriented: bool,
     freehand: bool,
@@ -250,7 +364,7 @@ impl Editor {
     }
 
     fn mode_signals(&self) -> [RwSignal<bool>; 6] {
-        [self.oriented, self.freehand, self.single_point, self.ellipse_from_centre, self.fill, self.eraser]
+        [self.tools.oriented, self.tools.freehand, self.tools.single_point, self.tools.ellipse_from_centre, self.tools.fill, self.tools.eraser]
     }
 
     /// The current modes (tracked).
@@ -276,7 +390,7 @@ impl Editor {
         }
     }
 
-    pub fn new(annotations: Vec<Annotation>, label: Option<i64>) -> Self {
+    pub fn new(annotations: Vec<Annotation>, label: Option<i64>, tools: Tools) -> Self {
         Editor {
             annotations: RwSignal::new(annotations),
             history: StoredValue::new(History::default()),
@@ -285,31 +399,9 @@ impl Editor {
             label: RwSignal::new(label),
             revision: RwSignal::new(0),
             notice: RwSignal::new(None),
-            square: RwSignal::new(false),
-            from_centre: RwSignal::new(false),
-            oriented: RwSignal::new(false),
-            snap: RwSignal::new(false),
-            freehand: RwSignal::new(false),
-            spacing: RwSignal::new(DEFAULT_SPACING),
-            single_point: RwSignal::new(false),
-            ellipse_from_centre: RwSignal::new(true),
-            brush_size: RwSignal::new(DEFAULT_BRUSH_SIZE),
-            eraser: RwSignal::new(false),
-            fill: RwSignal::new(false),
-            threshold: RwSignal::new(DEFAULT_THRESHOLD),
+            tools,
             pre_annotation_threshold: RwSignal::new(0.0),
-            contiguous: RwSignal::new(true),
-            clean_up: RwSignal::new(0.0),
-            max_fill: RwSignal::new(DEFAULT_MAX_FILL_PERCENT),
-            edge_snap: RwSignal::new(false),
-            snap_radius: RwSignal::new(DEFAULT_SNAP_RADIUS),
-            stop_at_edges: RwSignal::new(false),
-            edge_offset: RwSignal::new(0.0),
             view_filter: RwSignal::new(None),
-            snap_filtered: RwSignal::new(false),
-            edges_filtered: RwSignal::new(false),
-            fill_filtered: RwSignal::new(false),
-            last: RwSignal::new(None),
             usable_shapes: RwSignal::new(ShapeType::ALL.to_vec()),
             busy: RwSignal::new(false),
         }
@@ -613,7 +705,7 @@ pub fn AnnotationLayer(
     // fixes that type's size: the tool then places shapes instead of dragging them out.
     let fixed_tool = move || -> Option<(ShapeType, ShapeConstraints)> {
         let shape = match editor.tool.get_untracked() {
-            Tool::Rectangle if editor.oriented.get_untracked() => ShapeType::OrientedRectangle,
+            Tool::Rectangle if editor.tools.oriented.get_untracked() => ShapeType::OrientedRectangle,
             Tool::Rectangle => ShapeType::Rectangle,
             Tool::Ellipse => ShapeType::Ellipse,
             _ => return None,
@@ -739,20 +831,20 @@ pub fn AnnotationLayer(
     };
     // Shift (or the snap option) snaps a line from the last placed vertex to 15° steps.
     let snapped = move |from: Option<Point>, to: Point, shift: bool| match from {
-        Some(from) if shift != editor.snap.get_untracked() => inside(snap_angle(from, to, SNAP_DEGREES)),
+        Some(from) if shift != editor.tools.snap.get_untracked() => inside(snap_angle(from, to, SNAP_DEGREES)),
         _ => to,
     };
 
     // `[` and `]`: the brush size in steps of 25%, but at least one pixel.
     let resize_brush = move |larger: bool| {
-        editor.brush_size.update(|size| {
+        editor.tools.brush_size.update(|size| {
             let next = if larger { (*size * SIZE_STEP).max(*size + 1.0) } else { (*size / SIZE_STEP).min(*size - 1.0) };
             *size = next.round().clamp(MIN_BRUSH_SIZE, MAX_BRUSH_SIZE);
         });
     };
     let change_threshold = move |higher: bool| {
         let step = if higher { THRESHOLD_STEP } else { -THRESHOLD_STEP };
-        editor.threshold.update(|threshold| *threshold = (*threshold + step).clamp(0.0, MAX_THRESHOLD));
+        editor.tools.threshold.update(|threshold| *threshold = (*threshold + step).clamp(0.0, MAX_THRESHOLD));
     };
     // The brush or eraser stroke in progress, sprites of the stored masks, and where the brush
     // outline is drawn.
@@ -796,9 +888,9 @@ pub fn AnnotationLayer(
         let image_area = f64::from(image_size.0) * f64::from(image_size.1);
         let level_area = f64::from(factor) * f64::from(factor);
         FillSettings {
-            threshold: editor.threshold.get_untracked().clamp(0.0, MAX_THRESHOLD) as u8,
+            threshold: editor.tools.threshold.get_untracked().clamp(0.0, MAX_THRESHOLD) as u8,
             within,
-            max_pixels: (editor.max_fill.get_untracked() / 100.0 * image_area / level_area).max(1.0) as u64,
+            max_pixels: (editor.tools.max_fill.get_untracked() / 100.0 * image_area / level_area).max(1.0) as u64,
         }
     };
     let regrow = move || {
@@ -812,7 +904,7 @@ pub fn AnnotationLayer(
         let seed = ((seed.x / f64::from(factor)) as u32, (seed.y / f64::from(factor)) as u32);
         let seed = (seed.0.min(level_width - 1), seed.1.min(level_height - 1));
         // Global fills take the visible part of the image.
-        let within = (!editor.contiguous.get_untracked()).then(|| {
+        let within = (!editor.tools.contiguous.get_untracked()).then(|| {
             let (w, h) = size.get_untracked();
             let (min, max) = (current.to_image(Point::new(0.0, 0.0)), current.to_image(Point::new(w, h)));
             let level_pixel = |v: f64| (v / f64::from(factor)).max(0.0) as u32;
@@ -820,16 +912,16 @@ pub fn AnnotationLayer(
             PixelRect { left, top, width: level_pixel(max.x).saturating_sub(left) + 1, height: level_pixel(max.y).saturating_sub(top) + 1 }
         });
         let settings = fill_settings(within, factor);
-        let source = editor.analysed(editor.fill_filtered);
+        let source = editor.analysed(editor.tools.fill_filtered);
         let growth = analysis.with_level(&source, level, |tiles| grow(pyramid, level, tiles, seed, settings));
         analysis.request(&source, level, &growth.missing);
         fill_incomplete.set_value(!growth.missing.is_empty());
         if growth.capped && !fill_capped.get_value() {
-            let max = editor.max_fill.get_untracked();
+            let max = editor.tools.max_fill.get_untracked();
             editor.notice.set(Some(format!("The fill grows past {max:.0}% of the image and will not be added.")));
         }
         fill_capped.set_value(growth.capped);
-        let min_area = (editor.clean_up.get_untracked() / level_area).round() as usize;
+        let min_area = (editor.tools.clean_up.get_untracked() / level_area).round() as usize;
         let region = growth.region.cropped();
         // Clean-up drops small patches, but never the whole fill.
         let region = match region.clone().cleaned(min_area) {
@@ -849,7 +941,7 @@ pub fn AnnotationLayer(
         let Some(preview) = preview else { return };
         // A runaway fill is not added: it would be a cut-off part of a much larger region.
         if fill_capped.get_value() {
-            let max = editor.max_fill.get_untracked();
+            let max = editor.tools.max_fill.get_untracked();
             editor.notice.set(Some(format!("Not added: the fill grew past {max:.0}% of the image. Lower the threshold or raise Max.")));
             return;
         }
@@ -885,7 +977,7 @@ pub fn AnnotationLayer(
     let edge_path = move |from: Option<Point>, to: Point, current: View| -> Option<Vec<Point>> {
         let (level, factor) = level_of(current);
         let to_level = |p: Point| ((p.x / factor).max(0.0) as u32, (p.y / factor).max(0.0) as u32);
-        let radius = (editor.snap_radius.get_untracked() / (current.scale * factor)).ceil().max(1.0) as u32;
+        let radius = (editor.tools.snap_radius.get_untracked() / (current.scale * factor)).ceil().max(1.0) as u32;
         let target = to_level(to);
         let anchor = from.map(to_level).unwrap_or(target);
         let margin = radius + 8;
@@ -896,7 +988,7 @@ pub fn AnnotationLayer(
             width: anchor.0.max(target.0) + margin + 1 - left,
             height: anchor.1.max(target.1) + margin + 1 - top,
         };
-        let source = editor.analysed(editor.snap_filtered);
+        let source = editor.analysed(editor.tools.snap_filtered);
         let map = match analysis.with_level(&source, level, |tiles| EdgeMap::new(pyramid, level, tiles, window)) {
             Ok(map) => map,
             Err(missing) => {
@@ -919,12 +1011,12 @@ pub fn AnnotationLayer(
         let factor = 1u32 << level;
         let (width, height) = pyramid.level_size(level);
         let seed = ((seed.x as u32 / factor).min(width - 1), (seed.y as u32 / factor).min(height - 1));
-        let source = editor.analysed(editor.edges_filtered);
+        let source = editor.analysed(editor.tools.edges_filtered);
         let growth = analysis.with_level(&source, level, |tiles| grow(pyramid, level, tiles, seed, fill_settings(None, factor)));
         analysis.request(&source, level, &growth.missing);
         let region = growth.region.cropped().scaled_up(factor, image_size);
         // The offset is in image pixels, so it applies at full resolution.
-        match editor.edge_offset.get_untracked().round() as i32 {
+        match editor.tools.edge_offset.get_untracked().round() as i32 {
             0 => region,
             offset => region.expanded(offset, image_size),
         }
@@ -938,7 +1030,7 @@ pub fn AnnotationLayer(
     let update_limit = move |shift: bool, current: View, refresh: bool| {
         let Some(seed) = limit_seed.get_value() else { return };
         shift_held.set_value(shift);
-        let limited = editor.stop_at_edges.get_untracked() != shift;
+        let limited = editor.tools.stop_at_edges.get_untracked() != shift;
         let (level, _) = level_of(current);
         let limit = (limited && (refresh || limit_level.get_value() != Some(level))).then(|| {
             limit_level.set_value(Some(level));
@@ -962,9 +1054,9 @@ pub fn AnnotationLayer(
     // Brush and freehand lines load the view's analysis tiles ahead of the first stroke.
     Effect::new(move |_| {
         let switch = match editor.tool.get() {
-            Tool::Brush if editor.fill.get() => Some(editor.fill_filtered),
-            Tool::Brush => Some(editor.edges_filtered),
-            Tool::Polyline if editor.freehand.get() => Some(editor.snap_filtered),
+            Tool::Brush if editor.tools.fill.get() => Some(editor.tools.fill_filtered),
+            Tool::Brush => Some(editor.tools.edges_filtered),
+            Tool::Polyline if editor.tools.freehand.get() => Some(editor.tools.snap_filtered),
             _ => None,
         };
         let (Some(current), (w, h)) = (view.get(), size.get()) else { return };
@@ -1070,29 +1162,29 @@ pub fn AnnotationLayer(
         let drawing = matches!(gesture.get_untracked(), Gesture::Path { .. });
         let (label, mut items) = match editor.tool.get_untracked() {
             Tool::Rectangle => {
-                let oriented = editor.oriented.get_untracked();
+                let oriented = editor.tools.oriented.get_untracked();
                 let items = vec![
                     item(Compass::N, "2-point", None, true, !oriented, PieAction::SetOriented(false)),
                     item(Compass::E, "3-point oriented", None, true, oriented, PieAction::SetOriented(true)),
-                    item(Compass::S, "From center", Some("Alt".to_owned()), !oriented, editor.from_centre.get_untracked(), PieAction::ToggleFromCentre),
-                    item(Compass::W, "Square", Some("Shift".to_owned()), !oriented, editor.square.get_untracked(), PieAction::ToggleSquare),
+                    item(Compass::S, "From center", Some("Alt".to_owned()), !oriented, editor.tools.from_centre.get_untracked(), PieAction::ToggleFromCentre),
+                    item(Compass::W, "Square", Some("Shift".to_owned()), !oriented, editor.tools.square.get_untracked(), PieAction::ToggleSquare),
                 ];
                 ("Rectangle options", items)
             }
             Tool::Polygon => {
                 let items = vec![
-                    item(Compass::N, "Snap 15°", Some("Shift".to_owned()), true, editor.snap.get_untracked(), PieAction::ToggleSnap),
+                    item(Compass::N, "Snap 15°", Some("Shift".to_owned()), true, editor.tools.snap.get_untracked(), PieAction::ToggleSnap),
                     item(Compass::E, "Finish shape", key_of(Action::Finish), drawing, false, PieAction::FinishShape),
                     item(Compass::W, "Remove last point", key_of(Action::RemoveLastPoint), drawing, false, PieAction::UndoPoint),
                 ];
                 ("Polygon options", items)
             }
             Tool::Polyline => {
-                let freehand = editor.freehand.get_untracked();
+                let freehand = editor.tools.freehand.get_untracked();
                 let snap = if freehand {
-                    item(Compass::NE, "Snap to edges", Some("Shift".to_owned()), true, editor.edge_snap.get_untracked(), PieAction::ToggleEdgeSnap)
+                    item(Compass::NE, "Snap to edges", Some("Shift".to_owned()), true, editor.tools.edge_snap.get_untracked(), PieAction::ToggleEdgeSnap)
                 } else {
-                    item(Compass::NE, "Snap 15°", Some("Shift".to_owned()), true, editor.snap.get_untracked(), PieAction::ToggleSnap)
+                    item(Compass::NE, "Snap 15°", Some("Shift".to_owned()), true, editor.tools.snap.get_untracked(), PieAction::ToggleSnap)
                 };
                 let items = vec![
                     item(Compass::N, "Click", None, true, !freehand, PieAction::SetFreehand(false)),
@@ -1104,7 +1196,7 @@ pub fn AnnotationLayer(
                 ("Polyline options", items)
             }
             Tool::Points => {
-                let single = editor.single_point.get_untracked();
+                let single = editor.tools.single_point.get_untracked();
                 let items = vec![
                     item(Compass::N, "Multiple", None, true, !single, PieAction::SetSinglePoint(false)),
                     item(Compass::S, "Single point", None, true, single, PieAction::SetSinglePoint(true)),
@@ -1114,7 +1206,7 @@ pub fn AnnotationLayer(
                 ("Points options", items)
             }
             Tool::Ellipse => {
-                let from_centre = editor.ellipse_from_centre.get_untracked();
+                let from_centre = editor.tools.ellipse_from_centre.get_untracked();
                 let items = vec![
                     item(Compass::N, "From center", Some("Alt".to_owned()), true, from_centre, PieAction::SetEllipseFromCentre(true)),
                     item(Compass::S, "Across the box", None, true, !from_centre, PieAction::SetEllipseFromCentre(false)),
@@ -1122,7 +1214,7 @@ pub fn AnnotationLayer(
                 ("Ellipse options", items)
             }
             Tool::Brush => {
-                let (eraser, fill) = (editor.eraser.get_untracked(), editor.fill.get_untracked());
+                let (eraser, fill) = (editor.tools.eraser.get_untracked(), editor.tools.fill.get_untracked());
                 // Both modes of each pair, the current one marked; then the mode's own options.
                 let mut items = vec![
                     item(Compass::N, "Paint", None, true, !fill, PieAction::SetFill(false)),
@@ -1139,7 +1231,7 @@ pub fn AnnotationLayer(
                     items.extend([
                         item(Compass::E, "Larger", key_of(Action::Larger), true, false, PieAction::BrushSize(true)),
                         item(Compass::W, "Smaller", key_of(Action::Smaller), true, false, PieAction::BrushSize(false)),
-                        item(Compass::NW, "Stop at edges", Some("Shift".to_owned()), true, editor.stop_at_edges.get_untracked(), PieAction::ToggleStopAtEdges),
+                        item(Compass::NW, "Stop at edges", Some("Shift".to_owned()), true, editor.tools.stop_at_edges.get_untracked(), PieAction::ToggleStopAtEdges),
                     ]);
                 }
                 ("Brush options", items)
@@ -1257,48 +1349,48 @@ pub fn AnnotationLayer(
             }
             PieAction::ToggleSquare => {
                 close_pie();
-                editor.square.update(|on| *on = !*on);
+                editor.tools.square.update(|on| *on = !*on);
             }
             PieAction::ToggleFromCentre => {
                 close_pie();
-                editor.from_centre.update(|on| *on = !*on);
+                editor.tools.from_centre.update(|on| *on = !*on);
             }
             PieAction::SetOriented(on) => {
                 close_pie();
                 gesture.set(Gesture::Idle);
-                editor.oriented.set(on);
+                editor.tools.oriented.set(on);
             }
             PieAction::ToggleSnap => {
                 close_pie();
-                editor.snap.update(|on| *on = !*on);
+                editor.tools.snap.update(|on| *on = !*on);
             }
             PieAction::SetFreehand(on) => {
                 close_pie();
-                editor.freehand.set(on);
+                editor.tools.freehand.set(on);
             }
             PieAction::SetSinglePoint(on) => {
                 close_pie();
-                editor.single_point.set(on);
+                editor.tools.single_point.set(on);
             }
             PieAction::SetEllipseFromCentre(on) => {
                 close_pie();
-                editor.ellipse_from_centre.set(on);
+                editor.tools.ellipse_from_centre.set(on);
             }
             PieAction::SetEraser(on) => {
                 close_pie();
-                editor.eraser.set(on);
+                editor.tools.eraser.set(on);
             }
             PieAction::SetFill(on) => {
                 close_pie();
-                editor.fill.set(on);
+                editor.tools.fill.set(on);
             }
             PieAction::ToggleEdgeSnap => {
                 close_pie();
-                editor.edge_snap.update(|on| *on = !*on);
+                editor.tools.edge_snap.update(|on| *on = !*on);
             }
             PieAction::ToggleStopAtEdges => {
                 close_pie();
-                editor.stop_at_edges.update(|on| *on = !*on);
+                editor.tools.stop_at_edges.update(|on| *on = !*on);
             }
             PieAction::Threshold(higher) => {
                 close_pie();
@@ -1325,7 +1417,7 @@ pub fn AnnotationLayer(
         let Some(open) = pie.get_untracked().filter(|open| open.held) else { return };
         let at = pointer.get_untracked();
         if is_tap(now() - open.opened_at, at.x - open.centre.x, at.y - open.centre.y) {
-            match editor.last.get_untracked() {
+            match editor.tools.last.get_untracked() {
                 Some((tool, label, modes)) if open.label != "Labels" => {
                     close_pie();
                     editor.restore(tool, label, modes);
@@ -1362,7 +1454,7 @@ pub fn AnnotationLayer(
     Effect::new(move |_| {
         let (tool, modes) = (editor.tool.get(), editor.modes());
         if let (true, Some(label)) = (tool != Tool::Select, editor.label.get()) {
-            editor.last.set(Some((tool, label, modes)));
+            editor.tools.last.set(Some((tool, label, modes)));
         }
     });
     // Without labels nothing can be drawn: say so when the image opens.
@@ -1489,7 +1581,7 @@ pub fn AnnotationLayer(
     };
     let draw_press = move |ev: &ev::PointerEvent, tool: Tool, point: Point, current: View| {
         // Ctrl inverts a brush stroke: the brush erases, the eraser paints.
-        let erasing = tool == Tool::Brush && editor.eraser.get_untracked() != (ev.ctrl_key() || ev.meta_key());
+        let erasing = tool == Tool::Brush && editor.tools.eraser.get_untracked() != (ev.ctrl_key() || ev.meta_key());
         if editor.label.get_untracked().is_none() && !erasing {
             let shape = tool.name().to_lowercase();
             editor.notice.set(Some(format!("Add a label that allows {shape} shapes on the Labels tab first.")));
@@ -1525,15 +1617,15 @@ pub fn AnnotationLayer(
                     gesture.set(Gesture::Oriented { points, current: point });
                 }
             }
-            (Tool::Rectangle, _) if editor.oriented.get_untracked() => {
+            (Tool::Rectangle, _) if editor.tools.oriented.get_untracked() => {
                 gesture.set(Gesture::Oriented { points: vec![point], current: point });
             }
             (Tool::Rectangle, _) => gesture.set(Gesture::Drawing {
                 start: point,
                 current: point,
                 dragged: false,
-                square: ev.shift_key() != editor.square.get_untracked(),
-                from_centre: ev.alt_key() != editor.from_centre.get_untracked(),
+                square: ev.shift_key() != editor.tools.square.get_untracked(),
+                from_centre: ev.alt_key() != editor.tools.from_centre.get_untracked(),
             }),
             (Tool::Ellipse, Gesture::Ellipse { start, circle, from_centre, .. }) => finish_ellipse(start, point, circle, from_centre, current.scale),
             (Tool::Ellipse, _) => gesture.set(Gesture::Ellipse {
@@ -1541,21 +1633,21 @@ pub fn AnnotationLayer(
                 current: point,
                 dragged: false,
                 circle: ev.shift_key(),
-                from_centre: ev.alt_key() != editor.ellipse_from_centre.get_untracked(),
+                from_centre: ev.alt_key() != editor.tools.ellipse_from_centre.get_untracked(),
             }),
             (Tool::Brush, _) if !erasing && !label_allows(editor.label.get_untracked().unwrap_or_default(), ShapeType::Mask) => {
                 let label = label_name(editor.label.get_untracked().unwrap_or_default());
                 editor.notice.set(Some(format!("“{label}” cannot be used for masks.")));
             }
-            (Tool::Brush, _) if editor.fill.get_untracked() => {
+            (Tool::Brush, _) if editor.tools.fill.get_untracked() => {
                 let anchor = Point::new(f64::from(ev.client_x()), f64::from(ev.client_y()));
-                let base = editor.threshold.get_untracked();
+                let base = editor.tools.threshold.get_untracked();
                 gesture.set(Gesture::Filling { seed: point, anchor, base, erase: erasing, released: false });
                 regrow();
             }
             (Tool::Brush, _) => {
                 let label = editor.label.get_untracked().unwrap_or_default();
-                let size = editor.brush_size.get_untracked();
+                let size = editor.tools.brush_size.get_untracked();
                 stroke.set_value(Some(Stroke::start(erasing, label, size, image_size, point, color_of(label))));
                 limit_seed.set_value(Some(point));
                 limit_level.set_value(None);
@@ -1567,12 +1659,12 @@ pub fn AnnotationLayer(
                 });
                 gesture.set(Gesture::Painting);
             }
-            (Tool::Polyline, _) if editor.freehand.get_untracked() => {
-                let snapping = editor.edge_snap.get_untracked() != ev.shift_key();
+            (Tool::Polyline, _) if editor.tools.freehand.get_untracked() => {
+                let snapping = editor.tools.edge_snap.get_untracked() != ev.shift_key();
                 let start = snapping.then(|| edge_path(None, point, current)).flatten().and_then(|path| path.first().copied()).unwrap_or(point);
                 gesture.set(Gesture::Stroke { points: vec![start], current: start });
             }
-            (Tool::Points, _) if editor.single_point.get_untracked() => add_shape(Shape::Points { points: vec![point] }),
+            (Tool::Points, _) if editor.tools.single_point.get_untracked() => add_shape(Shape::Points { points: vec![point] }),
             (_, Gesture::Path { mut points, .. }) => {
                 // Clicking a polygon's first vertex closes it.
                 let closes = tool == Tool::Polygon
@@ -1594,7 +1686,7 @@ pub fn AnnotationLayer(
         if let Gesture::BrushSizing { before, .. } = gesture.get_untracked() {
             ev.prevent_default();
             if ev.button() == 2 {
-                editor.brush_size.set(before);
+                editor.tools.brush_size.set(before);
             }
             gesture.set(Gesture::Idle);
             return;
@@ -1629,7 +1721,7 @@ pub fn AnnotationLayer(
         match gesture.get_untracked() {
             // Turning a fixed-size shape: its width side points at the pointer.
             Gesture::Placing { centre, .. } => {
-                let angle = snap_turn((point.y - centre.y).atan2(point.x - centre.x), ev.shift_key() != editor.snap.get_untracked());
+                let angle = snap_turn((point.y - centre.y).atan2(point.x - centre.x), ev.shift_key() != editor.tools.snap.get_untracked());
                 gesture.set(Gesture::Placing { centre, angle });
             }
             Gesture::Drawing { start, dragged, .. } => {
@@ -1638,8 +1730,8 @@ pub fn AnnotationLayer(
                     start,
                     current: inside(point),
                     dragged: dragged || (moved && ev.buttons() & 1 == 1),
-                    square: ev.shift_key() != editor.square.get_untracked(),
-                    from_centre: ev.alt_key() != editor.from_centre.get_untracked(),
+                    square: ev.shift_key() != editor.tools.square.get_untracked(),
+                    from_centre: ev.alt_key() != editor.tools.from_centre.get_untracked(),
                 });
             }
             Gesture::Ellipse { start, dragged, .. } => {
@@ -1649,16 +1741,16 @@ pub fn AnnotationLayer(
                     current: inside(point),
                     dragged: dragged || (moved && ev.buttons() & 1 == 1),
                     circle: ev.shift_key(),
-                    from_centre: ev.alt_key() != editor.ellipse_from_centre.get_untracked(),
+                    from_centre: ev.alt_key() != editor.tools.ellipse_from_centre.get_untracked(),
                 });
             }
             Gesture::Stroke { mut points, .. } => {
                 let to = inside(point);
                 let last = *points.last().expect("a stroke starts with a point");
-                let spacing = editor.spacing.get_untracked();
+                let spacing = editor.tools.spacing.get_untracked();
                 // Snapping follows the edge path from the last vertex; until its tiles are
                 // loaded the line follows the pointer.
-                let snapping = editor.edge_snap.get_untracked() != ev.shift_key();
+                let snapping = editor.tools.edge_snap.get_untracked() != ev.shift_key();
                 let current = match snapping.then(|| edge_path(Some(last), to, current)).flatten() {
                     Some(path) => {
                         points.extend(steps_along(&path, spacing));
@@ -1673,11 +1765,11 @@ pub fn AnnotationLayer(
             }
             Gesture::BrushSizing { centre, before } => {
                 let size = before + 2.0 * (point.x - centre.x);
-                editor.brush_size.set(size.round().clamp(MIN_BRUSH_SIZE, MAX_BRUSH_SIZE));
+                editor.tools.brush_size.set(size.round().clamp(MIN_BRUSH_SIZE, MAX_BRUSH_SIZE));
             }
             Gesture::Filling { anchor, base, released: false, .. } => {
                 let moved = (f64::from(ev.client_x()) - anchor.x) + (f64::from(ev.client_y()) - anchor.y);
-                editor.threshold.set((base + moved * THRESHOLD_PER_PIXEL).round().clamp(0.0, MAX_THRESHOLD));
+                editor.tools.threshold.set((base + moved * THRESHOLD_PER_PIXEL).round().clamp(0.0, MAX_THRESHOLD));
                 regrow();
             }
             // Released and waiting for tiles: the pointer no longer changes it.
@@ -1735,11 +1827,11 @@ pub fn AnnotationLayer(
                 gesture.set(Gesture::Vertex { index, vertex, current: shape.with_vertex(vertex, inside(point)) });
             }
             Gesture::Rotating { index, before, .. } => {
-                let angle = snap_turn(before.angle_towards(point), ev.shift_key() != editor.snap.get_untracked());
+                let angle = snap_turn(before.angle_towards(point), ev.shift_key() != editor.tools.snap.get_untracked());
                 gesture.set(Gesture::Rotating { index, before, current: before.rotated_to(angle) });
             }
             Gesture::Turning { index, before, current: ellipse } => {
-                let turned = before.rotated_to(snap_turn(before.angle_towards(point), ev.shift_key() != editor.snap.get_untracked()));
+                let turned = before.rotated_to(snap_turn(before.angle_towards(point), ev.shift_key() != editor.tools.snap.get_untracked()));
                 let fits = Shape::Ellipse(turned).validate(image_size.0, image_size.1).is_ok();
                 gesture.set(Gesture::Turning { index, before, current: if fits { turned } else { ellipse } });
             }
@@ -1876,7 +1968,7 @@ pub fn AnnotationLayer(
             if is(Action::ResizeBrush) || is(Action::Finish) {
                 gesture.set(Gesture::Idle);
             } else if is(Action::Cancel) {
-                editor.brush_size.set(before);
+                editor.tools.brush_size.set(before);
                 gesture.set(Gesture::Idle);
             }
             ev.prevent_default();
@@ -1918,18 +2010,18 @@ pub fn AnnotationLayer(
             editor.selection.set(visible);
         } else if is(Action::Finish) && drawing_path {
             finish_path();
-        } else if (smaller || larger) && tool == Tool::Brush && editor.fill.get_untracked() {
+        } else if (smaller || larger) && tool == Tool::Brush && editor.tools.fill.get_untracked() {
             change_threshold(larger);
         } else if (smaller || larger) && tool == Tool::Brush {
             resize_brush(larger);
-        } else if is(Action::ResizeBrush) && tool == Tool::Brush && !editor.fill.get_untracked() && gesture.get_untracked() == Gesture::Idle {
+        } else if is(Action::ResizeBrush) && tool == Tool::Brush && !editor.tools.fill.get_untracked() && gesture.get_untracked() == Gesture::Idle {
             // Resize the outline where it is, by moving the pointer right or left.
             let Some(centre) = hover.get_untracked() else { return };
-            gesture.set(Gesture::BrushSizing { centre, before: editor.brush_size.get_untracked() });
+            gesture.set(Gesture::BrushSizing { centre, before: editor.tools.brush_size.get_untracked() });
         } else if (smaller || larger) && tool == Tool::Polyline {
             let factor = if larger { SIZE_STEP } else { 1.0 / SIZE_STEP };
-            editor.spacing.update(|spacing| *spacing = (*spacing * factor).clamp(MIN_SPACING, MAX_SPACING));
-            editor.notice.set(Some(format!("Freehand spacing {:.0} px", editor.spacing.get_untracked())));
+            editor.tools.spacing.update(|spacing| *spacing = (*spacing * factor).clamp(MIN_SPACING, MAX_SPACING));
+            editor.notice.set(Some(format!("Freehand spacing {:.0} px", editor.tools.spacing.get_untracked())));
         } else if is(Action::RemoveLastPoint) && drawing_path {
             undo_point();
         } else if is(Action::Cancel) {
@@ -1978,15 +2070,15 @@ pub fn AnnotationLayer(
             if brush_tool(Tool::Brush) {
                 cancel_gesture();
                 editor.tool.set(Tool::Brush);
-                editor.eraser.set(true);
+                editor.tools.eraser.set(true);
             }
         } else if is(Action::FuzzyFill) {
             // The brush's fuzzy fill (U, GIMP's fuzzy select key).
             if brush_tool(Tool::Brush) {
                 cancel_gesture();
                 editor.tool.set(Tool::Brush);
-                editor.fill.set(true);
-                editor.eraser.set(false);
+                editor.tools.fill.set(true);
+                editor.tools.eraser.set(false);
             }
         } else if is(Action::Tag) {
             // The label pie, whose label is toggled as a tag of the image.
@@ -2002,8 +2094,8 @@ pub fn AnnotationLayer(
                 cancel_gesture();
                 editor.tool.set(tool);
                 if tool == Tool::Brush {
-                    editor.eraser.set(false);
-                    editor.fill.set(false);
+                    editor.tools.eraser.set(false);
+                    editor.tools.fill.set(false);
                 }
             }
         } else if let Some((_, id)) = hotkeys.iter().find(|(hotkey, _)| !press.ctrl && !press.alt && hotkey.eq_ignore_ascii_case(&key)) {
@@ -2116,12 +2208,12 @@ pub fn AnnotationLayer(
         sprites.update_value(SpriteCache::sweep);
         stroke.with_value(|s| s.as_ref().map(|s| s.draw_painted(&context, current)));
         fill_preview.with_value(|preview| preview.as_ref().map(|preview| preview.draw(&context, current)));
-        let brush_radius = editor.brush_size.get_untracked() / 2.0;
+        let brush_radius = editor.tools.brush_size.get_untracked() / 2.0;
         if let Gesture::BrushSizing { centre, .. } = gesture {
             draw::brush_outline(&context, current, centre, brush_radius);
             let label = format!("{:.0} px", 2.0 * brush_radius);
             draw::tag(&context, current.to_screen(centre.offset(-brush_radius, -brush_radius)), &label, "#e8e6e1");
-        } else if let (Tool::Brush, false, Some(at)) = (editor.tool.get_untracked(), editor.fill.get_untracked(), hover.get_untracked()) {
+        } else if let (Tool::Brush, false, Some(at)) = (editor.tool.get_untracked(), editor.tools.fill.get_untracked(), hover.get_untracked()) {
             draw::brush_outline(&context, current, at, brush_radius);
         }
         let pen = editor.label.get_untracked().map(color_of).unwrap_or_else(|| "#ffffff".to_owned());
@@ -2179,10 +2271,10 @@ pub fn AnnotationLayer(
         editor.selection.track();
         editor.label.track();
         editor.tool.track();
-        editor.oriented.track();
+        editor.tools.oriented.track();
         prefs.settings.track();
-        editor.brush_size.track();
-        editor.fill.track();
+        editor.tools.brush_size.track();
+        editor.tools.fill.track();
         fill_drawn.track();
         hover.track();
         draw();
@@ -2198,11 +2290,11 @@ pub fn AnnotationLayer(
     });
     Effect::new(move |_| {
         editor.tool.track();
-        editor.oriented.track();
-        editor.freehand.track();
-        editor.single_point.track();
-        editor.eraser.track();
-        editor.fill.track();
+        editor.tools.oriented.track();
+        editor.tools.freehand.track();
+        editor.tools.single_point.track();
+        editor.tools.eraser.track();
+        editor.tools.fill.track();
         cancel_gesture();
     });
 

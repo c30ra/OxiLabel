@@ -369,8 +369,8 @@ a.button.primary { background: var(--accent); border-color: var(--accent); color
 .view-filter .slider input { height: auto; padding: 0; border: 0; background: none; accent-color: var(--accent); min-width: 0; }
 .view-filter .slider .value { color: var(--text); text-align: right; font-size: 12px; }
 .view-filter .reset { align-self: flex-end; height: 26px; padding: 0 10px; font-size: 12px; }
-.view-chip { height: 30px; padding: 0 10px; font-size: 13px; }
-.view-chip.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-strong); }
+.view-chip, .image-filter .chip { height: 30px; padding: 0 10px; font-size: 13px; }
+.view-chip.active, .image-filter .chip.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-strong); }
 
 /* Account menu in the top bar, and the sign-in screen */
 .account { display: flex; align-items: center; gap: 12px; margin-left: auto; font-size: 13px; }
@@ -469,3 +469,21 @@ select.job-filter { max-width: 14rem; }
 .export-dialog .footprints td { padding: 4px 8px; }
 .export-dialog .footprints input[type=number] { width: 64px; }
 .export-dialog .footprints .changed { border-color: var(--accent); color: var(--accent); }
+
+/* Images sharing a file name, grouped so one can be kept (image grid "File name" filter). */
+.name-group { margin-bottom: 20px; }
+.name-group h4 { margin: 0 0 8px; font-size: 14px; font-weight: 600; }
+.grid.detailed { grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr)); }
+.details { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 8px; margin: 0; padding: 0 8px 8px; font-size: 11px; }
+.details dt { color: var(--muted); }
+.details dd { margin: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.label-filter .swatch { width: 10px; height: 10px; border-radius: 2px; margin: 0; }
+.warning { color: var(--error); }
+.preview-dialog { max-width: min(1400px, 100%); height: calc(100vh - 48px); }
+.preview-dialog .dialog-head { align-items: center; }
+.preview-body { flex: 1; min-height: 0; display: flex; border-top: 1px solid var(--border); }
+.preview-body .details { flex: none; width: 16rem; align-content: start; padding: 12px; font-size: 12px; }
+.image-filter { position: relative; }
+.image-filter-popover { position: absolute; right: 0; top: calc(100% + 6px); z-index: 5; width: min(34rem, 90vw); padding: 12px; background: var(--panel); border: 1px solid var(--border-strong); border-radius: 8px; box-shadow: 0 8px 24px #0006; }
+.image-filter-popover .search { width: 100%; }
+.image-filter-popover .filter-panel { margin: 8px 0 0; }

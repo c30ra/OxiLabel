@@ -4,6 +4,7 @@ mod annotate;
 mod api;
 mod draw;
 mod filmstrip;
+mod image_filter;
 mod masks;
 mod pages;
 mod pie;

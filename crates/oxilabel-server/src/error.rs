@@ -35,9 +35,10 @@ impl From<sqlx::Error> for ApiError {
     }
 }
 
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        let (status, message) = match self {
+impl ApiError {
+    /// The status and message a client is told; the detail of an unexpected failure is logged.
+    pub fn public(self) -> (StatusCode, String) {
+        match self {
             ApiError::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not found".to_owned()),
             ApiError::Unauthorized(message) => (StatusCode::UNAUTHORIZED, message),
@@ -51,7 +52,13 @@ impl IntoResponse for ApiError {
                 eprintln!("internal error: {detail}");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_owned())
             }
-        };
+        }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let (status, message) = self.public();
         (status, Json(json!({ "error": message }))).into_response()
     }
 }

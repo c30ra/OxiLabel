@@ -38,7 +38,7 @@ async fn save(app: &TestApp, project: i64, image: i64, base_version: i64, annota
 async fn a_new_image_has_no_annotations_at_version_zero() {
     let app = test_app().await;
     let (project, image) = setup(&app).await;
-    assert_eq!(load(&app, project, image).await, json!({"version": 0, "annotations": []}));
+    assert_eq!(load(&app, project, image).await, json!({"version": 0, "annotations": [], "annotated": false}));
 }
 
 #[tokio::test]
@@ -66,7 +66,7 @@ async fn each_save_replaces_the_whole_set() {
     assert_eq!(load(&app, project, image).await["annotations"], json!([rectangle(1, (2.0, 2.0), (3.0, 3.0))]));
 
     save(&app, project, image, 2, json!([])).await;
-    assert_eq!(load(&app, project, image).await, json!({"version": 3, "annotations": []}));
+    assert_eq!(load(&app, project, image).await, json!({"version": 3, "annotations": [], "annotated": false}));
 }
 
 #[tokio::test]
@@ -103,7 +103,7 @@ async fn invalid_annotations_are_rejected_and_nothing_is_saved() {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{message}");
         assert_eq!(body["error"], message);
     }
-    assert_eq!(load(&app, project, image).await, json!({"version": 0, "annotations": []}));
+    assert_eq!(load(&app, project, image).await, json!({"version": 0, "annotations": [], "annotated": false}));
 }
 
 #[tokio::test]
@@ -148,7 +148,8 @@ async fn deleting_a_label_in_use_needs_confirmation_and_removes_its_annotations(
     let (status, _) = call(&app, Method::DELETE, &format!("/api/projects/{project}/labels/1?confirm=true"), None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     // The image changed, so its version moved on and an editor holding version 1 cannot resurrect them.
-    assert_eq!(load(&app, project, image).await, json!({"version": 2, "annotations": []}));
+    // Only saves change the status: an image emptied by deleting a label keeps it.
+    assert_eq!(load(&app, project, image).await, json!({"version": 2, "annotations": [], "annotated": true}));
     let (status, _) = save(&app, project, image, 1, json!([rectangle(1, (1.0, 1.0), (5.0, 5.0))])).await;
     assert_eq!(status, StatusCode::CONFLICT);
 }
@@ -311,4 +312,23 @@ async fn hidden_and_locked_flags_are_saved_with_the_annotations() {
     let plain = rectangle(1, (6.0, 6.0), (9.0, 9.0));
     save(&app, project, image, 0, json!([annotation, plain])).await;
     assert_eq!(load(&app, project, image).await["annotations"], json!([annotation, plain]));
+}
+
+#[tokio::test]
+async fn saving_reviewed_work_marks_the_image_annotated_and_removing_it_unmarks() {
+    let app = test_app().await;
+    let (project, image) = setup(&app).await;
+    let status = || async { call(&app, Method::GET, &format!("/api/projects/{project}/images/{image}"), None).await.1["annotated"].clone() };
+
+    let mut pending = rectangle(1, (1.0, 1.0), (5.0, 5.0));
+    pending["pending"] = json!(true);
+    let (_, saved) = save(&app, project, image, 0, json!([pending.clone()])).await;
+    assert_eq!((&saved["annotated"], status().await), (&json!(false), json!(false)), "pending pre-annotations do not count");
+
+    let (_, saved) = save(&app, project, image, 1, json!([pending, rectangle(1, (6.0, 6.0), (9.0, 9.0))])).await;
+    assert_eq!((&saved["annotated"], status().await), (&json!(true), json!(true)));
+    assert_eq!(load(&app, project, image).await["annotated"], json!(true));
+
+    let (_, saved) = save(&app, project, image, 2, json!([])).await;
+    assert_eq!((&saved["annotated"], status().await), (&json!(false), json!(false)), "an emptied image is unmarked");
 }
