@@ -50,6 +50,7 @@ use oxilabel_core::{
     keymap::Action,
     pie::{Compass, is_tap},
     settings::LabelStyle,
+    stroke::{MaskStroke, StrokeOutcome},
     view::View,
 };
 
@@ -859,18 +860,17 @@ pub fn AnnotationLayer(
         fill_preview.set_value(None);
         gesture.set(Gesture::Idle);
     };
+    // Applies a finished stroke and drops the annotations it removed from the selection.
+    let commit_stroke = move |outcome: StrokeOutcome| {
+        editor.selection.update(|selection| *selection = outcome.selection_after(selection));
+        editor.apply(with_defaults(outcome.edit, &defaults));
+    };
     let finish_stroke = move || {
         gesture.set(Gesture::Idle);
         let mut done = None;
         stroke.update_value(|current| done = current.take());
-        let Some(edit) = done.and_then(|done| editor.annotations.with_untracked(|list| done.finish(list))) else { return };
-        let edit = with_defaults(edit, &defaults);
-        let count = editor.annotations.with_untracked(Vec::len);
-        editor.apply(edit);
-        // Joined or emptied masks were removed, so the selected indices no longer fit.
-        if editor.annotations.with_untracked(Vec::len) < count {
-            editor.selection.set(BTreeSet::new());
-        }
+        let Some(outcome) = done.and_then(|done| editor.annotations.with_untracked(|list| done.core.finish(list))) else { return };
+        commit_stroke(outcome);
     };
 
     // ---- Fuzzy fill: grow on the analysis tiles loaded so far, ask for those the region reached,
@@ -947,14 +947,9 @@ pub fn AnnotationLayer(
         }
         let region = preview.region.scaled_up(preview.factor, image_size);
         let label = editor.label.get_untracked().unwrap_or_default();
-        let edit = editor.annotations.with_untracked(|list| Stroke::from_region(erase, label, region, image_size, list).finish(list));
-        let edit = edit.map(|edit| with_defaults(edit, &defaults));
-        if let Some(edit) = edit {
-            let count = editor.annotations.with_untracked(Vec::len);
-            editor.apply(edit);
-            if editor.annotations.with_untracked(Vec::len) < count {
-                editor.selection.set(BTreeSet::new());
-            }
+        let outcome = editor.annotations.with_untracked(|list| MaskStroke::from_region(erase, label, region, image_size, list).finish(list));
+        if let Some(outcome) = outcome {
+            commit_stroke(outcome);
         }
     };
     Effect::new(move |_| {
@@ -1039,9 +1034,9 @@ pub fn AnnotationLayer(
         stroke.update_value(|s| {
             if let Some(s) = s {
                 if let Some(limit) = limit {
-                    s.set_limit(limit);
+                    s.core.set_limit(limit);
                 }
-                s.limit(limited);
+                s.core.limit(limited);
             }
         });
     };
@@ -1648,7 +1643,8 @@ pub fn AnnotationLayer(
             (Tool::Brush, _) => {
                 let label = editor.label.get_untracked().unwrap_or_default();
                 let size = editor.tools.brush_size.get_untracked();
-                stroke.set_value(Some(Stroke::start(erasing, label, size, image_size, point, color_of(label))));
+                let core = MaskStroke::begin(erasing, label, size, image_size, point);
+                stroke.set_value(Some(Stroke::start(core, color_of(label))));
                 limit_seed.set_value(Some(point));
                 limit_level.set_value(None);
                 update_limit(ev.shift_key(), current, false);

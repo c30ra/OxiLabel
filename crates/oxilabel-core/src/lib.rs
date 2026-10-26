@@ -21,6 +21,7 @@ pub mod oriented;
 pub mod pie;
 pub mod pyramid;
 pub mod settings;
+pub mod stroke;
 pub mod user;
 pub mod view;
 

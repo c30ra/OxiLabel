@@ -6,7 +6,12 @@
 
 **Status:** ready-for-agent
 
-- [ ] The stroke's mask logic compiles and is tested outside the browser
-- [ ] Core tests cover: merge into the lowest-index same-label mask, locked and hidden masks untouched, erase to empty removes the mask, removals ordered so indices stay valid, the stop-at-edges limit
-- [ ] The editor clears the selection from the stroke's reported removals
-- [ ] Browser brush, eraser and fuzzy fill tests still pass
+- [x] The stroke's mask logic compiles and is tested outside the browser
+- [x] Core tests cover: merge into the lowest-index same-label mask, locked and hidden masks untouched, erase to empty removes the mask, removals ordered so indices stay valid, the stop-at-edges limit
+- [x] The editor clears the selection from the stroke's reported removals
+- [x] Browser brush, eraser and fuzzy fill tests still pass
+
+## Comments
+
+- New module `oxilabel_core::stroke`: `MaskStroke::begin(erase, label, size, image, at)`, `segment(to, &annotations) -> SegmentChange` (painted region / erased indices+regions for redrawing), `set_limit`/`limit(on)`, `from_region` (fuzzy fill), `finish(self, &annotations) -> Option<StrokeOutcome { edit, removed }>` (`removed` highest first) and `StrokeOutcome::selection_after(&selection)`. Accessors `painted()`, `erased(index)`, `is_merged(index)`.
+- `oxilabel-ui/src/masks.rs` `Stroke` is now only the core stroke plus its sprites; the editor's `commit_stroke` maps the selection through `selection_after` instead of clearing it when the list shrank.
