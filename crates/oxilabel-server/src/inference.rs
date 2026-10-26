@@ -1,6 +1,6 @@
 //! Pre-annotation: the registered models, the worker that runs them (ADR 0001, through
-//! `worker::WorkerPort`), and runs of a model over images, in the background with progress and
-//! cancelling.
+//! `worker::WorkerPort`), and runs of a model over images (`pre_annotation_run`), in the
+//! background with progress and cancelling.
 
 use std::{
     collections::BTreeMap,
@@ -17,21 +17,18 @@ use axum::{
     routing::{get, post, put},
 };
 use oxilabel_core::{
-    Label,
-    annotation::Annotation,
-    import::SkipCount,
     inference::{DEFAULT_WORKER_URL, Model, ModelDefinition, RunRequest, RunState, RunStatus, WorkerHealth, WorkerSettings},
-    worker::{PredictRequest, WorkerModel},
+    worker::WorkerModel,
 };
 use serde::Deserialize;
 use sqlx::{Row, SqliteConnection, SqlitePool};
 
 use crate::{
     AppState,
-    annotation_store::{self, Replacing, Written},
     auth::{Admin, CurrentUser},
     error::ApiError,
     images, jobs, labels,
+    pre_annotation_run::PreAnnotationRun,
     worker::{HttpWorker, WorkerPort},
 };
 
@@ -178,9 +175,9 @@ struct RunTable {
 }
 
 impl Runs {
-    fn update(&self, id: u64, change: impl FnOnce(&mut RunStatus)) {
-        if let Some((status, _)) = self.0.lock().expect("runs lock").runs.get_mut(&id) {
-            change(status);
+    fn set(&self, status: &RunStatus) {
+        if let Some((current, _)) = self.0.lock().expect("runs lock").runs.get_mut(&status.id) {
+            current.clone_from(status);
         }
     }
 
@@ -218,6 +215,7 @@ async fn start_run(user: CurrentUser, State(state): State<AppState>, Path(projec
     let worker = current_worker(&state)?;
     let labels = labels::project_labels(&mut conn, project).await?;
     drop(conn);
+    let root = images::image_root(&state);
 
     let cancelled = Arc::new(AtomicBool::new(false));
     let status = {
@@ -241,90 +239,16 @@ async fn start_run(user: CurrentUser, State(state): State<AppState>, Path(projec
         table.runs.insert(status.id, (status.clone(), cancelled.clone()));
         status
     };
-    tokio::spawn(run(state, worker, status.id, project, model.definition, labels, image_ids, request.threshold, cancelled));
+    let runs = state.runs.clone();
+    let started = status.clone();
+    tokio::spawn(async move {
+        let Ok(root) = root else {
+            return runs.set(&RunStatus { state: RunState::Failed, error: Some("the image folder is not available".into()), ..started });
+        };
+        let run = PreAnnotationRun { pool: state.pool.clone(), root, project, model: model.definition, labels, threshold: request.threshold };
+        run.run(&worker, &image_ids, &cancelled, started, |status| runs.set(status)).await;
+    });
     Ok((StatusCode::ACCEPTED, Json(status)))
-}
-
-/// Runs the model image by image; between images it stops if cancelled.
-#[allow(clippy::too_many_arguments)]
-async fn run(state: AppState, worker: impl WorkerPort + 'static, id: u64, project: i64, model: ModelDefinition, labels: Vec<Label>, image_ids: Vec<i64>, threshold: Option<f64>, cancelled: Arc<AtomicBool>) {
-    let skip = |reason: String| state.runs.update(id, |status| SkipCount::tally(&mut status.skipped, reason, 1));
-    let fail = |error: String| state.runs.update(id, |status| (status.state, status.error) = (RunState::Failed, Some(error)));
-    let root = match images::image_root(&state) {
-        Ok(root) => root,
-        Err(_) => return fail("the image folder is not available".into()),
-    };
-    // Set when cancelling leaves images undone.
-    let mut stopped = false;
-    // The image changes from one to the next.
-    let mut request = PredictRequest { model: WorkerModel::from(&model), image: Vec::new() };
-    for image in image_ids {
-        if cancelled.load(Ordering::SeqCst) {
-            stopped = true;
-            break;
-        }
-        let path: String = match sqlx::query_scalar("SELECT path FROM images WHERE id = ?").bind(image).fetch_optional(&state.pool).await {
-            Ok(Some(path)) => path,
-            Ok(None) => {
-                skip("images removed meanwhile".into());
-                continue;
-            }
-            Err(err) => return fail(err.to_string()),
-        };
-        let Ok(bytes) = tokio::fs::read(root.join(&path)).await else {
-            skip("image files missing".into());
-            continue;
-        };
-        request.image = bytes;
-        let predictions = match worker.predict(&request).await {
-            Ok(predictions) => predictions,
-            Err(error) => return fail(error.to_string()),
-        };
-        // A run cancelled while the worker was busy keeps nothing of that image.
-        if cancelled.load(Ordering::SeqCst) {
-            stopped = true;
-            break;
-        }
-        let mut made = Vec::new();
-        for prediction in predictions {
-            if let Some(threshold) = threshold.filter(|threshold| prediction.confidence < *threshold) {
-                skip(format!("less confident than {threshold}"));
-                continue;
-            }
-            let wanted = model.class_map.get(&prediction.class).unwrap_or(&prediction.class);
-            let Some(label) = labels.iter().find(|label| label.name.eq_ignore_ascii_case(wanted)) else {
-                skip(format!("no label for class \"{}\"", prediction.class));
-                continue;
-            };
-            made.push(Annotation {
-                source: Some(model.name.clone()),
-                confidence: Some(prediction.confidence),
-                pending: true,
-                ..Annotation::manual(label.id, prediction.shape)
-            });
-        }
-        match replace_pending(&state.pool, project, image, &model.name, made).await {
-            Ok(Some(written)) => state.runs.update(id, |status| {
-                status.done += 1;
-                status.created += written.stored;
-                for skip in written.skipped {
-                    SkipCount::tally(&mut status.skipped, skip.reason, skip.count);
-                }
-            }),
-            Ok(None) => skip("images removed meanwhile".into()),
-            Err(err) => return fail(format!("saving failed: {}", err.message())),
-        }
-    }
-    state.runs.update(id, |status| status.state = if stopped { RunState::Cancelled } else { RunState::Finished });
-}
-
-/// Puts `made` on the image in place of the model's unreviewed pre-annotations there, leaving out
-/// what the store refuses; `None` if the image is gone.
-async fn replace_pending(pool: &SqlitePool, project: i64, image: i64, model: &str, made: Vec<Annotation>) -> Result<Option<Written>, ApiError> {
-    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let written = annotation_store::write(&mut tx, project, image, Replacing::Pending { source: model }, made).await?;
-    tx.commit().await?;
-    Ok(written)
 }
 
 async fn visible_run(state: &AppState, user: &CurrentUser, id: u64) -> Result<(RunStatus, Arc<AtomicBool>), ApiError> {

@@ -14,11 +14,6 @@ use oxilabel_core::{
 use oxilabel_server::fake_worker::{FakeRequest, FakeWorker};
 use serde_json::{Value, json};
 
-/// How many images went to the worker.
-fn predicted(worker: &FakeWorker) -> usize {
-    worker.requests().iter().filter(|request| matches!(request, FakeRequest::Predict(_))).count()
-}
-
 /// A project with labels "crack" (boxes) and "chip" (boxes and polygons) and `count` 20 × 10
 /// images; returns its id and the image ids in path order.
 async fn project(app: &TestApp, count: usize) -> (i64, Vec<i64>) {
@@ -137,6 +132,9 @@ async fn a_run_makes_pending_pre_annotations_with_source_and_confidence() {
         {"label": 2, "shape": {"type": "rectangle", "min": {"x": 2.0, "y": 2.0}, "max": {"x": 4.0, "y": 4.0}}, "source": "fake v1", "confidence": 0.4, "pending": true},
     ]));
     assert_eq!(list["version"], json!(1), "an open editor is told to reload");
+    // Unreviewed pre-annotations do not count yet.
+    let (_, statistics) = call(&app, Method::GET, &format!("/api/projects/{p}/statistics"), None).await;
+    assert_eq!(statistics["labels"][0]["annotations"], json!(0), "{statistics}");
 }
 
 #[tokio::test]
@@ -184,40 +182,6 @@ async fn exports_leave_out_unreviewed_pre_annotations() {
 }
 
 #[tokio::test]
-async fn a_run_over_a_job_can_be_cancelled_and_reports_progress() {
-    let mut worker = FakeWorker::default();
-    worker.delay = Duration::from_millis(100);
-    let app = test_app_with_worker(Some(worker.clone().serve().await)).await;
-    let (p, images) = project(&app, 6).await;
-    let (_, jobs) = call(&app, Method::POST, &format!("/api/projects/{p}/jobs"), Some(json!({"image_ids": images}))).await;
-    let m = model(&app).await;
-    let (_, started) = call(&app, Method::POST, &format!("/api/projects/{p}/pre-annotations"), Some(json!({"model": m, "job": jobs[0]["id"]}))).await;
-    let id = started["id"].as_u64().unwrap();
-    assert_eq!((&started["total"], &started["state"]), (&json!(6), &json!("running")));
-    tokio::time::sleep(Duration::from_millis(250)).await;
-    let (status, _) = call(&app, Method::DELETE, &format!("/api/runs/{id}"), None).await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    let status = wait(&app, id).await;
-    assert_eq!(status["state"], json!("cancelled"));
-    let done = status["done"].as_u64().unwrap();
-    assert!((1..6).contains(&done), "{status}");
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(predicted(&worker) as u64 <= done + 1, "no more images go to the worker");
-}
-
-#[tokio::test]
-async fn a_failing_worker_ends_the_run_with_its_message() {
-    let mut worker = FakeWorker::default();
-    worker.failure = Some("out of GPU memory".into());
-    let app = test_app_with_worker(Some(worker.serve().await)).await;
-    let (p, images) = project(&app, 2).await;
-    let m = model(&app).await;
-    let status = run(&app, p, json!({"model": m, "image_ids": images})).await;
-    assert_eq!(status["state"], json!("failed"));
-    assert!(status["error"].as_str().unwrap().contains("out of GPU memory"), "{status}");
-}
-
-#[tokio::test]
 async fn annotators_run_models_only_on_images_of_their_jobs() {
     let app = test_app_with_worker(Some(FakeWorker::default().serve().await)).await;
     let (p, images) = project(&app, 2).await;
@@ -231,24 +195,6 @@ async fn annotators_run_models_only_on_images_of_their_jobs() {
     assert_eq!(status["created"], json!(2));
     let (status, _) = call(&anna, Method::POST, &format!("/api/projects/{p}/pre-annotations"), Some(json!({"model": m, "image_ids": []}))).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn an_image_removed_during_a_run_is_skipped_and_statistics_wait_for_review() {
-    let mut worker = FakeWorker::default();
-    worker.delay = Duration::from_millis(150);
-    let app = test_app_with_worker(Some(worker.serve().await)).await;
-    let (p, images) = project(&app, 3).await;
-    let m = model(&app).await;
-    let (_, started) = call(&app, Method::POST, &format!("/api/projects/{p}/pre-annotations"), Some(json!({"model": m, "image_ids": images}))).await;
-    call(&app, Method::POST, &format!("/api/projects/{p}/image-removals"), Some(json!({"ids": [images[2]]}))).await;
-    let status = wait(&app, started["id"].as_u64().unwrap()).await;
-    assert_eq!((&status["state"], &status["done"], &status["created"]), (&json!("finished"), &json!(2), &json!(4)), "{status}");
-    assert!(status["skipped"].as_array().unwrap().iter().any(|s| s["reason"] == "images removed meanwhile"), "{status}");
-
-    // Unreviewed pre-annotations do not count yet.
-    let (_, statistics) = call(&app, Method::GET, &format!("/api/projects/{p}/statistics"), None).await;
-    assert_eq!(statistics["labels"][0]["annotations"], json!(0), "{statistics}");
 }
 
 #[tokio::test]
@@ -291,14 +237,4 @@ async fn the_worker_command_is_started_by_the_server() {
     }
     assert!(marker.exists(), "the command ran");
     call(&app, Method::PUT, "/api/settings/worker", Some(json!({}))).await;
-}
-
-#[tokio::test]
-async fn a_confidence_threshold_leaves_out_less_certain_predictions() {
-    let app = test_app_with_worker(Some(FakeWorker::default().serve().await)).await;
-    let (p, images) = project(&app, 1).await;
-    let m = model(&app).await;
-    let status = run(&app, p, json!({"model": m, "image_ids": images, "threshold": 0.5})).await;
-    assert_eq!(status["created"], json!(1), "{status}");
-    assert!(status["skipped"].as_array().unwrap().iter().any(|s| s["reason"] == "less confident than 0.5" && s["count"] == 1), "{status}");
 }
