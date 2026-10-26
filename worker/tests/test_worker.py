@@ -18,6 +18,9 @@ from oxilabel_worker import shapes  # noqa: E402
 from oxilabel_worker.server import Models, serve  # noqa: E402
 
 ADAPTER = str(Path(__file__).with_name("fake_adapter.py"))
+# Each shape helper's output for given arguments; the server's tests parse the same file
+# (crates/oxilabel-core/src/worker.rs), so both sides agree on every shape type.
+SHAPES = json.loads(Path(__file__).with_name("shapes.json").read_text())
 
 
 class WorkerTest(unittest.TestCase):
@@ -108,6 +111,18 @@ class ShapesTest(unittest.TestCase):
         pixels[3, 4] = 1
         self.assertEqual(shapes.mask(pixels), {"type": "mask", "left": 3, "top": 2, "width": 2, "height": 2, "rle": [0, 2, 1, 1]})
         self.assertIsNone(shapes.mask(np.zeros((2, 2))))
+
+    def test_every_helper_writes_the_shape_the_server_reads(self):
+        for case in SHAPES:
+            with self.subTest(case["helper"]):
+                args = case["args"]
+                if case["helper"] == "mask":
+                    try:
+                        import numpy as np
+                    except ImportError:
+                        self.skipTest("numpy is not installed")
+                    args = [np.array(args[0], np.uint8)]
+                self.assertEqual(getattr(shapes, case["helper"])(*args), case["shape"])
 
 
 if __name__ == "__main__":
