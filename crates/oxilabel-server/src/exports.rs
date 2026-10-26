@@ -76,9 +76,7 @@ async fn create_export(
     let mut labels = read.labels;
     // This export's footprints, in place of the labels' own.
     for label in &mut labels {
-        if let Some(footprint) = request.footprints.get(&label.id) {
-            label.footprint = footprint.validated().map_err(|err| ApiError::BadRequest(format!("{}: {err}", label.name)))?;
-        }
+        label.footprint = request.footprint_of(label).map_err(ApiError::BadRequest)?;
     }
     let images: Vec<ExportImage> = read
         .images
