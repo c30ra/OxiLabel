@@ -78,9 +78,7 @@ async fn create_export(
     let mut labels = labels::project_labels(&mut conn, project).await?;
     // This export's footprints, in place of the labels' own.
     for label in &mut labels {
-        if let Some(footprint) = request.footprints.get(&label.id) {
-            label.footprint = footprint.validated().map_err(|err| ApiError::BadRequest(format!("{}: {err}", label.name)))?;
-        }
+        label.footprint = request.footprint_of(label).map_err(ApiError::BadRequest)?;
     }
 
     let mut annotations: HashMap<i64, Vec<Annotation>> = HashMap::new();

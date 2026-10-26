@@ -25,7 +25,13 @@ pub mod view;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{attribute::AttributeDefinition, constraint::ShapeConstraints};
+use crate::{
+    annotation::Shape,
+    attribute::AttributeDefinition,
+    constraint::ShapeConstraints,
+    geometry::Point,
+    mask::Bitmap,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Project {
@@ -137,8 +143,18 @@ pub(crate) fn default_true() -> bool {
 }
 
 /// A label's export footprint: the area its polylines and points become in exports that need
-/// areas or boxes. Polylines are stroked `line_width` wide; each point becomes a disc of
-/// `point_radius`, or a square of twice that side. In original-image pixels.
+/// areas or boxes, and that the editor shows as their footprint ghost. Polylines are stroked
+/// `line_width` wide; each point becomes a disc of `point_radius`, or a square of twice that
+/// side. In original-image pixels.
+///
+/// Lines and points are drawn as the author's `cvat_to_masks.py` draws them with OpenCV:
+/// coordinates rounded to whole pixels and taken as pixel centres, the line width (at least 1)
+/// and point radius cut to whole pixels, a radius of 0 still drawing the one pixel. OpenCV's thick
+/// lines come out wider than their thickness t: 2·⌈t/2⌉ + 1 pixels across when level or upright,
+/// drawn here as a round-ended stroke of half-width ⌈t/2⌉ + ½ (½ for a 1-pixel line). At other
+/// angles OpenCV's width wanders by about a pixel either way, which this does not follow. Its
+/// filled circles of radius r are the pixels whose centres lie within r. A square point covers
+/// the pixels whose centres lie in the square.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Footprint {
     #[serde(default = "default_line_width")]
@@ -156,16 +172,49 @@ impl Default for Footprint {
 }
 
 impl Footprint {
-    /// Half the width of the band a polyline covers in exports, drawn like OpenCV draws thick
-    /// lines: the width cut to whole pixels (at least 1), 2·⌈w/2⌉ + 1 pixels across.
-    pub fn line_reach(&self) -> f64 {
+    /// The pixels a polyline or points `shape` covers in an `image` of that size (a one-point
+    /// polyline is a dot); `None` for other shapes.
+    pub fn region(&self, shape: &Shape, image: (u32, u32)) -> Option<Bitmap> {
+        // OpenCV's coordinates: whole pixels, at the pixel's centre.
+        let pixel = |p: &Point| Point::new(p.x.round() + 0.5, p.y.round() + 0.5);
+        let mut region = Bitmap::default();
+        match shape {
+            Shape::Polyline { points } => {
+                let reach = self.line_reach();
+                let ends: Vec<Point> = points.iter().map(pixel).collect();
+                match &ends[..] {
+                    [dot] => {
+                        region.paint(*dot, *dot, reach, image);
+                    }
+                    _ => ends.windows(2).for_each(|pair| {
+                        region.paint(pair[0], pair[1], reach, image);
+                    }),
+                }
+            }
+            Shape::Points { points } => {
+                let reach = self.point_reach();
+                for point in points.iter().map(pixel) {
+                    match self.point_shape {
+                        PointShape::Disc => region.paint(point, point, reach, image),
+                        PointShape::Square => region.paint_square(point, reach, image),
+                    };
+                }
+            }
+            _ => return None,
+        }
+        Some(region)
+    }
+
+    /// Half the width of the band a polyline covers: the width cut to whole pixels (at least 1),
+    /// 2·⌈w/2⌉ + 1 pixels across.
+    fn line_reach(&self) -> f64 {
         let thickness = self.line_width.trunc().max(1.0);
         if thickness == 1.0 { 0.5 } else { (thickness / 2.0).ceil() + 0.5 }
     }
 
     /// How far from a point's pixel centre the pixels of its area lie: the radius cut to whole
     /// pixels (0 still covers the one pixel).
-    pub fn point_reach(&self) -> f64 {
+    fn point_reach(&self) -> f64 {
         self.point_radius.trunc().max(0.0)
     }
 
