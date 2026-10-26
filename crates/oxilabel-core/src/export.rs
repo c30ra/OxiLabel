@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::Footprint;
+use crate::{Footprint, Label};
 
 /// Whether an export includes the image files.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,6 +94,17 @@ pub struct ExportRequest {
     /// by their bare points.
     #[serde(default = "crate::default_true")]
     pub footprint_bounds: bool,
+}
+
+impl ExportRequest {
+    /// The footprint this export draws `label`'s polylines and points with: its own for this
+    /// export, made sound, or else the label's.
+    pub fn footprint_of(&self, label: &Label) -> Result<Footprint, String> {
+        match self.footprints.get(&label.id) {
+            Some(footprint) => footprint.validated().map_err(|err| format!("{}: {err}", label.name)),
+            None => Ok(label.footprint),
+        }
+    }
 }
 
 /// A finished export: a folder on the server, also downloadable as a zip.
