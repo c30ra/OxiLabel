@@ -5,6 +5,7 @@ use leptos_router::{components::A, hooks::use_params_map};
 use oxilabel_core::{
     Image, ImageFilter, Label, Project,
     annotation::{Annotation, ImageAnnotations, SaveAnnotations},
+    editor::Session,
     inference::RunStatus,
     geometry::Point,
     view::View,
@@ -102,7 +103,8 @@ fn Workspace(
     let space_held = RwSignal::new(false);
     let view_filter = ViewFilter::new(project.id);
     // Start with the first label; switching to a tool picks one that allows its shape.
-    let editor = Editor::new(conformed(&labels, annotations.annotations), labels.iter().map(|label| label.id).min(), tools);
+    let session = Session::new(conformed(&labels, annotations.annotations), labels.clone(), (image.width, image.height));
+    let editor = Editor::new(session, labels.iter().map(|label| label.id).min(), tools);
     let labels_for_reload = StoredValue::new(labels.clone());
     editor.usable_shapes.set(labels.iter().flat_map(|label| label.shape_types.iter().copied()).collect());
     let picker_labels = labels.clone();
@@ -129,14 +131,14 @@ fn Workspace(
         ) {
             return;
         }
-        let revision = editor.revision.get_untracked();
+        let revision = editor.peek(Session::revision);
         if revision == saved_revision.get_untracked() {
             state.set(SaveState::Saved);
             return;
         }
         let request = SaveAnnotations {
             base_version: version.get_untracked(),
-            annotations: editor.annotations.get_untracked(),
+            annotations: editor.peek(|session| session.annotations().to_vec()),
         };
         state.set(SaveState::Saving);
         spawn_local(async move {
@@ -148,7 +150,7 @@ fn Workspace(
                     saved_revision.set(revision);
                     state.set(SaveState::Saved);
                     // Edits made while saving are saved next.
-                    if editor.revision.get_untracked() != revision {
+                    if editor.peek(Session::revision) != revision {
                         retry.update(|n| *n += 1);
                     }
                 }
@@ -160,7 +162,7 @@ fn Workspace(
         });
     };
     Effect::new(move |_| {
-        let revision = editor.revision.get();
+        let revision = editor.revision();
         retry.track();
         if revision == saved_revision.get_untracked()
             || matches!(state.get_untracked(), SaveState::Conflict(_))
@@ -185,12 +187,12 @@ fn Workspace(
     {
         let url = url.get_value();
         on_cleanup(move || {
-            if editor.revision.get_untracked() != saved_revision.get_untracked()
+            if editor.peek(Session::revision) != saved_revision.get_untracked()
                 && !matches!(state.get_untracked(), SaveState::Conflict(_))
             {
                 let request = SaveAnnotations {
                     base_version: version.get_untracked(),
-                    annotations: editor.annotations.get_untracked(),
+                    annotations: editor.peek(|session| session.annotations().to_vec()),
                 };
                 spawn_local(async move {
                     let _ = api::put_detailed::<_, ImageAnnotations>(&url, &request).await;
@@ -199,7 +201,7 @@ fn Workspace(
         });
     }
     let before_unload = window_event_listener(ev::beforeunload, move |ev| {
-        if editor.revision.get_untracked() != saved_revision.get_untracked() {
+        if editor.peek(Session::revision) != saved_revision.get_untracked() {
             ev.prevent_default();
             ev.set_return_value("");
         }
@@ -210,10 +212,10 @@ fn Workspace(
         spawn_local(async move {
             match api::get::<ImageAnnotations>(&url.get_value()).await {
                 Ok(latest) => {
-                    editor.reset(conformed(&labels_for_reload.get_value(), latest.annotations));
+                    editor.update(|session| session.reset(conformed(&labels_for_reload.get_value(), latest.annotations)));
                     version.set(latest.version);
                     nav.annotated.set(latest.annotated);
-                    saved_revision.set(editor.revision.get_untracked());
+                    saved_revision.set(editor.peek(Session::revision));
                     state.set(SaveState::Saved);
                 }
                 Err(message) => editor.notice.set(Some(message)),
@@ -227,7 +229,7 @@ fn Workspace(
         spawn_local(async move {
             match api::get::<ImageAnnotations>(&url.get_value()).await {
                 Ok(latest) => {
-                    editor.merge_pre_annotations(&run.model, &latest.annotations);
+                    editor.update(|session| session.merge_pre_annotations(&run.model, &latest.annotations));
                     version.set(latest.version);
                     // A save made during the run was refused because of it; this one is not.
                     if matches!(state.get_untracked(), SaveState::Conflict(_)) {

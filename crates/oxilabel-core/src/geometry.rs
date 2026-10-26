@@ -338,29 +338,6 @@ impl Rect {
         Point::new(along(handle.x, self.min.x, self.max.x), along(handle.y, self.min.y, self.max.y))
     }
 
-    /// The handle nearest to `point` within `tolerance` (per axis); corners win ties.
-    pub fn handle_at(&self, point: Point, tolerance: f64) -> Option<Handle> {
-        let offset = |handle: &Handle| {
-            let at = self.handle_position(*handle);
-            ((at.x - point.x).abs(), (at.y - point.y).abs())
-        };
-        let is_side = |handle: &Handle| handle.x == Edge::Neither || handle.y == Edge::Neither;
-        Handle::ALL
-            .iter()
-            .filter(|handle| {
-                let (dx, dy) = offset(handle);
-                dx <= tolerance && dy <= tolerance
-            })
-            .min_by(|a, b| {
-                let distance = |handle| {
-                    let (dx, dy) = offset(handle);
-                    dx.hypot(dy)
-                };
-                distance(a).total_cmp(&distance(b)).then(is_side(a).cmp(&is_side(b)))
-            })
-            .copied()
-    }
-
     /// The rectangle after dragging `handle` to `to`. Dragging past the opposite edge flips it.
     pub fn resized(&self, handle: Handle, to: Point) -> Self {
         let mut corners = (self.min, self.max);
@@ -489,18 +466,6 @@ mod tests {
         assert_eq!(positions[1], Point::new(50.0, 0.0));
         assert_eq!(positions[4], Point::new(100.0, 50.0));
         assert_eq!(positions[7], Point::new(0.0, 25.0));
-    }
-
-    #[test]
-    fn the_nearest_handle_under_the_pointer_is_found() {
-        let rect = Rect::new(0.0, 0.0, 100.0, 50.0);
-        assert_eq!(rect.handle_at(Point::new(98.0, 52.0), 4.0), Some(Handle { x: Edge::Max, y: Edge::Max }));
-        assert_eq!(rect.handle_at(Point::new(51.0, -1.0), 4.0), Some(Handle { x: Edge::Neither, y: Edge::Min }));
-        assert_eq!(rect.handle_at(Point::new(50.0, 25.0), 4.0), None);
-        // On a tiny rectangle every handle is in reach; the nearest one wins.
-        let tiny = Rect::new(0.0, 0.0, 4.0, 4.0);
-        assert_eq!(tiny.handle_at(Point::new(3.5, 0.5), 4.0), Some(Handle { x: Edge::Max, y: Edge::Min }));
-        assert_eq!(tiny.handle_at(Point::new(4.0, 2.2), 4.0), Some(Handle { x: Edge::Max, y: Edge::Neither }));
     }
 
     #[test]

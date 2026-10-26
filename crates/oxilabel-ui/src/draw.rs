@@ -4,15 +4,14 @@
 use oxilabel_core::{
     Footprint, PointShape,
     annotation::Shape,
-    geometry::{Handle, Point, Rect},
+    editor::grip::{Grip, GripKind},
+    geometry::{Point, Rect},
     oriented::OrientedRect,
     view::View,
 };
 use web_sys::CanvasRenderingContext2d;
 
 pub const HANDLE_SIZE: f64 = 8.0;
-/// Screen distance from an oriented rectangle's edge to its rotation handle.
-pub const ROTATION_HANDLE_DISTANCE: f64 = 24.0;
 const POINT_RADIUS: f64 = 4.0;
 const TAG_HEIGHT: f64 = 18.0;
 
@@ -127,20 +126,14 @@ pub fn oriented_preview(context: &CanvasRenderingContext2d, view: View, rect: Or
     shape(context, view, &Shape::OrientedRectangle(rect), Look { color, selected: false, dashed: true });
 }
 
-/// The eight resize handles of an axis-aligned rectangle.
-pub fn rectangle_handles(context: &CanvasRenderingContext2d, view: View, rect: Rect, color: &str) {
-    let screen = Rect { min: view.to_screen(rect.min), max: view.to_screen(rect.max) };
-    for handle in Handle::ALL {
-        square(context, screen.handle_position(handle), color);
-    }
-}
-
-/// Square handles on every vertex, and round "+" handles on edge midpoints when vertices can be
-/// inserted there.
-pub fn vertex_handles(context: &CanvasRenderingContext2d, view: View, shape: &Shape, color: &str, midpoints: bool) {
-    if midpoints {
-        for (a, b) in shape.edges() {
-            let at = view.to_screen(a.midpoint(b));
+/// One handle of the selected shape (see `oxilabel_core::editor::grip`): a square on a rectangle
+/// handle or a vertex, a round "+" in the middle of an edge, and round handles that change a
+/// radius or turn the shape (the latter on a stem from the outline).
+pub fn grip(context: &CanvasRenderingContext2d, view: View, grip: Grip, color: &str) {
+    let at = view.to_screen(grip.at);
+    match grip.kind {
+        GripKind::Resize(_) | GripKind::Vertex(_) => square(context, at, color),
+        GripKind::Insert(_) => {
             context.begin_path();
             context.arc(at.x, at.y, 3.5, 0.0, std::f64::consts::TAU).ok();
             context.set_fill_style_str("#141517");
@@ -149,32 +142,22 @@ pub fn vertex_handles(context: &CanvasRenderingContext2d, view: View, shape: &Sh
             context.set_stroke_style_str(color);
             context.stroke();
         }
-    }
-    for vertex in shape.vertices() {
-        square(context, view.to_screen(vertex), color);
+        GripKind::Radius(_) => knob(context, at, color),
+        GripKind::Turn { from } => {
+            let from = view.to_screen(from);
+            context.begin_path();
+            context.move_to(from.x, from.y);
+            context.line_to(at.x, at.y);
+            context.set_line_width(1.5);
+            context.set_stroke_style_str(color);
+            context.stroke();
+            knob(context, at, color);
+        }
     }
 }
 
-/// The round handle beyond a shape that turns it (at `handle`), joined by a line to the point
-/// `edge` on the shape's outline.
-pub fn rotation_handle(context: &CanvasRenderingContext2d, view: View, edge: Point, handle: Point, color: &str) {
-    let (handle, edge) = (view.to_screen(handle), view.to_screen(edge));
-    context.begin_path();
-    context.move_to(edge.x, edge.y);
-    context.line_to(handle.x, handle.y);
-    context.set_line_width(1.5);
-    context.set_stroke_style_str(color);
-    context.stroke();
-    context.begin_path();
-    context.arc(handle.x, handle.y, 5.0, 0.0, std::f64::consts::TAU).ok();
-    context.set_fill_style_str("#ffffff");
-    context.fill();
-    context.stroke();
-}
-
-/// A round handle on an ellipse's outline that changes one radius.
-pub fn radius_handle(context: &CanvasRenderingContext2d, view: View, at: Point, color: &str) {
-    let at = view.to_screen(at);
+/// A round white handle.
+fn knob(context: &CanvasRenderingContext2d, at: Point, color: &str) {
     context.begin_path();
     context.arc(at.x, at.y, 5.0, 0.0, std::f64::consts::TAU).ok();
     context.set_fill_style_str("#ffffff");

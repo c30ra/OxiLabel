@@ -5,6 +5,7 @@ pub mod attribute;
 pub mod clipboard;
 pub mod constraint;
 pub mod edges;
+pub mod editor;
 pub mod ellipse;
 pub mod export;
 pub mod fill;
