@@ -7,8 +7,9 @@
 use std::collections::BTreeSet;
 
 use oxilabel_core::{
-    Label,
+    Label, ShapeType,
     annotation::{Annotation, ImageAnnotations, counts_as_annotated},
+    attribute::Attributes,
     import::SkipCount,
 };
 use sqlx::{Row, SqliteConnection};
@@ -65,9 +66,12 @@ pub(crate) async fn save(conn: &mut SqliteConnection, project: i64, image: i64, 
 }
 
 /// Which of the image's stored annotations a write takes the place of.
+#[derive(Clone, Copy)]
 pub(crate) enum Replacing<'a> {
     /// All of them.
     All,
+    /// None: the write adds to them.
+    Nothing,
     /// The unreviewed pre-annotations of the model named `source`.
     Pending { source: &'a str },
 }
@@ -76,6 +80,8 @@ pub(crate) enum Replacing<'a> {
 pub(crate) struct Written {
     pub stored: usize,
     pub skipped: Vec<SkipCount>,
+    /// The positions, in the list given, of the annotations left out, in order.
+    pub left_out: Vec<usize>,
 }
 
 /// Puts `annotations` on the image in place of `replacing`, on top of the annotations it keeps.
@@ -86,33 +92,137 @@ pub(crate) async fn write(conn: &mut SqliteConnection, project: i64, image: i64,
     let Some((width, height, _)) = image_row(conn, project, image).await? else {
         return Ok(None);
     };
-    remove(conn, image, replacing).await?;
-    let tagged = sqlx::query_scalar("SELECT label_id FROM annotations WHERE image_id = ? AND json_extract(shape, '$.type') = 'tag'")
-        .bind(image)
-        .fetch_all(&mut *conn)
-        .await?
-        .into_iter()
-        .collect();
+    let tagged = kept_tags(conn, image, replacing).await?;
+    let removed = remove(conn, image, replacing).await?;
     let first: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(position) + 1, 0) FROM annotations WHERE image_id = ?").bind(image).fetch_one(&mut *conn).await?;
     let labels = labels::project_labels(conn, project).await?;
     let (fitting, refused) = sort_out(&labels, width, height, tagged, annotations);
     insert_annotations(conn, project, image, first, &fitting).await?;
-    // An editor holding the old version is told to reload.
-    sqlx::query("UPDATE images SET version = version + 1 WHERE id = ?").bind(image).execute(&mut *conn).await?;
-    let mut skipped = Vec::new();
-    for (_, reason) in refused {
-        SkipCount::tally(&mut skipped, reason, 1);
+    if removed > 0 || !fitting.is_empty() {
+        // An editor holding the old version is told to reload.
+        bump_version(conn, image).await?;
     }
-    Ok(Some(Written { stored: fitting.len(), skipped }))
+    Ok(Some(written(fitting.len(), refused)))
 }
 
-async fn remove(conn: &mut SqliteConnection, image: i64, replacing: Replacing<'_>) -> Result<(), ApiError> {
-    match replacing {
-        Replacing::All => sqlx::query("DELETE FROM annotations WHERE image_id = ?").bind(image).execute(&mut *conn).await?,
+/// What `write` would store and leave out, writing nothing: for previews of imports whose labels
+/// or images do not exist yet. `labels` stand for the project's and `width` × `height` for the
+/// image's size; an `image` id that no image has stands for a new image.
+pub(crate) async fn preview(
+    conn: &mut SqliteConnection,
+    image: i64,
+    (width, height): (u32, u32),
+    labels: &[Label],
+    replacing: Replacing<'_>,
+    annotations: Vec<Annotation>,
+) -> Result<Written, ApiError> {
+    let tagged = kept_tags(conn, image, replacing).await?;
+    let (fitting, refused) = sort_out(labels, width, height, tagged, annotations);
+    Ok(written(fitting.len(), refused))
+}
+
+fn written(stored: usize, refused: Vec<(usize, String)>) -> Written {
+    let (mut skipped, mut left_out) = (Vec::new(), Vec::with_capacity(refused.len()));
+    for (index, reason) in refused {
+        SkipCount::tally(&mut skipped, reason, 1);
+        left_out.push(index);
+    }
+    Written { stored, skipped, left_out }
+}
+
+/// The labels the image has as tags among the annotations a write in place of `replacing` keeps.
+async fn kept_tags(conn: &mut SqliteConnection, image: i64, replacing: Replacing<'_>) -> Result<BTreeSet<i64>, ApiError> {
+    const TAGS: &str = "SELECT label_id FROM annotations WHERE image_id = ? AND json_extract(shape, '$.type') = 'tag'";
+    let tags: Vec<i64> = match replacing {
+        Replacing::All => Vec::new(),
+        Replacing::Nothing => sqlx::query_scalar(TAGS).bind(image).fetch_all(&mut *conn).await?,
         Replacing::Pending { source } => {
-            sqlx::query("DELETE FROM annotations WHERE image_id = ? AND pending AND source = ?").bind(image).bind(source).execute(&mut *conn).await?
+            sqlx::query_scalar(&format!("{TAGS} AND NOT (pending AND source IS ?)")).bind(image).bind(source).fetch_all(&mut *conn).await?
         }
     };
+    Ok(tags.into_iter().collect())
+}
+
+/// Removes the annotations a write takes the place of; how many.
+async fn remove(conn: &mut SqliteConnection, image: i64, replacing: Replacing<'_>) -> Result<u64, ApiError> {
+    let removed = match replacing {
+        Replacing::All => sqlx::query("DELETE FROM annotations WHERE image_id = ?").bind(image).execute(&mut *conn).await?,
+        Replacing::Nothing => return Ok(0),
+        Replacing::Pending { source } => {
+            sqlx::query("DELETE FROM annotations WHERE image_id = ? AND pending AND source IS ?").bind(image).bind(source).execute(&mut *conn).await?
+        }
+    };
+    Ok(removed.rows_affected())
+}
+
+async fn bump_version(conn: &mut SqliteConnection, image: i64) -> Result<(), ApiError> {
+    sqlx::query("UPDATE images SET version = version + 1 WHERE id = ?").bind(image).execute(&mut *conn).await?;
+    Ok(())
+}
+
+/// Makes the stored annotations of `label` fit its changed definition: values of removed
+/// attributes go, values that no longer fit and missing ones become defaults, and the images whose
+/// annotations change get a new version. Refused (`Conflict`, saying how many annotations are in
+/// the way) while annotations have a shape type the label no longer allows.
+pub(crate) async fn fit_to_label(conn: &mut SqliteConnection, project: i64, label: &Label) -> Result<(), ApiError> {
+    let used: Vec<(String, i64)> = sqlx::query_as("SELECT json_extract(shape, '$.type'), COUNT(*) FROM annotations WHERE project_id = ? AND label_id = ? GROUP BY 1")
+        .bind(project)
+        .bind(label.id)
+        .fetch_all(&mut *conn)
+        .await?;
+    let mut disallowed = Vec::new();
+    for (name, count) in used {
+        let shape_type: ShapeType = serde_json::from_value(serde_json::Value::String(name)).map_err(|err| ApiError::Internal(format!("stored shapes are unreadable: {err}")))?;
+        if !label.shape_types.contains(&shape_type) {
+            disallowed.push((shape_type, count));
+        }
+    }
+    if !disallowed.is_empty() {
+        disallowed.sort_by_key(|(shape_type, _)| ShapeType::ALL.iter().position(|other| other == shape_type));
+        let uses: Vec<String> = disallowed
+            .iter()
+            .map(|(shape_type, count)| format!("{count} {} with {} shapes", if *count == 1 { "annotation" } else { "annotations" }, shape_type.name().to_lowercase()))
+            .collect();
+        let (last, rest) = uses.split_last().expect("not empty");
+        let uses = if rest.is_empty() { last.clone() } else { format!("{} and {last}", rest.join(", ")) };
+        let types = if disallowed.len() == 1 { "that shape type" } else { "those shape types" };
+        return Err(ApiError::Conflict(format!("label \"{}\" still has {uses}; delete them before removing {types}", label.name)));
+    }
+
+    let rows = sqlx::query("SELECT id, image_id, attributes FROM annotations WHERE project_id = ? AND label_id = ?")
+        .bind(project)
+        .bind(label.id)
+        .fetch_all(&mut *conn)
+        .await?;
+    let mut changed_images = BTreeSet::new();
+    for row in rows {
+        let stored: Attributes = serde_json::from_str(row.get("attributes")).unwrap_or_default();
+        let conformed = label.conform_attributes(&stored);
+        if conformed != stored {
+            sqlx::query("UPDATE annotations SET attributes = ? WHERE id = ?")
+                .bind(serde_json::to_string(&conformed).expect("attributes serialize"))
+                .bind(row.get::<i64, _>("id"))
+                .execute(&mut *conn)
+                .await?;
+            changed_images.insert(row.get::<i64, _>("image_id"));
+        }
+    }
+    // Editors holding the old version reload.
+    for image in changed_images {
+        bump_version(conn, image).await?;
+    }
+    Ok(())
+}
+
+/// Removes every annotation of `label`, which is being deleted. The images they were on get a new
+/// version, so editors holding the old one cannot save them back; the annotated status stays.
+pub(crate) async fn remove_label_annotations(conn: &mut SqliteConnection, project: i64, label: i64) -> Result<(), ApiError> {
+    sqlx::query("UPDATE images SET version = version + 1 WHERE id IN (SELECT image_id FROM annotations WHERE project_id = ? AND label_id = ?)")
+        .bind(project)
+        .bind(label)
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("DELETE FROM annotations WHERE project_id = ? AND label_id = ?").bind(project).bind(label).execute(&mut *conn).await?;
     Ok(())
 }
 
@@ -171,7 +281,7 @@ pub(crate) fn annotation_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Annot
 
 /// Checks that `label` allows the annotation's shape, the shape lies in a `width` × `height`
 /// image, and its attribute values suit the label.
-pub(crate) fn check_annotation(label: &Label, annotation: &Annotation, width: u32, height: u32) -> Result<(), String> {
+fn check_annotation(label: &Label, annotation: &Annotation, width: u32, height: u32) -> Result<(), String> {
     let shape_type = annotation.shape.shape_type();
     if !label.shape_types.contains(&shape_type) {
         let name = serde_json::to_value(shape_type).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
@@ -182,7 +292,7 @@ pub(crate) fn check_annotation(label: &Label, annotation: &Annotation, width: u3
 }
 
 /// Stores `annotations` on the image in order, the first at drawing position `first`.
-pub(crate) async fn insert_annotations(conn: &mut SqliteConnection, project: i64, image: i64, first: i64, annotations: &[Annotation]) -> Result<(), ApiError> {
+async fn insert_annotations(conn: &mut SqliteConnection, project: i64, image: i64, first: i64, annotations: &[Annotation]) -> Result<(), ApiError> {
     for (offset, annotation) in annotations.iter().enumerate() {
         let shape = serde_json::to_string(&annotation.shape).expect("shapes serialize");
         sqlx::query(
@@ -386,6 +496,26 @@ mod tests {
         let written = ok(write(&mut conn, 1, image, Replacing::Pending { source: "a" }, vec![predicted("a", tag()), predicted("a", tag())]).await).unwrap();
         assert_eq!((written.stored, skips(&written)), (1, vec![("the image already has the tag \"Defect\"", 1)]));
         assert_eq!(ok(load(&mut conn, 1, image).await).annotations, [predicted("a", tag())]);
+    }
+
+    #[tokio::test]
+    async fn an_append_goes_on_top_of_every_stored_annotation_and_skips_tags_the_image_has() {
+        let (mut conn, image) = image().await;
+        ok(save(&mut conn, 1, image, 0, vec![crack(1.0), tag()]).await);
+        let written = ok(write(&mut conn, 1, image, Replacing::Nothing, vec![tag(), crack(3.0), crack(5.0)]).await).unwrap();
+        assert_eq!((written.stored, skips(&written)), (2, vec![("the image already has the tag \"Defect\"", 1)]));
+        let stored = ok(load(&mut conn, 1, image).await);
+        assert_eq!((stored.version, stored.annotations), (2, vec![crack(1.0), tag(), crack(3.0), crack(5.0)]));
+    }
+
+    #[tokio::test]
+    async fn a_write_that_changes_nothing_keeps_the_version() {
+        let (mut conn, image) = image().await;
+        ok(save(&mut conn, 1, image, 0, vec![tag()]).await);
+        let written = ok(write(&mut conn, 1, image, Replacing::Nothing, vec![tag()]).await).unwrap();
+        assert_eq!(written.stored, 0);
+        ok(write(&mut conn, 1, image, Replacing::Pending { source: "a" }, vec![]).await);
+        assert_eq!(ok(load(&mut conn, 1, image).await).version, 1, "an editor holding version 1 keeps working");
     }
 
     #[tokio::test]

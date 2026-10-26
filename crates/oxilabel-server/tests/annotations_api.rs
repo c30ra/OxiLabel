@@ -293,6 +293,32 @@ async fn editing_a_labels_attributes_conforms_the_stored_values_and_bumps_the_ve
 }
 
 #[tokio::test]
+async fn a_label_keeps_the_shape_types_its_annotations_use() {
+    let app = test_app().await;
+    let (project, image) = setup(&app).await;
+    let labels = format!("/api/projects/{project}/labels");
+    let definition = |shape_types: Value| json!({"name": "any", "color": "#ffffff", "shape_types": shape_types});
+    call(&app, Method::POST, &labels, Some(definition(json!(["rectangle", "polygon", "polyline"])))).await;
+    let polygon = json!({"label": 3, "shape": {"type": "polygon", "points": [{"x": 0.0, "y": 0.0}, {"x": 9.0, "y": 0.0}, {"x": 0.0, "y": 9.0}]}});
+    save(&app, project, image, 0, json!([rectangle(3, (1.0, 1.0), (5.0, 5.0)), polygon, rectangle(3, (6.0, 6.0), (9.0, 9.0))])).await;
+
+    let (status, body) = call(&app, Method::PUT, &format!("{labels}/3"), Some(definition(json!(["polyline"])))).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        body["error"],
+        "label \"any\" still has 2 annotations with rectangle shapes and 1 annotation with polygon shapes; delete them before removing those shape types"
+    );
+    let (_, stored) = call(&app, Method::GET, &labels, None).await;
+    assert_eq!(stored[2]["shape_types"], json!(["rectangle", "polygon", "polyline"]), "the label is unchanged");
+    assert_eq!(load(&app, project, image).await["version"], 1);
+
+    let (status, body) = call(&app, Method::PUT, &format!("{labels}/3"), Some(definition(json!(["polygon", "rectangle"])))).await;
+    assert_eq!(status, StatusCode::OK, "unused shape types can go: {body}");
+    let (status, body) = call(&app, Method::PUT, &format!("{labels}/3"), Some(definition(json!(["polygon"])))).await;
+    assert_eq!((status, &body["error"]), (StatusCode::CONFLICT, &json!("label \"any\" still has 2 annotations with rectangle shapes; delete them before removing that shape type")));
+}
+
+#[tokio::test]
 async fn an_image_has_each_tag_once() {
     let app = test_app().await;
     let (project, image) = setup(&app).await;
