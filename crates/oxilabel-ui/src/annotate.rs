@@ -54,6 +54,7 @@ use oxilabel_core::{
     keymap::Action,
     pie::{Compass, is_tap},
     settings::LabelStyle,
+    stroke::{MaskStroke, StrokeOutcome},
     view::View,
 };
 
@@ -560,6 +561,9 @@ pub fn AnnotationLayer(
     // The footprints the editor shows, by label (labels that show theirs).
     let footprints: StoredValue<HashMap<i64, Footprint>> =
         StoredValue::new(labels.iter().filter(|label| label.show_footprint).map(|label| (label.id, label.footprint)).collect());
+    // The outlines of the footprints drawn last, by annotation index, with the shape and footprint
+    // they were made from: a region is only made again when either changes.
+    let ghosts: StoredValue<HashMap<usize, (Shape, Footprint, Vec<Vec<Point>>)>> = StoredValue::new(HashMap::new());
     // The shape type the current tool draws and the current label's constraints, when the label
     // fixes that type's size: the tool then places shapes instead of dragging them out.
     let fixed_tool = move || -> Option<(ShapeType, ShapeConstraints)> {
@@ -674,20 +678,20 @@ pub fn AnnotationLayer(
             editor.update(Session::cancel);
         }
     };
+    // Applies a finished stroke and drops the annotations it removed from the selection.
+    let commit_stroke = move |outcome: StrokeOutcome| {
+        editor.update(|session| {
+            let selection = outcome.selection_after(session.selection());
+            session.set_selection(selection);
+            session.apply(with_defaults(outcome.edit, &defaults));
+        });
+    };
     let finish_stroke = move || {
         gesture.set(Gesture::Idle);
         let mut done = None;
         stroke.update_value(|current| done = current.take());
-        let Some(edit) = done.and_then(|done| editor.peek(|session| done.finish(session.annotations()))) else { return };
-        let edit = with_defaults(edit, &defaults);
-        editor.update(|session| {
-            let count = session.annotations().len();
-            session.apply(edit);
-            // Joined or emptied masks were removed, so the selected indices no longer fit.
-            if session.annotations().len() < count {
-                session.set_selection(BTreeSet::new());
-            }
-        });
+        let Some(outcome) = done.and_then(|done| editor.peek(|session| done.core.finish(session.annotations()))) else { return };
+        commit_stroke(outcome);
     };
 
     // ---- Fuzzy fill: grow on the analysis tiles loaded so far, ask for those the region reached,
@@ -764,19 +768,12 @@ pub fn AnnotationLayer(
         }
         let region = preview.region.scaled_up(preview.factor, image_size);
         let label = editor.label.get_untracked().unwrap_or_default();
-        let edit = editor.peek(|session| {
+        let outcome = editor.peek(|session| {
             let list = session.annotations();
-            Stroke::from_region(erase, label, region, image_size, list).finish(list)
+            MaskStroke::from_region(erase, label, region, image_size, list).finish(list)
         });
-        let edit = edit.map(|edit| with_defaults(edit, &defaults));
-        if let Some(edit) = edit {
-            editor.update(|session| {
-                let count = session.annotations().len();
-                session.apply(edit);
-                if session.annotations().len() < count {
-                    session.set_selection(BTreeSet::new());
-                }
-            });
+        if let Some(outcome) = outcome {
+            commit_stroke(outcome);
         }
     };
     Effect::new(move |_| {
@@ -861,9 +858,9 @@ pub fn AnnotationLayer(
         stroke.update_value(|s| {
             if let Some(s) = s {
                 if let Some(limit) = limit {
-                    s.set_limit(limit);
+                    s.core.set_limit(limit);
                 }
-                s.limit(limited);
+                s.core.limit(limited);
             }
         });
     };
@@ -1412,7 +1409,8 @@ pub fn AnnotationLayer(
             (Tool::Brush, _) => {
                 let label = editor.label.get_untracked().unwrap_or_default();
                 let size = editor.tools.brush_size.get_untracked();
-                stroke.set_value(Some(Stroke::start(erasing, label, size, image_size, point, color_of(label))));
+                let core = MaskStroke::begin(erasing, label, size, image_size, point);
+                stroke.set_value(Some(Stroke::start(core, color_of(label))));
                 limit_seed.set_value(Some(point));
                 limit_level.set_value(None);
                 update_limit(ev.shift_key(), current, false);
@@ -1793,11 +1791,22 @@ pub fn AnnotationLayer(
             let visible = |annotation: &Annotation| !annotation.shape.is_tag() && annotation.shown(threshold);
             // The footprints of lines and points under everything else (see `draw::footprint`).
             if prefs.settings.with_untracked(|s| s.show_footprint) {
+                let mut previous = ghosts.try_update_value(std::mem::take).unwrap_or_default();
+                let mut kept = HashMap::new();
                 for (index, annotation) in list.iter().enumerate().filter(|(_, a)| visible(a)) {
-                    if let Some(footprint) = footprints.with_value(|map| map.get(&annotation.label).copied()) {
-                        draw::footprint(&context, current, &session.shown_shape(index, annotation), &footprint, &color_of(annotation.label));
-                    }
+                    let Some(footprint) = footprints.with_value(|map| map.get(&annotation.label).copied()) else { continue };
+                    let shape = session.shown_shape(index, annotation).into_owned();
+                    let outlines = match previous.remove(&index) {
+                        Some((before, made_with, outlines)) if before == shape && made_with == footprint => outlines,
+                        _ => match footprint.region(&shape, image_size) {
+                            Some(region) => region.outlines(),
+                            None => continue,
+                        },
+                    };
+                    draw::footprint(&context, current, &outlines, &color_of(annotation.label));
+                    kept.insert(index, (shape, footprint, outlines));
                 }
+                ghosts.set_value(kept);
             }
             for (index, annotation) in list.iter().enumerate() {
                 // Tags are chips over the image, not drawn on it; hidden shapes are not drawn.

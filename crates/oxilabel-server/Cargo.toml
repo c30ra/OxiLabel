@@ -4,9 +4,12 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 
+[features]
+# `fake_worker`: an in-process pre-annotation worker for the server's and the CLI's tests.
+fake-worker = []
+
 [dependencies]
 axum = { version = "0.8", features = ["multipart"] }
-base64 = "0.22"
 argon2 = "0.5"
 # The operating system's random numbers, for salts and session tokens.
 password-hash = { version = "0.5", features = ["getrandom"] }
@@ -34,4 +37,5 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 http-body-util = "0.1"
+oxilabel-server = { path = ".", features = ["fake-worker"] }
 tower = { version = "0.5", features = ["util"] }

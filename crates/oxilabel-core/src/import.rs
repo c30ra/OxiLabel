@@ -103,3 +103,14 @@ pub struct SkipCount {
     pub reason: String,
     pub count: usize,
 }
+
+impl SkipCount {
+    /// Counts `count` more skips for `reason` in `skipped`, which lists each reason once, in the
+    /// order first met.
+    pub fn tally(skipped: &mut Vec<SkipCount>, reason: String, count: usize) {
+        match skipped.iter_mut().find(|skip| skip.reason == reason) {
+            Some(skip) => skip.count += count,
+            None => skipped.push(SkipCount { reason, count }),
+        }
+    }
+}

@@ -2,7 +2,6 @@
 //! the export directory, which can also be downloaded as a zip.
 
 use std::{
-    collections::HashMap,
     fs,
     io::{self, Write},
     path::Path,
@@ -17,16 +16,19 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use oxilabel_core::{
-    annotation::Annotation,
-    export::{ExportFormat, ExportRequest, ExportResult, ImageSelection},
-};
+use oxilabel_core::export::{ExportFormat, ExportRequest, ExportResult, ImageSelection};
 use oxilabel_formats::{ExportImage, ExportInput, FolderSink, run_export};
-use sqlx::Row;
 use tokio_util::io::ReaderStream;
 use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
-use crate::{AppState, auth::Admin, annotations::annotation_from_row, error::ApiError, labels, write_atomically_to};
+use crate::{
+    AppState,
+    auth::Admin,
+    error::ApiError,
+    images,
+    project_read_model::{self, Pending},
+    write_atomically_to,
+};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -55,13 +57,9 @@ async fn create_export(
     UrlPath(project): UrlPath<i64>,
     Json(request): Json<ExportRequest>,
 ) -> Result<Json<ExportResult>, ApiError> {
-    let mut conn = state.pool.acquire().await?;
-    let project_name: String = sqlx::query("SELECT name FROM projects WHERE id = ?")
-        .bind(project)
-        .fetch_optional(&mut *conn)
-        .await?
-        .ok_or(ApiError::NotFound)?
-        .get("name");
+    let root = images::image_root(&state)?;
+    // Unreviewed pre-annotations do not count yet.
+    let read = project_read_model::read(&mut *state.pool.acquire().await?, &root, project, Pending::Exclude).await?;
     let exporter = oxilabel_formats::exporter(&request.format)
         .ok_or_else(|| ApiError::BadRequest(format!("unknown export format \"{}\"", request.format)))?;
     request.split.validate().map_err(ApiError::BadRequest)?;
@@ -75,54 +73,26 @@ async fn create_export(
             )));
         }
     };
-    let mut labels = labels::project_labels(&mut conn, project).await?;
+    let mut labels = read.labels;
     // This export's footprints, in place of the labels' own.
     for label in &mut labels {
-        if let Some(footprint) = request.footprints.get(&label.id) {
-            label.footprint = footprint.validated().map_err(|err| ApiError::BadRequest(format!("{}: {err}", label.name)))?;
-        }
+        label.footprint = request.footprint_of(label).map_err(ApiError::BadRequest)?;
     }
-
-    let mut annotations: HashMap<i64, Vec<Annotation>> = HashMap::new();
-    for row in sqlx::query(
-        // Unreviewed pre-annotations do not count yet.
-        "SELECT image_id, label_id, shape, source, confidence, attributes, hidden, locked, pending FROM annotations \
-         WHERE project_id = ? AND NOT pending ORDER BY image_id, position",
-    )
-    .bind(project)
-    .fetch_all(&mut *conn)
-    .await?
-    {
-        annotations.entry(row.get("image_id")).or_default().push(annotation_from_row(&row)?);
-    }
-    let rows = sqlx::query("SELECT id, path, hash, width, height FROM images WHERE project_id = ? ORDER BY path")
-        .bind(project)
-        .fetch_all(&mut *conn)
-        .await?;
-    drop(conn);
-    let selected: Vec<_> = rows
-        .iter()
-        .filter(|row| {
-            let id: i64 = row.get("id");
-            match &request.images {
-                ImageSelection::All => true,
-                ImageSelection::WithAnnotations => annotations.get(&id).is_some_and(|list| !list.is_empty()),
-                ImageSelection::Ids { ids } => ids.contains(&id),
-            }
-        })
-        .collect();
-    let images: Vec<ExportImage> = selected
+    let images: Vec<ExportImage> = read
+        .images
         .into_iter()
-        .map(|row| {
-            let path: String = row.get("path");
-            ExportImage {
-                source: state.images_root.join(&path),
-                path,
-                hash: row.get("hash"),
-                width: row.get("width"),
-                height: row.get("height"),
-                annotations: annotations.remove(&row.get::<i64, _>("id")).unwrap_or_default(),
-            }
+        .filter(|image| match &request.images {
+            ImageSelection::All => true,
+            ImageSelection::WithAnnotations => !image.annotations.is_empty(),
+            ImageSelection::Ids { ids } => ids.contains(&image.id),
+        })
+        .map(|image| ExportImage {
+            path: image.path,
+            source: image.source,
+            hash: image.hash,
+            width: image.width,
+            height: image.height,
+            annotations: image.annotations,
         })
         .collect();
     if images.is_empty() {
@@ -130,6 +100,7 @@ async fn create_export(
     }
 
     let (created, stamp) = utc_now();
+    let project_name = read.name;
     let input = ExportInput { project: project_name.clone(), labels, images, split: request.split, footprint_bounds: request.footprint_bounds };
     let export_dir = state.export_dir.clone();
     let format = request.format.clone();

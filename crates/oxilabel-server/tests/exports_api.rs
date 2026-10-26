@@ -3,7 +3,7 @@ mod common;
 use std::{fs, io::Read, path::PathBuf};
 
 use axum::http::{Method, StatusCode};
-use common::{TestApp, call, get_bytes, test_app};
+use common::{TestApp, call, get_bytes, test_app, upload};
 use serde_json::{Value, json};
 
 /// A project with labels "crack" (1) and "finger" (2) and three 200 × 100 images; `a.png` has two
@@ -172,6 +172,31 @@ async fn an_export_downloads_as_a_zip() {
     let mut image = Vec::new();
     zip.by_name("images/train/set__a.png").unwrap().read_to_end(&mut image).unwrap();
     assert_eq!(image, fs::read(app.images.path().join("set/a.png")).unwrap());
+}
+
+#[tokio::test]
+async fn an_export_and_an_archive_of_a_project_read_the_same_image_files() {
+    let app = test_app().await;
+    let (project, _) = setup(&app).await;
+    // An uploaded image is kept at an absolute path outside the image root.
+    let mut uploaded = Vec::new();
+    image::RgbImage::from_pixel(200, 100, image::Rgb([9, 9, 9])).write_to(&mut std::io::Cursor::new(&mut uploaded), image::ImageFormat::Png).unwrap();
+    let (status, report) = upload(&app, &format!("/api/projects/{project}/uploads"), &[("more/d.png", uploaded)]).await;
+    assert_eq!((status, &report["added"]), (StatusCode::OK, &json!(1)), "{report}");
+
+    let (_, result) = export(&app, project, all_train(json!({"kind": "all"}), "copy")).await;
+    let exported = folder(&app, &result).join("images/train");
+    let (status, _, bytes) = get_bytes(&app, &format!("/api/projects/{project}/archive?images=true")).await;
+    assert_eq!(status, StatusCode::OK);
+    let mut archive = oxilabel_formats::archive::ArchiveReader::open(std::io::Cursor::new(bytes)).unwrap();
+    let images = archive.project().unwrap().images;
+    assert_eq!(images.len(), 4);
+    assert!(images.iter().any(|image| PathBuf::from(&image.path).is_absolute()), "the uploaded image is in the archive");
+    for image in images {
+        let mut archived = Vec::new();
+        archive.image(image.file.as_deref().expect("every file is included")).unwrap().read_to_end(&mut archived).unwrap();
+        assert_eq!(fs::read(exported.join(image.path.replace('/', "__"))).unwrap(), archived, "{}", image.path);
+    }
 }
 
 #[tokio::test]

@@ -1,5 +1,5 @@
-//! The CLI against a real server (in-memory database, temporary folders) and a fake worker, each
-//! on a free local port.
+//! The CLI against a real server (in-memory database, temporary folders) and the shared fake
+//! worker served over HTTP, each on a free local port.
 
 use std::{
     io::{Cursor, Read},
@@ -33,17 +33,7 @@ fn server() -> Server {
     let (ready, address) = mpsc::channel();
     std::thread::spawn(move || {
         tokio::runtime::Runtime::new().unwrap().block_on(async move {
-            let worker = axum::Router::new()
-                .route("/health", axum::routing::get(|| async { axum::Json(json!({"device": "fake"})) }))
-                .route("/predict", axum::routing::post(|| async {
-                    axum::Json(json!({"predictions": [
-                        {"class": "crack", "confidence": 0.9, "shape": {"type": "rectangle", "min": {"x": 1.0, "y": 1.0}, "max": {"x": 5.0, "y": 5.0}}},
-                        {"class": "crack", "confidence": 0.2, "shape": {"type": "rectangle", "min": {"x": 2.0, "y": 2.0}, "max": {"x": 6.0, "y": 6.0}}},
-                    ]}))
-                }));
-            let worker_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let worker_url = format!("http://{}", worker_listener.local_addr().unwrap());
-            tokio::spawn(async move { axum::serve(worker_listener, worker).await.unwrap() });
+            let worker_url = oxilabel_server::fake_worker::FakeWorker::default().serve().await;
             let app = oxilabel_server::app(config).await.unwrap();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             ready.send((listener.local_addr().unwrap(), worker_url)).unwrap();
@@ -148,7 +138,8 @@ fn a_session_imports_exports_and_pre_annotates_through_the_server() {
     ok(oxilabel(c, &format!("export --project {p} --format archive --include copy --out {}", archive.display()), ""));
     assert!(ok(oxilabel(c, &format!("import archive {} --name Copy", archive.display()), "")).contains("\"Copy\" with 2 images and 1 annotations"));
 
-    // Pre-annotation with a threshold, on a model registered through the API.
+    // Pre-annotation with a threshold, on a model registered through the API: on each image the
+    // fake's crack box is kept and its 0.4 dent left out.
     api.call("POST", "/api/models", json!({"name": "fake", "adapter": "ultralytics", "weights": "fake.pt"}));
     let out = ok(oxilabel(c, &format!("pre-annotate --project {p} --model fake --threshold 0.5"), ""));
     assert!(out.contains("2 of 2 images, 2 pre-annotations") && out.contains("left out: 2 × less confident than 0.5") && out.contains("Done: 2 pre-annotations"), "{out}");

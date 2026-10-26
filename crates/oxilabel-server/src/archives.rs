@@ -28,16 +28,17 @@ use oxilabel_core::{
 };
 use oxilabel_formats::archive::{ArchiveImage, ArchiveJob, ArchiveReader, ArchiveWriter, ProjectArchive};
 use serde::Deserialize;
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
 
 use crate::{
     AppState,
-    annotations::{annotation_from_row, check_annotation, insert_annotations},
+    annotation_store::{self, Replacing},
     auth::Admin,
     error::ApiError,
     host::Caller,
     images::{self, NewImage},
     labels,
+    project_read_model::{self, Pending},
 };
 
 pub fn routes() -> Router<AppState> {
@@ -60,11 +61,10 @@ struct ExportQuery {
     images: bool,
 }
 
-/// The project as an archive, read from the database.
-async fn project_archive(pool: &SqlitePool, project: i64) -> Result<ProjectArchive, ApiError> {
-    let mut conn = pool.acquire().await?;
-    let row = sqlx::query("SELECT name, next_label_id, next_job_number FROM projects WHERE id = ?").bind(project).fetch_optional(&mut *conn).await?.ok_or(ApiError::NotFound)?;
-    let labels = labels::project_labels(&mut conn, project).await?;
+/// The project as an archive, and each image's file.
+async fn project_archive(state: &AppState, project: i64) -> Result<(ProjectArchive, Vec<PathBuf>), ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    let read = project_read_model::read(&mut conn, &images::image_root(state)?, project, Pending::Include).await?;
     let jobs = sqlx::query("SELECT jobs.number, users.username FROM jobs LEFT JOIN users ON users.id = jobs.assignee_id WHERE jobs.project_id = ? ORDER BY jobs.number")
         .bind(project)
         .fetch_all(&mut *conn)
@@ -72,39 +72,32 @@ async fn project_archive(pool: &SqlitePool, project: i64) -> Result<ProjectArchi
         .iter()
         .map(|row| ArchiveJob { number: row.get("number"), assignee: row.get("username") })
         .collect();
-    let mut annotations: BTreeMap<i64, Vec<_>> = BTreeMap::new();
-    for row in sqlx::query("SELECT image_id, label_id, shape, source, confidence, attributes, hidden, locked, pending FROM annotations WHERE project_id = ? ORDER BY image_id, position")
-        .bind(project)
-        .fetch_all(&mut *conn)
-        .await?
-    {
-        annotations.entry(row.get("image_id")).or_default().push(annotation_from_row(&row)?);
-    }
-    let images = sqlx::query("SELECT images.id, path, hash, width, height, annotated, jobs.number FROM images LEFT JOIN jobs ON jobs.id = images.job_id WHERE images.project_id = ? ORDER BY path")
-        .bind(project)
-        .fetch_all(&mut *conn)
-        .await?
-        .iter()
-        .map(|row| ArchiveImage {
-            path: row.get("path"),
-            hash: row.get("hash"),
-            width: row.get("width"),
-            height: row.get("height"),
-            annotated: row.get("annotated"),
-            job: row.get("number"),
-            file: None,
-            annotations: annotations.remove(&row.get::<i64, _>("id")).unwrap_or_default(),
+    let (images, sources) = read
+        .images
+        .into_iter()
+        .map(|image| {
+            let archived = ArchiveImage {
+                path: image.path,
+                hash: image.hash,
+                width: image.width,
+                height: image.height,
+                annotated: image.annotated,
+                job: image.job,
+                file: None,
+                annotations: image.annotations,
+            };
+            (archived, image.source)
         })
-        .collect();
-    Ok(ProjectArchive { name: row.get("name"), next_label_id: row.get("next_label_id"), next_job_number: row.get("next_job_number"), labels, jobs, images })
+        .unzip();
+    let archive = ProjectArchive { name: read.name, next_label_id: read.next_label_id, next_job_number: read.next_job_number, labels: read.labels, jobs, images };
+    Ok((archive, sources))
 }
 
 /// The project as an archive file to download, with the image files if asked. Images whose file
 /// is gone are referred to only.
 async fn export_archive(_: Admin, State(state): State<AppState>, UrlPath(project): UrlPath<i64>, Query(query): Query<ExportQuery>) -> Result<impl IntoResponse, ApiError> {
-    let mut archive = project_archive(&state.pool, project).await?;
+    let (mut archive, sources) = project_archive(&state, project).await?;
     let name = archive.name.clone();
-    let root = images::image_root(&state)?;
     let folder = state.export_dir.clone();
     let file = tokio::task::spawn_blocking(move || -> Result<fs::File, ApiError> {
         fs::create_dir_all(&folder).map_err(internal)?;
@@ -113,14 +106,13 @@ async fn export_archive(_: Admin, State(state): State<AppState>, UrlPath(project
         if query.images {
             // Copies with the same content share one file in the archive.
             let mut added: BTreeMap<String, String> = BTreeMap::new();
-            for image in &mut archive.images {
+            for (image, source) in archive.images.iter_mut().zip(&sources) {
                 if let Some(name) = added.get(&image.hash) {
                     image.file = Some(name.clone());
                     continue;
                 }
-                let path = root.join(&image.path);
-                let Ok(mut file) = fs::File::open(&path) else { continue };
-                let extension = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_else(|| "img".into());
+                let Ok(mut file) = fs::File::open(source) else { continue };
+                let extension = source.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_else(|| "img".into());
                 let name = writer.add_image(&image.hash, &extension, &mut file).map_err(internal)?;
                 added.insert(image.hash.clone(), name.clone());
                 image.file = Some(name);
@@ -258,36 +250,25 @@ async fn import_into(
             .await?;
         jobs.insert(job.number, id);
     }
-    let (mut annotations, mut skipped) = (0, Vec::<SkipCount>::new());
-    for Found { image, archived } in &found {
-        let id = images::add_images(&mut tx, project, std::slice::from_ref(image)).await?[0];
+    let (imported, mut annotations, mut skipped) = (found.len(), 0, Vec::<SkipCount>::new());
+    for Found { image, archived } in found {
+        let id = images::add_images(&mut tx, project, std::slice::from_ref(&image)).await?[0];
         sqlx::query("UPDATE images SET annotated = ?, job_id = ? WHERE id = ?")
             .bind(archived.annotated)
             .bind(archived.job.and_then(|number| jobs.get(&number)))
             .bind(id)
             .execute(&mut *tx)
             .await?;
-        let mut fitting = Vec::new();
-        for annotation in &archived.annotations {
-            let check = archive
-                .labels
-                .iter()
-                .find(|label| label.id == annotation.label)
-                .ok_or_else(|| format!("there is no label with id {}", annotation.label))
-                .and_then(|label| check_annotation(label, annotation, image.width, image.height));
-            match check {
-                Ok(()) => fitting.push(annotation.clone()),
-                Err(reason) => match skipped.iter_mut().find(|skip| skip.reason == reason) {
-                    Some(skip) => skip.count += 1,
-                    None => skipped.push(SkipCount { reason, count: 1 }),
-                },
-            }
+        let written = annotation_store::write(&mut tx, project, id, Replacing::All, archived.annotations)
+            .await?
+            .ok_or_else(|| ApiError::Internal("an image just added is not in its project".into()))?;
+        annotations += written.stored;
+        for skip in written.skipped {
+            SkipCount::tally(&mut skipped, skip.reason, skip.count);
         }
-        insert_annotations(&mut tx, project, id, 0, &fitting).await?;
-        annotations += fitting.len();
     }
     tx.commit().await?;
-    let report = ArchiveImportReport { project: Project { id: project, name }, images: found.len(), missing, annotations, skipped, unassigned_jobs };
+    let report = ArchiveImportReport { project: Project { id: project, name }, images: imported, missing, annotations, skipped, unassigned_jobs };
     Ok((StatusCode::CREATED, Json(report)))
 }
 

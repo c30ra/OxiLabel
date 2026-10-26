@@ -10,7 +10,7 @@
 - [x] Hit-testing and drawing handles use the same handle list
 - [x] Ctrl+Z during a vertex drag, and a run merged during a move, leave the annotations unchanged and the gesture cancelled
 - [x] Rust tests drive the session for each Select gesture, including the undo-during-drag and merge-during-drag cases
-- [ ] Browser Select, vertex and box selection tests still pass
+- [x] Browser Select, vertex and box selection tests still pass
 
 ## Comments
 

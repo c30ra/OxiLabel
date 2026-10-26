@@ -12,7 +12,8 @@ Contract (all JSON; errors are a non-2xx status with {"error": message}):
     POST /classes  {adapter, weights, options}     -> {"classes": [name, ...]}
     POST /predict  {adapter, weights, options, image: base64 bytes of the image file}
                                                    -> {"predictions": [{class, confidence, shape}]}
-Shapes are OxiLabel's (oxilabel_worker/shapes.py builds them), in the image's own pixels.
+Shapes are OxiLabel's (oxilabel_worker/shapes.py builds them), in the image's own pixels. The
+server reads and writes this contract through the types in crates/oxilabel-core/src/worker.rs.
 """
 import argparse
 import base64

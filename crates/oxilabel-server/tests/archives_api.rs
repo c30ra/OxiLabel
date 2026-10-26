@@ -173,6 +173,29 @@ async fn a_newer_or_foreign_file_is_refused_with_its_reason() {
 }
 
 #[tokio::test]
+async fn an_archived_image_with_a_tag_twice_gets_it_once_and_the_report_says_why() {
+    let app = test_app().await;
+    let (p, images) = project(&app).await;
+    let (_, _, bytes) = get_bytes(&app, &format!("/api/projects/{p}/archive?images=false")).await;
+    let mut project_json = oxilabel_formats::archive::ArchiveReader::open(std::io::Cursor::new(bytes)).unwrap().project().unwrap();
+    let tagged = project_json.images.iter_mut().find(|image| !image.annotations.is_empty()).unwrap();
+    let tag = tagged.annotations[0].clone();
+    tagged.annotations.push(tag);
+    let mut forged = Vec::new();
+    oxilabel_formats::archive::ArchiveWriter::new(std::io::Cursor::new(&mut forged)).finish(&project_json).unwrap();
+
+    // On the same server the paths still hold the same files.
+    let (status, report) = import(&app, &forged, json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{report}");
+    assert_eq!(report["annotations"], json!(8));
+    assert_eq!(report["skipped"], json!([{"reason": "the image already has the tag \"good\"", "count": 1}]));
+    let q = report["project"]["id"].as_i64().unwrap();
+    let (_, original) = call(&app, Method::GET, &format!("/api/projects/{p}/images/{}/annotations", images[1]), None).await;
+    let copied = contents(&app, q).await["images"].as_array().unwrap().iter().map(|image| image[4].clone()).find(|annotations| annotations != &json!([])).unwrap();
+    assert_eq!(copied, original["annotations"]);
+}
+
+#[tokio::test]
 async fn annotators_can_neither_export_nor_import_archives() {
     let app = test_app().await;
     let (p, _) = project(&app).await;

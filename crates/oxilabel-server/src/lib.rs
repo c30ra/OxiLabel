@@ -1,3 +1,4 @@
+mod annotation_store;
 mod annotations;
 mod archives;
 mod auth;
@@ -10,13 +11,19 @@ mod images;
 mod inference;
 mod jobs;
 mod labels;
+mod pre_annotation_run;
 mod progress;
+mod project_read_model;
 mod projects;
 mod thumbnails;
 mod tiles;
 mod user_settings;
 mod users;
+pub mod worker;
 mod worker_process;
+
+#[cfg(feature = "fake-worker")]
+pub mod fake_worker;
 
 pub use worker_process::stop_workers;
 
@@ -67,7 +74,8 @@ struct AppState {
     cache_dir: PathBuf,
     export_dir: PathBuf,
     pyramid_locks: tiles::GenerationLocks,
-    worker: inference::Worker,
+    worker: worker::Worker,
+    worker_process: worker_process::WorkerProcess,
     runs: inference::Runs,
 }
 
@@ -101,7 +109,8 @@ pub async fn app(config: Config) -> Result<Router, sqlx::Error> {
         cache_dir: config.cache_dir,
         export_dir: config.export_dir,
         pyramid_locks: tiles::GenerationLocks::default(),
-        worker: inference::Worker::default(),
+        worker: worker::Worker::default(),
+        worker_process: worker_process::WorkerProcess::default(),
         runs: inference::Runs::default(),
     };
     let signed_in = Router::new()
@@ -121,7 +130,7 @@ pub async fn app(config: Config) -> Result<Router, sqlx::Error> {
         .merge(inference::routes())
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_session));
     // The worker as an admin set it up (started now, if the server runs it).
-    state.worker.apply(&inference::stored_worker_settings(&state.pool).await.map_err(|err| match err {
+    inference::apply_worker_settings(&state, &inference::stored_worker_settings(&state.pool).await.map_err(|err| match err {
         error::ApiError::Database(err) => err,
         other => sqlx::Error::Protocol(other.message()),
     })?);
@@ -140,4 +149,9 @@ pub(crate) fn write_atomically_to(path: &Path, write: impl FnOnce(&mut fs::File)
 
 pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_atomically_to(path, |file| file.write_all(bytes))
+}
+
+/// `?, ?, …`: one SQL placeholder per column of a comma-separated column list.
+pub(crate) fn placeholders(columns: &str) -> String {
+    vec!["?"; columns.split(',').count()].join(", ")
 }
