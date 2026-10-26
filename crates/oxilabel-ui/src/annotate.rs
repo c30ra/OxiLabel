@@ -702,6 +702,9 @@ pub fn AnnotationLayer(
     // The footprints the editor shows, by label (labels that show theirs).
     let footprints: StoredValue<HashMap<i64, Footprint>> =
         StoredValue::new(labels.iter().filter(|label| label.show_footprint).map(|label| (label.id, label.footprint)).collect());
+    // The outlines of the footprints drawn last, by annotation index, with the shape and footprint
+    // they were made from: a region is only made again when either changes.
+    let ghosts: StoredValue<HashMap<usize, (Shape, Footprint, Vec<Vec<Point>>)>> = StoredValue::new(HashMap::new());
     // The shape type the current tool draws and the current label's constraints, when the label
     // fixes that type's size: the tool then places shapes instead of dragging them out.
     let fixed_tool = move || -> Option<(ShapeType, ShapeConstraints)> {
@@ -2136,13 +2139,24 @@ pub fn AnnotationLayer(
         let visible = |annotation: &Annotation| !annotation.shape.is_tag() && annotation.shown(editor.pre_annotation_threshold.get_untracked());
         // The footprints of lines and points under everything else (see `draw::footprint`).
         if prefs.settings.with_untracked(|s| s.show_footprint) {
+            let mut previous = ghosts.try_update_value(std::mem::take).unwrap_or_default();
+            let mut kept = HashMap::new();
             editor.annotations.with_untracked(|list| {
                 for (index, annotation) in list.iter().enumerate().filter(|(_, a)| visible(a)) {
-                    if let Some(footprint) = footprints.with_value(|map| map.get(&annotation.label).copied()) {
-                        draw::footprint(&context, current, &shown_shape(index, annotation), &footprint, &color_of(annotation.label));
-                    }
+                    let Some(footprint) = footprints.with_value(|map| map.get(&annotation.label).copied()) else { continue };
+                    let shape = shown_shape(index, annotation);
+                    let outlines = match previous.remove(&index) {
+                        Some((before, made_with, outlines)) if before == shape && made_with == footprint => outlines,
+                        _ => match footprint.region(&shape, image_size) {
+                            Some(region) => region.outlines(),
+                            None => continue,
+                        },
+                    };
+                    draw::footprint(&context, current, &outlines, &color_of(annotation.label));
+                    kept.insert(index, (shape, footprint, outlines));
                 }
             });
+            ghosts.set_value(kept);
         }
         editor.annotations.with_untracked(|list| {
             for (index, annotation) in list.iter().enumerate() {
