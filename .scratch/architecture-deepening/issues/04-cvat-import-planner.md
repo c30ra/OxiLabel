@@ -6,7 +6,26 @@
 
 **Status:** ready-for-agent
 
-- [ ] Preview and commit both come from the same plan; no placeholder ids remain
-- [ ] Planner tests (no database, no multipart) cover: label matched by name ignoring case, created, or skipped; image matched by name and size, ambiguous, size mismatch, found in the chosen folder; attributes and tags filtered; skipped reasons counted
-- [ ] Most CVAT HTTP tests become planner tests; one or two HTTP tests keep covering preview and commit end to end
-- [ ] Browser CVAT import flow still works
+- [x] Preview and commit both come from the same plan; no placeholder ids remain
+- [x] Planner tests (no database, no multipart) cover: label matched by name ignoring case, created, or skipped; image matched by name and size, ambiguous, size mismatch, found in the chosen folder; attributes and tags filtered; skipped reasons counted
+- [x] Most CVAT HTTP tests become planner tests; one or two HTTP tests keep covering preview and commit end to end
+- [x] Browser CVAT import flow still works
+
+## Comments
+
+`crates/oxilabel-server/src/cvat_plan.rs` holds the pure planner (`plan`) and its unit tests. It
+returns a `CvatPlan` with the report, new `LabelDefinition`s, and per-image planned annotations
+whose labels are `LabelRef::{Existing(id), New(index)}` (the image side is
+`ImageTarget::{Existing, New}`): no negative or placeholder ids anywhere. The handler loads labels,
+images (with their tag labels) and found files, plans once, and either returns the plan's report or
+applies it: insert all new labels, then all new images, then write every image's planned
+annotations through the annotation store (`Replacing::{All, Nothing}`), checking the store stored
+exactly what the plan said. `annotation_store::preview` and `Written.left_out` were removed as
+obsolete.
+
+Annotation validation now lives in core (`Label::check_annotation` and
+`LabelDefinition::check_annotation`, sharing one implementation); the store and the planner both
+use it, so preview and commit cannot disagree. HTTP tests were reduced to
+`preview_reports_the_shared_plan_without_writing` and
+`commit_applies_the_plan_and_the_annotation_store_rules`; their label/image/attribute cases moved
+to planner tests. `scripts/ui-test.sh CVAT` passes.

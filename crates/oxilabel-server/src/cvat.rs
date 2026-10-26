@@ -1,7 +1,8 @@
 //! Importing a CVAT "for images 1.1" export (the XML, or the zip CVAT downloads) into a project.
 //! Export images are matched to the project's by file name (folders ignored) and size; CVAT labels
-//! map to project labels, new labels, or nothing, as the plan says. The same request previews the
-//! import, writing nothing, and with `commit` carries it out in one transaction.
+//! map to project labels, new labels, or nothing, as the plan says. The plan is pure (see
+//! `cvat_plan`): the same request previews it, writing nothing, and with `commit` applies it in one
+//! transaction.
 
 use std::{
     borrow::Cow,
@@ -15,28 +16,24 @@ use axum::{
     routing::post,
 };
 use oxilabel_core::{
-    Label, LabelDefinition, ShapeType,
     annotation::Annotation,
-    attribute::{AttributeKind, AttributeValue, Attributes},
-    import::{CvatImportPlan, CvatImportReport, CvatLabelReport, LabelChoice, SkipCount},
+    import::{CvatImportPlan, CvatImportReport},
 };
-use oxilabel_formats::cvat::{CvatAnnotation, CvatExport, CvatLabel, parse_cvat};
+use oxilabel_formats::cvat::{CvatExport, parse_cvat};
 use sqlx::{Row, SqliteConnection};
 
 use crate::{
     AppState,
     annotation_store::{self, Replacing},
     auth::Admin,
+    cvat_plan::{self, CvatPlan, Found, ImageTarget, LabelRef, ProjectImage},
     error::ApiError,
     host::Caller,
-    images::{self, NewImage},
-    labels, projects,
+    images, labels, projects,
 };
 
 /// CVAT exports of a few thousand images run to tens of megabytes of XML.
 const EXPORT_LIMIT: usize = 200 * 1024 * 1024;
-/// The color of labels used in the export's shapes but missing from its label list.
-const UNLISTED_COLOR: &str = "#7c8a99";
 
 pub fn routes() -> Router<AppState> {
     Router::new().route("/api/projects/{project}/cvat-imports", post(import).layer(DefaultBodyLimit::max(EXPORT_LIMIT)))
@@ -76,17 +73,66 @@ async fn import(
         drop(conn);
         // Takes the write lock at once, so a save meanwhile waits instead of failing midway.
         let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-        let report = run(&mut tx, project, &export, &plan, found).await?;
+        let planned = make_plan(&mut tx, project, &export, &plan, found).await?;
+        let report = commit(&mut tx, project, planned).await?;
         tx.commit().await?;
         Ok(Json(report))
     } else {
-        Ok(Json(run(&mut conn, project, &export, &plan, found).await?))
+        Ok(Json(make_plan(&mut conn, project, &export, &plan, found).await?.report))
     }
 }
 
-/// Export images the project lacks that the images folder has, by lower-case file name and size:
-/// read and ready to add when committing, otherwise only found.
-type Found = BTreeMap<(String, u32, u32), Option<NewImage>>;
+/// Plans the import against the project as it is in `conn`: the labels, the images (with their
+/// tags, which appends must not repeat) and the export.
+async fn make_plan(conn: &mut SqliteConnection, project: i64, export: &CvatExport, choices: &CvatImportPlan, found: Found) -> Result<CvatPlan, ApiError> {
+    let existing = labels::project_labels(conn, project).await?;
+    let images = project_images(conn, project).await?;
+    cvat_plan::plan(export, &existing, &images, found, choices).map_err(ApiError::BadRequest)
+}
+
+/// Applies a plan: new labels, then new images, then every image's planned annotations through the
+/// annotation store. The store must store exactly what the plan says, or the transaction fails.
+async fn commit(conn: &mut SqliteConnection, project: i64, planned: CvatPlan) -> Result<CvatImportReport, ApiError> {
+    let CvatPlan { report, new_labels, images: planned_images, replace } = planned;
+    let mut label_ids = Vec::with_capacity(new_labels.len());
+    for definition in new_labels {
+        let name = definition.name.clone();
+        let label = labels::insert_label(conn, project, definition).await.map_err(|err| match err {
+            ApiError::BadRequest(reason) => ApiError::BadRequest(format!("cannot create label \"{name}\": {reason}")),
+            other => other,
+        })?;
+        label_ids.push(label.id);
+    }
+    let mut image_ids = Vec::with_capacity(planned_images.len());
+    for planned in &planned_images {
+        match &planned.target {
+            ImageTarget::Existing { id } => image_ids.push(*id),
+            ImageTarget::New { image: Some(image), .. } => image_ids.push(images::add_images(conn, project, std::slice::from_ref(image)).await?[0]),
+            ImageTarget::New { key, image: None } => return Err(ApiError::Internal(format!("a committing CVAT plan has an unread image: {}", key.0))),
+        }
+    }
+    for (planned, image) in planned_images.into_iter().zip(image_ids) {
+        let mut annotations = Vec::with_capacity(planned.annotations.len());
+        for planned in planned.annotations {
+            let label = match planned.label {
+                LabelRef::Existing(id) => id,
+                LabelRef::New(index) => label_ids[index],
+            };
+            let mut annotation = Annotation::manual(label, planned.shape);
+            annotation.attributes = planned.attributes;
+            annotations.push(annotation);
+        }
+        let replacing = if replace { Replacing::All } else { Replacing::Nothing };
+        let expected = annotations.len();
+        let written = annotation_store::write(conn, project, image, replacing, annotations)
+            .await?
+            .ok_or_else(|| ApiError::Internal("a matched image is not in its project".into()))?;
+        if written.stored != expected {
+            return Err(ApiError::Internal("the CVAT import plan and annotation store disagree".into()));
+        }
+    }
+    Ok(report)
+}
 
 /// Looks in `folder` for the export images that match no project image. This happens before the
 /// import's transaction, so annotators' saves never wait for files being read.
@@ -119,7 +165,7 @@ async fn find_missing(state: &AppState, caller: Caller, conn: &mut SqliteConnect
     .map_err(|err| ApiError::Internal(err.to_string()))?
 }
 
-/// The project's images by lower-case file name.
+/// The project's images by lower-case file name, each with the labels it has as tags.
 async fn project_images(conn: &mut SqliteConnection, project: i64) -> Result<BTreeMap<String, Vec<ProjectImage>>, ApiError> {
     let mut by_name: BTreeMap<String, Vec<ProjectImage>> = BTreeMap::new();
     let rows = sqlx::query("SELECT id, path, width, height, (SELECT COUNT(*) FROM annotations WHERE image_id = images.id) AS annotations FROM images WHERE project_id = ?")
@@ -128,8 +174,18 @@ async fn project_images(conn: &mut SqliteConnection, project: i64) -> Result<BTr
         .await?;
     for row in rows {
         let path: String = row.get("path");
-        let image = ProjectImage { id: row.get("id"), width: row.get("width"), height: row.get("height"), annotations: row.get("annotations") };
+        let image = ProjectImage { id: row.get("id"), width: row.get("width"), height: row.get("height"), annotations: row.get("annotations"), tags: BTreeSet::new() };
         by_name.entry(file_name(&path).to_lowercase()).or_default().push(image);
+    }
+    let tags = sqlx::query("SELECT image_id, label_id FROM annotations WHERE project_id = ? AND json_extract(shape, '$.type') = 'tag'")
+        .bind(project)
+        .fetch_all(&mut *conn)
+        .await?;
+    for row in tags {
+        let image: i64 = row.get("image_id");
+        if let Some(image) = by_name.values_mut().flatten().find(|candidate| candidate.id == image) {
+            image.tags.insert(row.get("label_id"));
+        }
     }
     Ok(by_name)
 }
@@ -163,203 +219,4 @@ fn export_xml(file: &[u8]) -> Result<Cow<'_, str>, ApiError> {
 /// The file name of a path with `/` or `\` separators.
 fn file_name(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
-}
-
-/// A project image an export image may match.
-struct ProjectImage {
-    id: i64,
-    width: u32,
-    height: u32,
-    annotations: i64,
-}
-
-async fn run(conn: &mut SqliteConnection, project: i64, export: &CvatExport, plan: &CvatImportPlan, mut found: Found) -> Result<CvatImportReport, ApiError> {
-    let existing = labels::project_labels(conn, project).await?;
-
-    // Every CVAT label: the listed ones, then any the shapes use without the list naming them.
-    let mut cvat_labels: Vec<CvatLabel> = export.labels.clone();
-    for annotation in export.images.iter().flat_map(|image| &image.annotations) {
-        if !cvat_labels.iter().any(|label| label.name == annotation.label) {
-            cvat_labels.push(CvatLabel { name: annotation.label.clone(), color: None, shape_types: ShapeType::ALL.to_vec(), attributes: Vec::new() });
-        }
-    }
-
-    // What each CVAT label becomes. New labels are checked against the project's and each other.
-    let mut reports = Vec::new();
-    let mut targets: BTreeMap<String, Option<Label>> = BTreeMap::new();
-    let mut taken = existing.clone();
-    for (index, cvat_label) in cvat_labels.iter().enumerate() {
-        let definition = definition_of(cvat_label);
-        // Previews use the definition as it will be stored (trimmed names and options).
-        let (definition, problem) = match definition.clone().validated(&taken) {
-            Ok(valid) => (valid, None),
-            Err(problem) => (definition, Some(problem)),
-        };
-        let same_name = existing.iter().find(|label| label.name.eq_ignore_ascii_case(&cvat_label.name));
-        let suggestion = match (same_name, &problem) {
-            (Some(label), _) => LabelChoice::Map { label: label.id },
-            (None, None) => LabelChoice::Create,
-            (None, Some(_)) => LabelChoice::Skip,
-        };
-        let choice = plan.labels.get(&cvat_label.name).copied().unwrap_or(suggestion);
-        let target = match choice {
-            LabelChoice::Map { label } => Some(
-                existing
-                    .iter()
-                    .find(|existing| existing.id == label)
-                    .cloned()
-                    .ok_or_else(|| ApiError::BadRequest(format!("this project has no label {label} for \"{}\"", cvat_label.name)))?,
-            ),
-            LabelChoice::Create if plan.commit => Some(labels::insert_label(conn, project, definition).await.map_err(|err| match err {
-                ApiError::BadRequest(reason) => ApiError::BadRequest(format!("cannot create label \"{}\": {reason}", cvat_label.name)),
-                other => other,
-            })?),
-            // Previewed, it stands for the label it would become, under an id no label has.
-            LabelChoice::Create => Some(Label::new(-1 - index as i64, definition)),
-            LabelChoice::Skip => None,
-        };
-        if let (LabelChoice::Create, Some(label)) = (choice, &target) {
-            taken.push(label.clone());
-        }
-        let count = export.images.iter().flat_map(|image| &image.annotations).filter(|a| a.label == cvat_label.name).count();
-        // A problem matters only for a label to be created.
-        let problem = problem.filter(|_| choice == LabelChoice::Create);
-        reports.push(CvatLabelReport { name: cvat_label.name.clone(), color: cvat_label.color.clone(), annotations: count, choice, problem });
-        targets.insert(cvat_label.name.clone(), target);
-    }
-
-    let by_name = project_images(conn, project).await?;
-
-    let mut report = CvatImportReport {
-        labels: reports,
-        images: export.images.len(),
-        matched: 0,
-        added: 0,
-        unmatched: Vec::new(),
-        ambiguous: Vec::new(),
-        size_mismatch: Vec::new(),
-        annotated: 0,
-        annotations: 0,
-        skipped: Vec::new(),
-        committed: plan.commit,
-    };
-    let mut skipped = Vec::new();
-    for cvat_image in &export.images {
-        // Same file name (ignoring case), then same size; failing that, an image found in the
-        // images folder, added now.
-        let key = (file_name(&cvat_image.name).to_lowercase(), cvat_image.width, cvat_image.height);
-        let named = by_name.get(&key.0).map(Vec::as_slice).unwrap_or_default();
-        let sized: Vec<&ProjectImage> = named.iter().filter(|image| (image.width, image.height) == (cvat_image.width, cvat_image.height)).collect();
-        let added;
-        let image = match (named, &sized[..]) {
-            (_, []) if let Some(new) = found.remove(&key) => {
-                let id = match new {
-                    Some(new) => images::add_images(conn, project, &[new]).await?[0],
-                    // Previewed, it stands for the image it would become, under an id no image has.
-                    None => -1,
-                };
-                report.added += 1;
-                added = ProjectImage { id, width: cvat_image.width, height: cvat_image.height, annotations: 0 };
-                &added
-            }
-            ([], _) => {
-                report.unmatched.push(cvat_image.name.clone());
-                continue;
-            }
-            (_, [image]) => *image,
-            (_, []) => {
-                report.size_mismatch.push(cvat_image.name.clone());
-                continue;
-            }
-            _ => {
-                report.ambiguous.push(cvat_image.name.clone());
-                continue;
-            }
-        };
-        report.matched += 1;
-        if image.annotations > 0 {
-            report.annotated += 1;
-        }
-        for kind in &cvat_image.unsupported {
-            SkipCount::tally(&mut skipped, format!("{kind} shapes are not supported"), 1);
-        }
-        // Each annotation with the attribute values it leaves out.
-        let (mut added, mut dropped_values) = (Vec::new(), Vec::new());
-        for cvat_annotation in &cvat_image.annotations {
-            let Some(label) = targets.get(&cvat_annotation.label).and_then(Option::as_ref) else {
-                SkipCount::tally(&mut skipped, format!("label \"{}\" is skipped", cvat_annotation.label), 1);
-                continue;
-            };
-            let (attributes, dropped) = attributes_of(cvat_annotation, label);
-            added.push(Annotation { attributes, ..Annotation::manual(label.id, cvat_annotation.shape.clone()) });
-            dropped_values.push(dropped);
-        }
-        // The store leaves out what does not fit, and tags already on the image.
-        let replacing = if plan.replace { Replacing::All } else { Replacing::Nothing };
-        let written = if plan.commit {
-            annotation_store::write(conn, project, image.id, replacing, added)
-                .await?
-                .ok_or_else(|| ApiError::Internal("a matched image is not in its project".into()))?
-        } else {
-            annotation_store::preview(conn, image.id, (image.width, image.height), &taken, replacing, added).await?
-        };
-        report.annotations += written.stored;
-        // A shape left out does not also count its attribute values.
-        for (index, dropped) in dropped_values.into_iter().enumerate() {
-            if written.left_out.binary_search(&index).is_err() {
-                for reason in dropped {
-                    SkipCount::tally(&mut skipped, reason.to_owned(), 1);
-                }
-            }
-        }
-        for skip in written.skipped {
-            SkipCount::tally(&mut skipped, skip.reason, skip.count);
-        }
-    }
-    report.skipped = skipped;
-    Ok(report)
-}
-
-/// The OxiLabel label a CVAT label becomes: its name, color, allowed shapes and attributes.
-fn definition_of(label: &CvatLabel) -> LabelDefinition {
-    LabelDefinition {
-        name: label.name.clone(),
-        color: label.color.clone().unwrap_or_else(|| UNLISTED_COLOR.to_owned()),
-        hotkey: None,
-        shape_types: label.shape_types.clone(),
-        ignore: false,
-        attributes: label.attributes.clone(),
-        footprint: oxilabel_core::Footprint::default(),
-        show_footprint: true,
-        constraints: Default::default(),
-    }
-}
-
-/// The CVAT attribute values that `label` has an attribute for and that fit it, and why each of
-/// the others is left out.
-fn attributes_of(annotation: &CvatAnnotation, label: &Label) -> (Attributes, Vec<&'static str>) {
-    let (mut values, mut dropped) = (Attributes::new(), Vec::new());
-    for (name, text) in &annotation.attributes {
-        let Some(definition) = label.attributes.iter().find(|definition| &definition.name == name) else {
-            dropped.push("attribute values with no matching attribute");
-            continue;
-        };
-        let value = match &definition.kind {
-            AttributeKind::Checkbox { .. } => match text.trim().to_ascii_lowercase().as_str() {
-                "true" => Some(AttributeValue::Bool(true)),
-                "false" => Some(AttributeValue::Bool(false)),
-                _ => None,
-            },
-            AttributeKind::Number { .. } => text.trim().parse().ok().map(AttributeValue::Number),
-            AttributeKind::Select { .. } => Some(AttributeValue::Text(text.trim().to_owned())),
-            AttributeKind::Text { .. } => Some(AttributeValue::Text(text.clone())),
-        };
-        match value.filter(|value| definition.check(value).is_ok()) {
-            Some(value) => {
-                values.insert(name.clone(), value);
-            }
-            None => dropped.push("attribute values that do not fit their attribute"),
-        }
-    }
-    (values, dropped)
 }
