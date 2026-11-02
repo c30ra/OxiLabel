@@ -87,21 +87,16 @@ pub fn ToolOptions(editor: Editor) -> impl IntoView {
     }
 }
 
-/// A row of buttons of which one is on.
+/// A row of buttons of which one is on, writing the choice to `value`.
 #[component]
 fn Segmented(choices: Vec<(&'static str, bool)>, value: RwSignal<bool>) -> impl IntoView {
     view! {
-        <div class="segmented" role="radiogroup">
-            {choices.into_iter().map(|(label, choice)| view! {
-                <button role="radio" aria-checked=move || (value.get() == choice).to_string()
-                    class:active=move || value.get() == choice on:click=move |_| value.set(choice)>{label}</button>
-            }).collect_view()}
-        </div>
+        <ModeSegmented choices=choices value=value set=Callback::new(move |choice| value.set(choice)) />
     }
 }
 
-/// A [`Segmented`] whose choice goes through a callback instead of writing the signal: the brush's
-/// mode is the session's, and the signal only shows (and saves) what it decided.
+/// A row of buttons of which one is on, sending the choice through `set`. Brush modes use this
+/// because the session owns the choice and the signal only shows (and saves) what it decided.
 #[component]
 fn ModeSegmented(choices: Vec<(&'static str, bool)>, value: RwSignal<bool>, set: Callback<bool>) -> impl IntoView {
     view! {

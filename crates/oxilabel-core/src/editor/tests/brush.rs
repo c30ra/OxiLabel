@@ -100,6 +100,22 @@ fn f_resizes_the_brush_and_esc_restores_its_size() {
 }
 
 #[test]
+fn switching_tools_while_sizing_restores_the_brush_size() {
+    for tool in [Tool::Rectangle, Tool::Brush] {
+        let mut session = brushing(Vec::new());
+        assert!(session.begin_brush_sizing(Point::new(100.0, 100.0)));
+        session.move_to(at(150.0, 100.0));
+        assert_eq!(session.brush_size(), 110.0);
+
+        assert!(session.key(tool.action()), "{tool:?}");
+
+        assert_eq!(session.brush_size(), 10.0, "switching to {tool:?} cancels sizing like Esc");
+        assert!(!session.is_sizing_brush());
+        assert_eq!(session.tool(), tool);
+    }
+}
+
+#[test]
 fn a_fill_grows_with_the_threshold_drag() {
     let mut session = brushing(Vec::new());
     session.set_brush_mode(BrushMode::Fill);

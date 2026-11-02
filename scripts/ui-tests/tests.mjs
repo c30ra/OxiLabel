@@ -610,6 +610,37 @@ tests.push({
     await t.b.move(...w.at(900, 500));
     await t.b.key(KEY.escape);
     near([Number(await sizeField(t))], [120], 3, 'size after Esc');
+
+    // Enter keeps the resized value, while tool keys cancel sizing and restore the old value.
+    await t.b.key('f');
+    await t.b.move(...w.at(950, 500));
+    await t.b.key(KEY.enter);
+    near([Number(await sizeField(t))], [220], 3, 'size after Enter');
+    await t.b.key('f');
+    await t.b.move(...w.at(1000, 500));
+    await t.b.key('r');
+    equal((await w.state()).tool, 'Rectangle', 'R switches tools while sizing');
+    await t.b.key('b');
+    near([Number(await sizeField(t))], [220], 3, 'R restores the size');
+    await t.b.key('f');
+    await t.b.move(...w.at(1050, 500));
+    await t.b.key('b');
+    equal((await w.state()).tool, 'Brush', 'B reaches the same-tool switch while sizing');
+    near([Number(await sizeField(t))], [220], 3, 'B restores the size');
+
+    // Both held and tapping Q cancel sizing before following their normal pie/restore paths.
+    await t.b.key('f');
+    await t.b.move(...w.at(1100, 500));
+    await t.b.keyDown('q');
+    equal((await w.state()).pie, 'Brush options', 'held Q opens the options pie while sizing');
+    near([Number(await sizeField(t))], [220], 3, 'held Q restores the size');
+    await t.b.key(KEY.escape);
+    await t.b.keyUp('q');
+    await t.b.key('f');
+    await t.b.move(...w.at(1150, 500));
+    await t.b.key('q');
+    equal([(await w.state()).tool, (await w.state()).pie], ['Brush', null], 'Q tap completes its restore path');
+    near([Number(await sizeField(t))], [220], 3, 'Q tap restores the size');
   },
 }, {
   name: 'the fuzzy fill adds the similar region around a click, across tiles, and a drag sets its threshold',
@@ -767,20 +798,46 @@ tests.push({
     ], 'attributes');
   },
 }, {
-  name: 'T and a label key toggle an image tag, shown over the image and in the side panel',
+  name: 'T and tool-pie Tag toggle tags without activating Tag or cancelling the current gesture',
   async run(t) {
     const w = await openWorkspace(t.b, t.base, t.project);
-    await t.b.move(...w.at(800, 500));
+    const [x, y] = w.at(800, 500);
+    await t.b.move(x, y);
+
+    // Tool-pie Tag (north-west) has the keyboard T semantics: only the label pie is pending.
+    await t.b.holdKeyAndMove('q', [[x - 120, y - 120], [x, y - 240]]);
+    let list = await saved(t, (list) => list.length === 1, 'the tag chosen from the tool pie');
+    equal(list[0], { label: 2, shape: { type: 'tag' } }, 'a tag for "finger"');
+    let state = await w.state();
+    equal([state.tool, state.pie], ['Select', null], 'Tag never becomes active');
+    equal([await chips(t), await panelTags(t)], [['finger'], ['finger']], 'chips and panel');
+
+    // The next Q or right-button press opens Select's tool pie, not Tag's empty options.
+    await t.b.keyDown('q');
+    equal((await w.state()).pie, 'Tools', 'Q after tool-pie Tag');
+    await t.b.key(KEY.escape);
+    await t.b.keyUp('q');
+    await t.b.click(x, y, { button: 2 });
+    equal((await w.state()).pie, 'Tools', 'right click after tool-pie Tag');
+    await t.b.key(KEY.escape);
+
+    // Still held after picking Tag, the label pie picks the label the key is released over.
+    await t.b.move(x, y);
+    await t.b.holdKeyAndMove('q', [[x - 120, y - 120], [x - 60, y - 180]]);
+    await saved(t, (list) => list.length === 0, 'the tag removed by releasing over its label');
+    equal([(await w.state()).tool, (await w.state()).pie, await chips(t)], ['Select', null, []], 'after releasing over a label');
+
+    // Keyboard T still preserves a rectangle's two-click gesture while the tag label is chosen.
+    await t.b.key('r');
+    await t.b.click(...w.at(100, 100));
     await t.b.key('t');
     equal((await w.state()).pie, 'Labels', 'T opens the label pie');
     await t.b.key('2');
-    let list = await saved(t, (list) => list.length === 1, 'the tag');
-    equal(list[0], { label: 2, shape: { type: 'tag' } }, 'a tag for "finger"');
-    equal([await chips(t), await panelTags(t), (await w.state()).tool], [['finger'], ['finger'], 'Select'], 'chips, panel and tool');
-    await t.b.key('t');
-    await t.b.key('2');
-    await saved(t, (list) => list.length === 0, 'the tag removed again');
-    equal(await chips(t), [], 'no chips');
+    await saved(t, (list) => list.length === 1, 'the tag added again');
+    equal([(await w.state()).tool, await chips(t)], ['Rectangle', ['finger']], 'tool and chips after keyboard T');
+    await t.b.click(...w.at(300, 250));
+    list = await saved(t, (list) => list.length === 2, 'the rectangle finished after tagging');
+    equal(list.map((a) => a.shape.type).sort(), ['rectangle', 'tag'], 'T did not cancel the rectangle gesture');
   },
 }, {
   name: 'the attribute editor appears only for a selection whose label has attributes',
@@ -1906,14 +1963,37 @@ tests.push({
 });
 
 tests.push({
-  name: 'the tool rail switches tools through the same rule and starts the brush painting',
+  name: 'key, tool pie, rail and Q tap choose Brush with the same mode and label',
   async run(t) {
     const w = await openWorkspace(t.b, t.base, t.project);
+    const painting = 'Paint* | Fuzzy fill | Brush* | Eraser | Stop at edgesShift | Filtered view';
+    const chosen = async (entry) => {
+      const state = await w.state();
+      equal([state.tool, state.label, state.pie], ['Brush', 'crack 1', null], `${entry}: tool, label and closed pies`);
+      equal(await toolOptions(t), painting, `${entry}: plain painting`);
+    };
+
     await t.b.key('e');
     equal(await toolOptions(t), 'Paint* | Fuzzy fill | Brush | Eraser* | Stop at edgesShift | Filtered view', 'eraser mode from the key');
-    // The rail is another entry point: choosing Brush there is plain painting, as the B key is.
+    await t.b.key('b');
+    await chosen('B key');
+
+    await t.b.key('e');
     await t.b.eval(`document.querySelector('.tool-rail .tool[aria-label="Brush"]').click(), 1`);
-    equal((await w.state()).tool, 'Brush', 'tool after the rail');
-    equal(await toolOptions(t), 'Paint* | Fuzzy fill | Brush* | Eraser | Stop at edgesShift | Filtered view', 'the rail resets the brush to painting');
+    await chosen('tool rail');
+
+    // The actual tool-pie dispatch chains Brush (south-west) to its label pie; pick crack (north).
+    await t.b.key('e');
+    await t.b.key('v');
+    const [x, y] = w.at(800, 500);
+    await t.b.move(x, y);
+    await t.b.holdKeyAndMove('q', [[x - 120, y + 120], [x - 120, y - 120]]);
+    await chosen('tool pie');
+
+    // A quick Q tap restores the last Brush through the same switching rule, not its eraser mode.
+    await t.b.key('e');
+    await t.b.key('v');
+    await t.b.key('q');
+    await chosen('Q tap');
   },
 });

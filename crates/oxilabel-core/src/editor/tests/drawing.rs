@@ -278,7 +278,7 @@ fn an_ellipse_too_small_on_screen_is_not_added() {
 }
 
 #[test]
-fn a_fixed_size_shape_is_placed_by_one_click_and_oriented_by_a_second() {
+fn a_shape_with_a_constraint_is_placed_by_one_click_and_oriented_by_a_second() {
     let mut rectangle = session(vec![]);
     rectangle.switch_tool(Tool::Rectangle);
     rectangle.set_label(Some(2));
@@ -308,7 +308,7 @@ fn a_fixed_size_shape_is_placed_by_one_click_and_oriented_by_a_second() {
 }
 
 #[test]
-fn a_fixed_size_that_cannot_fit_is_reported_and_nothing_is_drawn() {
+fn a_shape_constraint_that_cannot_fit_is_reported_and_nothing_is_drawn() {
     let huge = label_with(4, json!({ "rectangle": { "width": 2000.0, "height": 50.0 } }));
     let mut session = Session::new(vec![], vec![huge], IMAGE);
     session.switch_tool(Tool::Rectangle);
@@ -391,7 +391,7 @@ fn escape_drops_every_kind_of_drawing_gesture() {
         assert!(session.annotations().is_empty(), "{tool:?} added nothing");
     }
 
-    // A fixed-size shape waiting for its angle is cancelled the same way.
+    // A constrained shape waiting for its angle is cancelled the same way.
     let mut session = with_options(session(vec![]), oriented);
     session.switch_tool(Tool::Rectangle);
     session.set_label(Some(2));

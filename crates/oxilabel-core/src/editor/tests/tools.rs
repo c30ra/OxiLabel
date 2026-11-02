@@ -6,7 +6,6 @@ use super::*;
 use crate::{
     ShapeType,
     editor::{BrushMode, Tool},
-    keymap::Action,
 };
 
 /// A label allowing only `shapes`.
@@ -76,49 +75,20 @@ fn every_tool_key_maps_back_to_its_tool() {
     }
 }
 
-// Each entry point starts where it does in the browser, then takes its own route into the
-// session's one switching rule: a tool key through `Session::key`, the pie, the rail and the
-// Q tap through it. All four must land on the same tool, brush mode and label.
+// This is the shared session rule. Browser flows exercise the key, pie, rail and Q-tap adapters;
+// direct Session calls do not claim to cover their UI dispatch.
 #[test]
-fn every_entry_point_chooses_the_same_tool_modes_and_label() {
-    let entry_points: [(&str, fn() -> (Session, bool)); 4] = [
-        ("tool key", || {
-            let mut session = ready(Tool::Select);
-            session.set_brush_mode(BrushMode::Erase);
-            let switched = session.key(Action::Brush);
-            (session, switched)
-        }),
-        ("tool pie", || {
-            let mut session = ready(Tool::Rectangle);
-            session.set_brush_mode(BrushMode::Fill);
-            let switched = session.switch_tool(Tool::Brush);
-            (session, switched)
-        }),
-        ("tool rail", || {
-            let mut session = ready(Tool::Ellipse);
-            session.set_brush_mode(BrushMode::FillErase);
-            let switched = session.switch_tool(Tool::Brush);
-            (session, switched)
-        }),
-        ("Q tap", || {
-            // The tap repeats the last kind of tool: a brush starts plain painting again.
-            let mut session = ready(Tool::Select);
-            assert!(session.switch_tool(Tool::Brush));
-            session.set_brush_mode(BrushMode::Erase);
-            assert!(session.switch_tool(Tool::Select));
-            let switched = session.switch_tool(Tool::Brush);
-            (session, switched)
-        }),
-    ];
-    for (entry, enter) in entry_points {
-        let (session, switched) = enter();
-        assert!(switched, "{entry}");
-        assert_eq!(
-            (session.tool(), session.brush_mode(), session.label()),
-            (Tool::Brush, BrushMode::Paint, Some(3)),
-            "{entry}"
-        );
-    }
+fn switching_to_brush_resets_its_modes_and_chooses_a_mask_label() {
+    let mut session = ready(Tool::Ellipse);
+    session.set_brush_mode(BrushMode::FillErase);
+
+    let switched = session.switch_tool(Tool::Brush);
+
+    assert!(switched);
+    assert_eq!(
+        (session.tool(), session.brush_mode(), session.label()),
+        (Tool::Brush, BrushMode::Paint, Some(3))
+    );
 }
 
 #[test]

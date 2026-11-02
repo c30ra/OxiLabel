@@ -1,7 +1,7 @@
 //! The drawing tools: a rectangle (two clicks or a drag, square, from the centre, three points
 //! for an oriented one), a polygon, polyline or points shape placed vertex by vertex, a freehand
 //! polyline (vertices every `spacing` image pixels, optionally following the image's edges), an
-//! ellipse (from its centre or across its box) and a fixed-size shape placed from a label's
+//! ellipse (from its centre or across its box) and a constrained shape placed from a label's
 //! constraint. Press, move and release keep the gesture and its preview; finishing adds the
 //! annotation with its label's default attribute values. Shapes too small to be meant are not
 //! created.
@@ -40,7 +40,7 @@ impl Session {
 
     /// The shape type the current tool draws, when a label's constraint can fix its size: the tool
     /// then places shapes instead of dragging them out.
-    pub fn fixed_shape(&self) -> Option<(ShapeType, ShapeConstraints)> {
+    pub fn constrained_shape(&self) -> Option<(ShapeType, ShapeConstraints)> {
         let shape = match self.tool {
             Tool::Rectangle if self.options.oriented => ShapeType::OrientedRectangle,
             Tool::Rectangle => ShapeType::Rectangle,
@@ -51,10 +51,10 @@ impl Session {
         constraints.fixes(shape).then_some((shape, constraints))
     }
 
-    /// The fixed-size shape a click at `point` would place, and its size, for the layer's preview
+    /// The constrained shape a click at `point` would place, and its size, for the layer's preview
     /// while the pointer moves before the click.
-    pub fn fixed_preview(&self, point: Point) -> Option<(Shape, Option<(f64, f64)>)> {
-        let (shape_type, constraints) = self.fixed_shape()?;
+    pub fn constrained_preview(&self, point: Point) -> Option<(Shape, Option<(f64, f64)>)> {
+        let (shape_type, constraints) = self.constrained_shape()?;
         let shape = constraints.place(shape_type, point, 0.0, self.image.0, self.image.1)?;
         Some((shape, constraints.size(shape_type)))
     }
@@ -83,8 +83,8 @@ impl Session {
         let point = self.inside(pointer.at);
         let shift = pointer.modifiers.shift;
         let alt = pointer.modifiers.alt;
-        // A label with a fixed size places its shape: one click, and one more for its angle.
-        if let Some((shape_type, constraints)) = self.fixed_shape() {
+        // A label's shape constraint places its shape: one click, and one more for its angle.
+        if let Some((shape_type, constraints)) = self.constrained_shape() {
             let (centre, angle) = match self.gesture {
                 Gesture::Placing { centre, angle } => (centre, angle),
                 _ if constraints.needs_angle(shape_type) => {
@@ -98,7 +98,7 @@ impl Session {
                 None => {
                     self.gesture = Gesture::Idle;
                     let name = self.label_definition().map(|label| label.name.clone()).unwrap_or_default();
-                    self.notice = Some(format!("“{name}” has a fixed size that does not fit this image."));
+                    self.notice = Some(format!("“{name}” has a shape constraint that does not fit this image."));
                 }
             }
             return;
@@ -173,7 +173,7 @@ impl Session {
         let snap = shift != self.options.snap;
         self.gesture = match std::mem::replace(&mut self.gesture, Gesture::Idle) {
             Gesture::Idle => Gesture::Idle,
-            // Turning a fixed-size shape: its width side points at the pointer.
+            // Turning a constrained shape: its width side points at the pointer.
             Gesture::Placing { centre, .. } => {
                 let angle = snap_turn((point.y - centre.y).atan2(point.x - centre.x), snap);
                 Gesture::Placing { centre, angle }
@@ -371,7 +371,7 @@ impl Session {
                 Some(Preview::Ellipse(self.ellipse_from(*start, *current, *circle, *from_centre)))
             }
             Gesture::Placing { centre, angle } => {
-                let (shape_type, constraints) = self.fixed_shape()?;
+                let (shape_type, constraints) = self.constrained_shape()?;
                 let shape = constraints.place(shape_type, *centre, *angle, self.image.0, self.image.1)?;
                 Some(Preview::Placing { shape, angle: *angle })
             }
