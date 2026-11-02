@@ -67,9 +67,14 @@ fn polygon(points: &[(f64, f64)]) -> Annotation {
     Annotation::manual(1, Shape::Polygon { points: points.iter().map(|&(x, y)| Point::new(x, y)).collect() })
 }
 
-/// The pointer at (`x`, `y`) in image pixels, at 100% and without modifiers.
+/// The pointer at (`x`, `y`) in image pixels, at 100% and without modifiers, no button held.
 fn at(x: f64, y: f64) -> Pointer {
-    Pointer { at: Point::new(x, y), scale: 1.0, modifiers: Modifiers::default() }
+    Pointer { at: Point::new(x, y), scale: 1.0, modifiers: Modifiers::default(), primary: false }
+}
+
+/// `pointer` as a move or release with the primary button held.
+fn pressed(pointer: Pointer) -> Pointer {
+    Pointer { primary: true, ..pointer }
 }
 
 fn shift(pointer: Pointer) -> Pointer {
@@ -86,9 +91,9 @@ fn click(session: &mut Session, pointer: Pointer) {
 }
 
 fn drag(session: &mut Session, from: Pointer, to: Pointer) {
-    session.press(from);
-    session.move_to(to);
-    session.release(to);
+    session.press(pressed(from));
+    session.move_to(pressed(to));
+    session.release(pressed(to));
 }
 
 fn selected(session: &Session) -> Vec<usize> {

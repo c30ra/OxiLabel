@@ -30,7 +30,7 @@ fn bitmap(annotation: &Annotation) -> Bitmap {
 /// 10 pixels across.
 fn brushing(annotations: Vec<Annotation>) -> Session {
     let mut session = session(annotations);
-    session.set_tool(Tool::Brush);
+    session.switch_tool(Tool::Brush);
     session.set_label(Some(1));
     session.set_options(Options { brush_size: 10.0, ..Options::default() });
     session
@@ -164,7 +164,9 @@ fn undo_during_a_stroke_drops_it() {
 #[test]
 fn a_brush_without_a_label_paints_nothing() {
     let mut session = session(Vec::new());
-    session.set_tool(Tool::Brush);
+    assert!(session.switch_tool(Tool::Brush));
+    // The project's labels were changed or removed since the tool was chosen.
+    session.set_label(None);
     session.press(at(100.0, 100.0));
     assert!(!session.is_busy());
     assert!(session.take_notice().is_some(), "it says a label is needed");
@@ -178,7 +180,7 @@ fn shifting_inverts_stop_at_edges_mid_stroke() {
         bitmap.paint_square(Point::new(50.0, 50.0), 50.0, IMAGE);
         bitmap
     };
-    let layer = Layer { limit: Some(&limit), ..Layer::default() };
+    let layer = Layer { paintable: Some(&limit), ..Layer::default() };
     let mut session = brushing(Vec::new());
     session.set_options(Options { stop_at_edges: true, ..Options::default() });
     session.press_in(at(50.0, 50.0), layer);

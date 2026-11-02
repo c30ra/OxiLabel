@@ -51,8 +51,10 @@ pub fn ToolOptions(editor: Editor) -> impl IntoView {
                     <span class="muted hint">"Shift: circle · Alt: the other way"</span>
                 }.into_any(),
                 Tool::Brush => view! {
-                    <Segmented choices=vec![("Paint", false), ("Fuzzy fill", true)] value=editor.tools.fill />
-                    <Segmented choices=vec![("Brush", false), ("Eraser", true)] value=editor.tools.eraser />
+                    <ModeSegmented choices=vec![("Paint", false), ("Fuzzy fill", true)] value=editor.tools.fill
+                        set=Callback::new(move |fill| editor.set_brush_fill(fill)) />
+                    <ModeSegmented choices=vec![("Brush", false), ("Eraser", true)] value=editor.tools.eraser
+                        set=Callback::new(move |eraser| editor.set_brush_eraser(eraser)) />
                     <Show
                         when=move || editor.tools.fill.get()
                         fallback=move || view! {
@@ -93,6 +95,20 @@ fn Segmented(choices: Vec<(&'static str, bool)>, value: RwSignal<bool>) -> impl 
             {choices.into_iter().map(|(label, choice)| view! {
                 <button role="radio" aria-checked=move || (value.get() == choice).to_string()
                     class:active=move || value.get() == choice on:click=move |_| value.set(choice)>{label}</button>
+            }).collect_view()}
+        </div>
+    }
+}
+
+/// A [`Segmented`] whose choice goes through a callback instead of writing the signal: the brush's
+/// mode is the session's, and the signal only shows (and saves) what it decided.
+#[component]
+fn ModeSegmented(choices: Vec<(&'static str, bool)>, value: RwSignal<bool>, set: Callback<bool>) -> impl IntoView {
+    view! {
+        <div class="segmented" role="radiogroup">
+            {choices.into_iter().map(|(label, choice)| view! {
+                <button role="radio" aria-checked=move || (value.get() == choice).to_string()
+                    class:active=move || value.get() == choice on:click=move |_| set.run(choice)>{label}</button>
             }).collect_view()}
         </div>
     }

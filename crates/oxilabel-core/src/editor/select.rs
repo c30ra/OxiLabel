@@ -21,7 +21,7 @@ use super::{
 impl Session {
     /// A press of the main button with the Select tool.
     pub(super) fn select_press(&mut self, pointer: Pointer) {
-        let Pointer { at: point, scale, modifiers } = pointer;
+        let Pointer { at: point, scale, modifiers, .. } = pointer;
         let (extend, subtract) = (modifiers.shift, modifiers.ctrl);
         if !extend && let Some((index, grip)) = self.grip_under(point, scale) {
             self.grab(index, grip, point, subtract);
@@ -221,7 +221,7 @@ impl Session {
     /// `scale`; none when it is locked or not shown. Hit-testing uses the same list.
     pub fn grips(&self, scale: f64) -> Vec<Grip> {
         let Some((index, annotation)) = self.editable() else { return Vec::new() };
-        let fixed = self.labels.iter().find(|l| l.id == annotation.label).is_some_and(|l| l.constraints.fixes(annotation.shape.shape_type()));
+        let fixed = self.label_by_id(annotation.label).is_some_and(|l| l.constraints.fixes(annotation.shape.shape_type()));
         grips(&self.shown_shape(index, annotation), fixed, scale)
     }
 

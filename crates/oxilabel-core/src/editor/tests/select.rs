@@ -386,7 +386,7 @@ fn deleting_during_a_drag_cancels_it() {
 }
 
 #[test]
-fn escape_cancels_the_gesture_then_clears_the_selection_then_is_left_to_the_tool() {
+fn escape_cancels_the_gesture_then_clears_the_selection_then_returns_to_select() {
     let mut session = session(vec![boxed(100.0, 100.0, 200.0, 200.0)]);
     click(&mut session, at(150.0, 150.0));
     session.press(at(150.0, 150.0));

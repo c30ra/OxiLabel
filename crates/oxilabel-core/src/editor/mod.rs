@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     Label, ShapeType,
     annotation::{Annotation, Shape},
+    attribute::Attributes,
     geometry::{Handle, Point, Rect},
     history::{Edit, History},
     keymap::Action,
@@ -31,7 +32,7 @@ mod draw;
 pub mod grip;
 mod select;
 
-pub use brush::{FillRegion, FillSource, Layer, LimitSource};
+pub use brush::{FillRegion, FillSource, Layer, PaintableSource};
 
 #[cfg(test)]
 mod tests;
@@ -122,6 +123,22 @@ impl Tool {
             Tool::Tag => Action::Tag,
         }
     }
+
+    /// The tool a tool key switches to; `None` for other actions. `Action::Tag` opens the label
+    /// pie instead of making Tag the active tool, so it is not one.
+    pub fn from_action(action: Action) -> Option<Tool> {
+        [
+            Tool::Select,
+            Tool::Rectangle,
+            Tool::Polygon,
+            Tool::Polyline,
+            Tool::Points,
+            Tool::Ellipse,
+            Tool::Brush,
+        ]
+        .into_iter()
+        .find(|tool| tool.action() == action)
+    }
 }
 
 /// What the brush does: paint or erase a mask, and whether a click fills the similar region
@@ -181,6 +198,9 @@ pub struct Pointer {
     pub at: Point,
     pub scale: f64,
     pub modifiers: Modifiers,
+    /// Whether the primary (usually left) button is involved: down during a press or a move, and
+    /// the one released by a release.
+    pub primary: bool,
 }
 
 /// The tool options gestures follow.
@@ -320,8 +340,8 @@ pub enum Preview {
     Freehand { points: Vec<Point>, current: Point },
     /// The ellipse as it would be made now, inside the image.
     Ellipse(Ellipse),
-    /// A fixed-size shape being placed; `turning` once a click has fixed its centre.
-    Placing { shape: Shape, turning: bool, angle: f64 },
+    /// A fixed-size shape being placed, at the angle it would take.
+    Placing { shape: Shape, angle: f64 },
 }
 
 /// One image's annotations being edited. Every change to them goes through the undo history.
@@ -412,14 +432,6 @@ impl Session {
         self.tool
     }
 
-    /// Switches tools; a gesture begun with the old tool no longer applies.
-    pub fn set_tool(&mut self, tool: Tool) {
-        if self.tool != tool {
-            self.cancel();
-            self.tool = tool;
-        }
-    }
-
     /// The label new shapes get.
     pub fn label(&self) -> Option<i64> {
         self.label
@@ -455,14 +467,24 @@ impl Session {
         self.brush = self.brush.with_fill(fill);
     }
 
+    /// The project's label `id`, if it still exists.
+    fn label_by_id(&self, id: i64) -> Option<&Label> {
+        self.labels.iter().find(|label| label.id == id)
+    }
+
+    /// The first label in the project that allows `shape`.
+    fn label_allowing(&self, shape: ShapeType) -> Option<&Label> {
+        self.labels.iter().find(|label| label.shape_types.contains(&shape))
+    }
+
     /// Whether some label allows the shape `tool` draws; Select always can be used.
     pub fn can_use(&self, tool: Tool) -> bool {
-        tool.shape_type().is_none_or(|shape| self.labels.iter().any(|label| label.shape_types.contains(&shape)))
+        tool.shape_type().is_none_or(|shape| self.label_allowing(shape).is_some())
     }
 
     /// Whether label `label` allows `shape`.
     pub fn label_allows(&self, label: i64, shape: ShapeType) -> bool {
-        self.labels.iter().any(|candidate| candidate.id == label && candidate.shape_types.contains(&shape))
+        self.label_by_id(label).is_some_and(|candidate| candidate.shape_types.contains(&shape))
     }
 
     /// Why `tool` cannot be used, for a notice.
@@ -482,17 +504,18 @@ impl Session {
         }
         // The same tool chosen again still drops whatever was being drawn with it.
         self.cancel();
-        self.set_tool(tool);
+        self.tool = tool;
         if tool == Tool::Brush {
             self.brush = BrushMode::Paint;
         }
         if let Some(shape) = tool.shape_type()
             && !self.label.is_some_and(|label| self.label_allows(label, shape))
         {
-            self.label = self.labels.iter().find(|label| label.shape_types.contains(&shape)).map(|label| label.id);
+            self.label = self.label_allowing(shape).map(|label| label.id);
         }
         true
     }
+
     /// A press of the main button.
     pub fn press(&mut self, pointer: Pointer) {
         self.press_in(pointer, Layer::default());
@@ -553,8 +576,9 @@ impl Session {
         self.stroke_change = None;
     }
 
-    /// Handles a key action; returns whether it did anything. Cancel (Esc) first ends the
-    /// gesture, then clears the selection, and otherwise is left to the caller.
+    /// Handles a key action; returns whether it did anything. A tool key switches through the one
+    /// switching rule. Cancel (Esc) first ends the gesture, then clears the selection, then returns
+    /// to Select.
     pub fn key(&mut self, action: Action) -> bool {
         match action {
             Action::Undo => self.undo(),
@@ -575,7 +599,9 @@ impl Session {
             Action::Cancel if self.is_sizing_brush() => self.restore_brush_size(),
             Action::Cancel if self.is_busy() => self.cancel(),
             Action::Cancel if !self.selection.is_empty() => self.selection.clear(),
-            _ => return false,
+            Action::Cancel if self.tool != Tool::Select => return self.switch_tool(Tool::Select),
+            Action::Cancel => return false,
+            action => return Tool::from_action(action).is_some_and(|tool| self.switch_tool(tool)),
         }
         true
     }
@@ -709,6 +735,11 @@ impl Session {
         }
     }
 
+    /// The attribute values a new annotation with `label` gets.
+    pub(super) fn default_attributes(&self, label: i64) -> Attributes {
+        self.label_by_id(label).map(|definition| definition.conform_attributes(&Attributes::new())).unwrap_or_default()
+    }
+
     /// Relabels the annotations at `indices` as `label`, in one undo step: the label pie and the
     /// side panel both come here. An annotation that is not shown (hidden, or a pre-annotation
     /// below the threshold) or whose shape the label does not allow is left alone; attributes are
@@ -716,14 +747,18 @@ impl Session {
     /// so a tag whose new label another tag already has is left alone (with a notice), and when
     /// several selected tags take one label, the first one takes it.
     pub fn relabel(&mut self, indices: &[usize], label: i64) -> bool {
-        let Some(target) = self.labels.iter().find(|target| target.id == label).cloned() else { return false };
+        let Some(target) = self.label_by_id(label).cloned() else { return false };
         let selected: BTreeSet<usize> = indices.iter().copied().collect();
-        // Tags that keep their labels still claim them, so a selected tag cannot join one.
+        // Tags that keep their labels still claim them, so a selected tag cannot join one: every
+        // tag not being relabelled, and any tag that already has the new label (it keeps it, since
+        // relabelling a tag to its own label changes nothing).
         let mut tags: BTreeSet<i64> = self
             .annotations
             .iter()
             .enumerate()
-            .filter(|(index, annotation)| !selected.contains(index) && annotation.shape.is_tag())
+            .filter(|(index, annotation)| {
+                annotation.shape.is_tag() && (!selected.contains(index) || annotation.label == label)
+            })
             .map(|(_, annotation)| annotation.label)
             .collect();
         let mut notice = None;

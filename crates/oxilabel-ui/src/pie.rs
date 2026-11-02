@@ -45,10 +45,9 @@ pub enum PieAction {
     ToggleEdgeSnap,
     /// Brush: paint only the region similar to the stroke's start.
     ToggleStopAtEdges,
-    /// Fuzzy fill: a higher (true) or lower (false) threshold.
-    Threshold(bool),
-    /// Brush: a larger (true) or smaller (false) size.
-    BrushSize(bool),
+    /// A step larger (true) or smaller (false): the fuzzy fill's threshold in fill mode, else the
+    /// brush's size.
+    BrushStep(bool),
     /// Finish the polygon, polyline or points being drawn.
     FinishShape,
     /// Remove the last placed vertex.

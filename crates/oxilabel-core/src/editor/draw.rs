@@ -9,7 +9,6 @@
 use crate::{
     Label, ShapeType,
     annotation::{Annotation, Shape},
-    attribute::Attributes,
     constraint::ShapeConstraints,
     ellipse::Ellipse,
     geometry::{Point, Rect, snap_angle, steps_along, steps_towards},
@@ -36,8 +35,7 @@ impl Session {
 
     /// The label new shapes get, if the project still has it.
     pub(super) fn label_definition(&self) -> Option<&Label> {
-        let label = self.label?;
-        self.labels.iter().find(|definition| definition.id == label)
+        self.label.and_then(|label| self.label_by_id(label))
     }
 
     /// The shape type the current tool draws, when a label's constraint can fix its size: the tool
@@ -180,8 +178,10 @@ impl Session {
                 let angle = snap_turn((point.y - centre.y).atan2(point.x - centre.x), snap);
                 Gesture::Placing { centre, angle }
             }
+            // Only a move with the primary button held is a drag; a hover leaves the shape waiting
+            // for its second click.
             Gesture::Drawing { start, dragged, .. } => {
-                let moved = start.distance(point) * pointer.scale > DRAG_THRESHOLD;
+                let moved = pointer.primary && start.distance(point) * pointer.scale > DRAG_THRESHOLD;
                 Gesture::Drawing {
                     start,
                     current: inside,
@@ -191,7 +191,7 @@ impl Session {
                 }
             }
             Gesture::Ellipse { start, dragged, .. } => {
-                let moved = start.distance(point) * pointer.scale > DRAG_THRESHOLD;
+                let moved = pointer.primary && start.distance(point) * pointer.scale > DRAG_THRESHOLD;
                 Gesture::Ellipse {
                     start,
                     current: inside,
@@ -239,11 +239,12 @@ impl Session {
     /// The main button was released with a drawing tool.
     pub(super) fn draw_release(&mut self, pointer: Pointer) {
         match std::mem::replace(&mut self.gesture, Gesture::Idle) {
-            // A click without dragging leaves the rectangle or ellipse open for a second click.
-            Gesture::Drawing { start, current, dragged: true, square, from_centre } => {
+            // A click without dragging leaves the rectangle or ellipse open for a second click;
+            // only releasing the button that made the drag finishes it.
+            Gesture::Drawing { start, current, dragged: true, square, from_centre } if pointer.primary => {
                 self.finish_rectangle(start, current, square, from_centre, pointer.scale);
             }
-            Gesture::Ellipse { start, current, dragged: true, circle, from_centre } => {
+            Gesture::Ellipse { start, current, dragged: true, circle, from_centre } if pointer.primary => {
                 self.finish_ellipse(start, current, circle, from_centre, pointer.scale);
             }
             // Releasing ends a freehand stroke; a stroke too short for two vertices keeps its end.
@@ -343,7 +344,7 @@ impl Session {
             self.notice = Some(format!("Not added: {reason}."));
             return;
         }
-        let attributes: Attributes = definition.conform_attributes(&Attributes::new());
+        let attributes = self.default_attributes(label);
         let annotation = Annotation { attributes, ..Annotation::manual(label, shape) };
         self.apply(Edit::Add { index: self.annotations.len(), annotation });
     }
@@ -372,7 +373,7 @@ impl Session {
             Gesture::Placing { centre, angle } => {
                 let (shape_type, constraints) = self.fixed_shape()?;
                 let shape = constraints.place(shape_type, *centre, *angle, self.image.0, self.image.1)?;
-                Some(Preview::Placing { shape, turning: true, angle: *angle })
+                Some(Preview::Placing { shape, angle: *angle })
             }
             _ => None,
         }
