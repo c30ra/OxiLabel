@@ -4,11 +4,31 @@
 
 **Blocked by:** 11
 
-**Status:** ready-for-agent
+**Status:** done
 
 **Decision:** choosing Brush resets to plain painting from every entry point (key, pie, rail, Q tap), as the B key does today; the last eraser or fuzzy fill mode is not kept.
 
-- [ ] Keys, pie, rail and tap all switch tools through one session rule
-- [ ] The side panel and the label pie relabel through one session rule; the side panel's duplicate-tag gap is closed
-- [ ] Rust tests cover each entry point giving the same tool, modes and label, and relabelling with a duplicate tag, a hidden annotation and a pending pre-annotation
-- [ ] Browser pie and side panel relabel tests still pass
+- [x] Keys, pie, rail and tap all switch tools through one session rule
+- [x] The side panel and the label pie relabel through one session rule; the side panel's duplicate-tag gap is closed
+- [x] Rust tests cover each entry point giving the same tool, modes and label, and relabelling with a duplicate tag, a hidden annotation and a pending pre-annotation
+- [x] Browser pie and side panel relabel tests still pass
+
+## Comments
+
+Implemented in the core editor session, with the annotation layer only forwarding its own brush state:
+
+- `crates/oxilabel-core/src/editor/mod.rs`: `Tool` (moved by ticket 12) plus `BrushMode` (`Paint`, `Erase`, `Fill`, `FillErase`; the eraser and fuzzy fill combine, so a fill in eraser mode cuts the region) with `with_eraser`/`with_fill`/`erases`/`fills`. `Session` gains `tool`/`label`/`brush`, `switch_tool`, `brush_mode`, `set_brush_mode`, `set_brush_eraser`, `set_brush_fill`, `can_use`, `label_allows`, `unusable_notice`, `relabel` and `relabel_selection`.
+- `switch_tool(tool) -> bool` is the one switching rule: refuses a tool no label allows (notice, nothing changes), cancels the session gesture even when the same tool is chosen again, makes Brush plain painting, and keeps the label only while it allows the tool's shape (otherwise takes the first label that does). Every entry point calls it: tool keys, `E`/`U` (which set their mode afterwards), Esc's return to Select, paste, the tool pie, the tool rail and the Q-tap `Editor::restore`.
+- `relabel(indices, label) -> bool` / `relabel_selection(label)` is the one relabelling rule: one undo step, skips annotations that are not shown (hidden or below the pre-annotation threshold) and shapes the label does not allow, conforms attributes to the new label, clears `pending`, and keeps one tag per label (a tag whose target label another tag already has is left alone with a notice; when several selected tags take one label, the first takes it). The label pie and the objects list both use it; the objects list's select snaps back when the session changed nothing, so a hidden row or a duplicate tag cannot leave the dropdown showing a wrong label.
+- `crates/oxilabel-ui/src/annotate.rs`: `Editor::switch_tool`, `set_label`, `set_brush_mode`, `set_brush_eraser`, `set_brush_fill`, `brush_mode`, `relabel`, `relabel_selection`; a `switched` trigger lets the layer drop its brush gesture; the duplicate label-fixup effect and the `usable_shapes` signal are gone (`can_use` asks the session). `Tool` is re-exported from core.
+- `crates/oxilabel-ui/src/pages/workspace.rs`: the rail and the label picker go through the editor methods.
+- `crates/oxilabel-ui/src/side_panel.rs`: the objects list relabels through the session rule.
+
+Tests:
+
+- `crates/oxilabel-core/src/editor/tests/tools.rs`: cancellation, label keeping/choosing, refusal with a notice, each of the four entry points giving Brush + painting + the first mask-allowing label, the eraser/fill reset, and the eraser keeping fuzzy fill.
+- `crates/oxilabel-core/src/editor/tests/relabel.rs`: attribute conformance and pending review in one undo step, a duplicate tag refused, two tags taking one label, hidden annotations left alone, and the side-panel single-annotation path.
+- `scripts/ui-tests/tests.mjs`: a tool-rail flow that checks the rail switches tools and resets the brush to painting.
+- `cargo test --workspace --exclude oxilabel-ui` passes; `scripts/ui-test.sh` passes all 70 browser flows, including the Q flick/tap, tool pie, label pie relabel, objects-list relabel and the new rail flow. One unrelated full-suite run timed out in the settings page's save check while other worktrees were building; it passed alone and in the last two full runs.
+
+Merged `architecture-deepening` (ticket 12's drawing-tools session) before finishing; conflicts were limited to the session's tool/method blocks and the annotation layer's imports and options effects.
