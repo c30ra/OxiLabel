@@ -77,6 +77,27 @@ pub const MAX_EDGE_OFFSET: f64 = 200.0;
 /// `[` and `]` change the freehand spacing by this factor.
 const SIZE_STEP: f64 = 1.25;
 
+/// Builds the session's borrowed analysis callbacks for one view and runs its operation while
+/// those callbacks live. Pointer gestures include edge paths; tile-ready updates do not.
+fn with_analysis_layer<R>(
+    current: View,
+    include_edges: bool,
+    edge_path: impl Fn(Option<Point>, Point, View) -> Option<Vec<Point>>,
+    fill_region: impl Fn(Point, f64, View) -> FillRegion,
+    edge_limit: impl Fn(Point, View) -> Bitmap,
+    run: impl FnOnce(Layer<'_>) -> R,
+) -> R {
+    let edges = |from, to| edge_path(from, to, current);
+    let fill = |seed, threshold| fill_region(seed, threshold, current);
+    let paintable = |seed| edge_limit(seed, current);
+    let layer = Layer {
+        edges: if include_edges { Some(&edges) } else { None },
+        fill: Some(&fill),
+        paintable: Some(&paintable),
+    };
+    run(layer)
+}
+
 thread_local! {
     /// The copied annotations and their project: kept while moving between the project's images,
     /// not across a reload.
@@ -334,18 +355,10 @@ impl Editor {
     }
 
     /// Switches to `tool` through the session's one rule (the tool pie, the rail and a tap of the
-    /// pie key come here; tool keys come through [`Editor::key`]), then mirrors the session: the
-    /// tool, its label, and the brush mode (painting after choosing Brush).
+    /// pie key come here; tool keys come through [`Editor::key`]).
     pub fn switch_tool(&self, tool: Tool) -> bool {
         let switched = self.update(|session| session.switch_tool(tool));
-        let (tool, label, brush) = self.peek(|session| (session.tool(), session.label(), session.brush_mode()));
-        if self.tool.get_untracked() != tool {
-            self.tool.set(tool);
-        }
-        if self.label.get_untracked() != label {
-            self.label.set(label);
-        }
-        self.mirror_brush_mode(brush);
+        self.mirror_tool_state();
         if switched {
             // Cancels what the annotation layer is drawing, even when the tool is chosen again.
             self.switched.notify();
@@ -354,11 +367,19 @@ impl Editor {
     }
 
     /// Passes a key action to the session and mirrors what it changed: a tool key switches tools
-    /// through the session's one rule, and Esc returns to Select. The tool, its label and the
-    /// brush mode follow the session, so nothing can bypass the rule.
+    /// through the session's one rule, and Esc returns to Select.
     pub fn key(&self, action: Action) -> bool {
         let was = self.peek(|session| session.tool());
         let handled = self.update(|session| session.key(action));
+        self.mirror_tool_state();
+        if was != self.tool.get_untracked() {
+            self.switched.notify();
+        }
+        handled
+    }
+
+    /// Mirrors the session's tool, label and brush mode after either switching entry point.
+    fn mirror_tool_state(&self) {
         let (tool, label, brush) = self.peek(|session| (session.tool(), session.label(), session.brush_mode()));
         if self.tool.get_untracked() != tool {
             self.tool.set(tool);
@@ -367,10 +388,6 @@ impl Editor {
             self.label.set(label);
         }
         self.mirror_brush_mode(brush);
-        if was != tool {
-            self.switched.notify();
-        }
-        handled
     }
 
     /// Sets the label new shapes get, in the session and the signal the view reads.
@@ -563,9 +580,9 @@ pub fn AnnotationLayer(
     // The outlines of the footprints drawn last, by annotation index, with the shape and footprint
     // they were made from: a region is only made again when either changes.
     let ghosts: StoredValue<HashMap<usize, (Shape, Footprint, Vec<Vec<Point>>)>> = StoredValue::new(HashMap::new());
-    // The shape type the current tool draws and the current label's constraints, when the label
-    // fixes that type's size (the session then places shapes instead of dragging them out).
-    let fixed_shape = move || editor.peek(Session::fixed_shape);
+    // The shape type the current tool draws and the current label's constraints, when that label
+    // constrains the type (the session then places shapes instead of dragging them out).
+    let constrained_shape = move || editor.peek(Session::constrained_shape);
 
     // Pointer position in canvas pixels and in image coordinates.
     let locate = move |ev: &ev::MouseEvent| -> Option<(Point, Point, View)> {
@@ -746,10 +763,9 @@ pub fn AnnotationLayer(
         if !editor.peek(Session::is_brushing) {
             return;
         }
-        let fill = |seed, threshold| fill_region(seed, threshold, current);
-        let paintable = |seed| edge_limit(seed, current);
-        let layer = Layer { fill: Some(&fill), paintable: Some(&paintable), ..Layer::default() };
-        editor.update(|session| session.pixels_ready(layer));
+        with_analysis_layer(current, false, edge_path, fill_region, edge_limit, |layer| {
+            editor.update(|session| session.pixels_ready(layer));
+        });
         sync_stroke();
         sync_fill();
     });
@@ -976,6 +992,21 @@ pub fn AnnotationLayer(
         pointer.set(centre);
         pie.set(Some(opened));
     };
+    // Ticket 14's unified entry-point rule: Tag uses keyboard T's label-choice semantics from
+    // every pie too. Tag is never active, so the current tool and its gesture stay untouched.
+    // `held` keeps the label pie held while Q or the right button is still down from the tool pie,
+    // so releasing over a label picks it; keyboard T opens it for clicking.
+    let open_tag_pie = move |held: bool| {
+        if editor.can_use(Tool::Tag) {
+            close_pie();
+            pending_tool.set_value(Some(Tool::Tag));
+            let at = cursor_at.get_value();
+            pointer.set(at);
+            pie.set(Some(label_pie(at, held)));
+        } else {
+            editor.notice.set(Some(Session::unusable_notice(Tool::Tag)));
+        }
+    };
     // Adds `id` as a tag of the image, or removes it if the image has it.
     let toggle_tag = move |id: i64| {
         let existing = editor.peek(|session| session.annotations().iter().position(|a| a.shape.is_tag() && a.label == id));
@@ -1012,7 +1043,8 @@ pub fn AnnotationLayer(
                 close_pie();
                 editor.switch_tool(Tool::Select);
             }
-            // Picking a tool chains to the label pie, centred where the pointer is so the next
+            PieAction::Tool(Tool::Tag) => open_tag_pie(trigger_down.get_value()),
+            // Picking a drawing tool chains to the label pie, centred where the pointer is so the next
             // flick starts fresh; it stays held while Q or the right button is still down.
             PieAction::Tool(tool) => {
                 if !editor.switch_tool(tool) {
@@ -1205,18 +1237,16 @@ pub fn AnnotationLayer(
         if let Some(canvas) = canvas_ref.get_untracked() {
             canvas.set_pointer_capture(ev.pointer_id()).ok();
         }
-        let edges = |from, to| edge_path(from, to, current);
-        let fill = |seed, threshold| fill_region(seed, threshold, current);
-        let paintable = |seed| edge_limit(seed, current);
-        let layer = Layer { edges: Some(&edges), fill: Some(&fill), paintable: Some(&paintable) };
-        editor.update(|session| session.press_in(pointer_at(&ev, point, current, true), layer));
+        with_analysis_layer(current, true, edge_path, fill_region, edge_limit, |layer| {
+            editor.update(|session| session.press_in(pointer_at(&ev, point, current, true), layer));
+        });
         sync_stroke();
         sync_fill();
     };
 
     let on_pointer_move = move |ev: ev::PointerEvent| {
         let Some((_, point, current)) = locate(&ev) else { return };
-        if editor.tool.get_untracked() == Tool::Brush || fixed_shape().is_some() {
+        if editor.tool.get_untracked() == Tool::Brush || constrained_shape().is_some() {
             hover.set(Some(inside(point)));
         }
         if !editor.peek(Session::is_busy) {
@@ -1233,12 +1263,10 @@ pub fn AnnotationLayer(
             });
             return;
         }
-        let edges = |from, to| edge_path(from, to, current);
-        let fill = |seed, threshold| fill_region(seed, threshold, current);
-        let paintable = |seed| edge_limit(seed, current);
-        let layer = Layer { edges: Some(&edges), fill: Some(&fill), paintable: Some(&paintable) };
         let primary = ev.buttons() & 1 == 1;
-        editor.update(|session| session.move_to_in(pointer_at(&ev, point, current, primary), layer));
+        with_analysis_layer(current, true, edge_path, fill_region, edge_limit, |layer| {
+            editor.update(|session| session.move_to_in(pointer_at(&ev, point, current, primary), layer));
+        });
         sync_stroke();
         sync_fill();
     };
@@ -1275,17 +1303,31 @@ pub fn AnnotationLayer(
             ev.prevent_default();
             return;
         }
-        // The brush's F gesture owns F, Enter and Esc while it runs.
+        // The brush's F gesture owns F, Enter and Esc while it runs, and swallows other keys,
+        // except that choosing a tool (a tool key, E, U, or Q's pies and tap) cancels the sizing
+        // and then takes the same path as outside the gesture (ticket 14's one rule).
         if editor.peek(Session::is_sizing_brush) {
-            let action = [Action::ResizeBrush, Action::Finish, Action::Cancel].into_iter().find(|&action| is(action));
-            if let Some(action) = action {
+            if let Some(action) = [Action::ResizeBrush, Action::Finish, Action::Cancel].into_iter().find(|&action| is(action)) {
                 editor.key(action);
+                ev.prevent_default();
+                return;
             }
-            ev.prevent_default();
-            return;
+            let chooses_tool = [Action::Pie, Action::LabelPie, Action::Eraser, Action::FuzzyFill]
+                .into_iter()
+                .chain(KEY_TOOLS.into_iter().map(Tool::action))
+                .any(|action| is(action));
+            if !chooses_tool {
+                ev.prevent_default();
+                return;
+            }
         }
         if is(Action::Pie) || is(Action::LabelPie) {
             if !ev.repeat() {
+                // A pie's flick must not resize the brush: sizing is cancelled first. Other
+                // gestures stay, as the options pie can finish or edit them.
+                if editor.peek(Session::is_sizing_brush) {
+                    editor.update(Session::cancel);
+                }
                 trigger_down.set_value(true);
                 // The label pie key opens only the label pie; releasing it over a label picks it too.
                 open_pie(true, is(Action::LabelPie));
@@ -1371,16 +1413,7 @@ pub fn AnnotationLayer(
                 editor.set_brush_mode(BrushMode::Fill);
             }
         } else if is(Action::Tag) {
-            // The label pie, whose label is toggled as a tag of the image.
-            if editor.can_use(Tool::Tag) {
-                close_pie();
-                pending_tool.set_value(Some(Tool::Tag));
-                let at = cursor_at.get_value();
-                pointer.set(at);
-                pie.set(Some(label_pie(at, false)));
-            } else {
-                editor.notice.set(Some(Session::unusable_notice(Tool::Tag)));
-            }
+            open_tag_pie(false);
         } else if let Some(action) = KEY_TOOLS.into_iter().map(Tool::action).find(|&action| is(action)) {
             // The session's `key` maps the action to its tool and switches through the one rule.
             if editor.key(action) {
@@ -1494,11 +1527,11 @@ pub fn AnnotationLayer(
             draw::brush_outline(&context, current, at, editor.tools.brush_size.get_untracked() / 2.0);
         }
         let pen = editor.label.get_untracked().map(color_of).unwrap_or_else(|| "#ffffff".to_owned());
-        // The fixed-size shape the next click places: it hangs at the pointer until a click fixes
+        // The constrained shape the next click places: it hangs at the pointer until a click fixes
         // its centre, after which the session turns it with the pointer.
         if editor.peek(Session::preview).is_none() {
             if let Some(at) = hover.get_untracked() {
-                if let Some((shape, size)) = editor.peek(|session| session.fixed_preview(at)) {
+                if let Some((shape, size)) = editor.peek(|session| session.constrained_preview(at)) {
                     draw::shape(&context, current, &shape, Look { color: &pen, selected: false, dashed: true });
                     let text = match size {
                         Some((a, b)) => format!("{a:.0} × {b:.0}"),
@@ -1575,7 +1608,7 @@ let options = Options {
         };
         editor.update(|session| session.set_options(options));
     });
-    // The session acts with the editor's label; a label change drops a stale fixed-size placement.
+    // The session acts with the editor's label; a label change drops a stale constrained placement.
     Effect::new(move |_| {
         let label = editor.label.get();
         editor.update(|session| session.set_label(label));

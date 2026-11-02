@@ -82,62 +82,51 @@ pub enum Tool {
     Tag,
 }
 
+/// What each tool draws, is called and is chosen by; one row per tool, in `Tool`'s order.
+struct ToolMetadata {
+    tool: Tool,
+    shape: Option<ShapeType>,
+    name: &'static str,
+    action: Action,
+}
+
+const TOOL_METADATA: [ToolMetadata; 8] = [
+    ToolMetadata { tool: Tool::Select, shape: None, name: "Select", action: Action::Select },
+    ToolMetadata { tool: Tool::Rectangle, shape: Some(ShapeType::Rectangle), name: "Rectangle", action: Action::Rectangle },
+    ToolMetadata { tool: Tool::Polygon, shape: Some(ShapeType::Polygon), name: "Polygon", action: Action::Polygon },
+    ToolMetadata { tool: Tool::Polyline, shape: Some(ShapeType::Polyline), name: "Polyline", action: Action::Polyline },
+    ToolMetadata { tool: Tool::Points, shape: Some(ShapeType::Points), name: "Points", action: Action::Points },
+    ToolMetadata { tool: Tool::Ellipse, shape: Some(ShapeType::Ellipse), name: "Ellipse", action: Action::Ellipse },
+    ToolMetadata { tool: Tool::Brush, shape: Some(ShapeType::Mask), name: "Brush", action: Action::Brush },
+    ToolMetadata { tool: Tool::Tag, shape: Some(ShapeType::Tag), name: "Tag", action: Action::Tag },
+];
+
 impl Tool {
+    fn metadata(self) -> &'static ToolMetadata {
+        &TOOL_METADATA[self as usize]
+    }
+
     /// The shape this tool draws; `None` for Select. (Oriented rectangles come from Rectangle.)
     pub fn shape_type(self) -> Option<ShapeType> {
-        match self {
-            Tool::Select => None,
-            Tool::Rectangle => Some(ShapeType::Rectangle),
-            Tool::Polygon => Some(ShapeType::Polygon),
-            Tool::Polyline => Some(ShapeType::Polyline),
-            Tool::Points => Some(ShapeType::Points),
-            Tool::Ellipse => Some(ShapeType::Ellipse),
-            Tool::Brush => Some(ShapeType::Mask),
-            Tool::Tag => Some(ShapeType::Tag),
-        }
+        self.metadata().shape
     }
 
     pub fn name(self) -> &'static str {
-        match self {
-            Tool::Select => "Select",
-            Tool::Rectangle => "Rectangle",
-            Tool::Polygon => "Polygon",
-            Tool::Polyline => "Polyline",
-            Tool::Points => "Points",
-            Tool::Ellipse => "Ellipse",
-            Tool::Brush => "Brush",
-            Tool::Tag => "Tag",
-        }
+        self.metadata().name
     }
 
     /// The action that switches to the tool.
     pub fn action(self) -> Action {
-        match self {
-            Tool::Select => Action::Select,
-            Tool::Rectangle => Action::Rectangle,
-            Tool::Polygon => Action::Polygon,
-            Tool::Polyline => Action::Polyline,
-            Tool::Points => Action::Points,
-            Tool::Ellipse => Action::Ellipse,
-            Tool::Brush => Action::Brush,
-            Tool::Tag => Action::Tag,
-        }
+        self.metadata().action
     }
 
     /// The tool a tool key switches to; `None` for other actions. `Action::Tag` opens the label
     /// pie instead of making Tag the active tool, so it is not one.
     pub fn from_action(action: Action) -> Option<Tool> {
-        [
-            Tool::Select,
-            Tool::Rectangle,
-            Tool::Polygon,
-            Tool::Polyline,
-            Tool::Points,
-            Tool::Ellipse,
-            Tool::Brush,
-        ]
-        .into_iter()
-        .find(|tool| tool.action() == action)
+        TOOL_METADATA
+            .iter()
+            .find(|metadata| metadata.tool != Tool::Tag && metadata.action == action)
+            .map(|metadata| metadata.tool)
     }
 }
 
@@ -154,9 +143,8 @@ pub enum BrushMode {
 }
 
 impl BrushMode {
-    /// The mode with the eraser on or off, keeping the fill choice.
-    pub fn with_eraser(self, eraser: bool) -> BrushMode {
-        match (eraser, self.fills()) {
+    fn from_flags(eraser: bool, fill: bool) -> BrushMode {
+        match (eraser, fill) {
             (true, true) => BrushMode::FillErase,
             (true, false) => BrushMode::Erase,
             (false, true) => BrushMode::Fill,
@@ -164,14 +152,14 @@ impl BrushMode {
         }
     }
 
+    /// The mode with the eraser on or off, keeping the fill choice.
+    pub fn with_eraser(self, eraser: bool) -> BrushMode {
+        Self::from_flags(eraser, self.fills())
+    }
+
     /// The mode with fuzzy fill on or off, keeping the eraser choice.
     pub fn with_fill(self, fill: bool) -> BrushMode {
-        match (self.erases(), fill) {
-            (true, true) => BrushMode::FillErase,
-            (true, false) => BrushMode::Erase,
-            (false, true) => BrushMode::Fill,
-            (false, false) => BrushMode::Paint,
-        }
+        Self::from_flags(self.erases(), fill)
     }
 
     pub fn erases(self) -> bool {
@@ -294,7 +282,7 @@ enum Gesture {
     /// An ellipse from `start` (its centre, or a corner of its box); like a rectangle, it is
     /// finished by releasing a drag or by a second click.
     Ellipse { start: Point, current: Point, dragged: bool, circle: bool, from_centre: bool },
-    /// A fixed-size shape centred on `centre`, its angle following the pointer until a second
+    /// A constrained shape centred on `centre`, its angle following the pointer until a second
     /// click sets it.
     Placing { centre: Point, angle: f64 },
     /// A brush or eraser stroke, from `seed`; `limited` is whether "Stop at edges" is on.
@@ -340,7 +328,7 @@ pub enum Preview {
     Freehand { points: Vec<Point>, current: Point },
     /// The ellipse as it would be made now, inside the image.
     Ellipse(Ellipse),
-    /// A fixed-size shape being placed, at the angle it would take.
+    /// A constrained shape being placed, at the angle it would take.
     Placing { shape: Shape, angle: f64 },
 }
 
@@ -358,7 +346,7 @@ pub struct Session {
     label: Option<i64>,
     /// The brush's mode; choosing Brush resets it to painting, so it is never kept.
     brush: BrushMode,
-    /// The project's labels: their shape constraints decide which shapes have a fixed size, and
+    /// The project's labels: their shape constraints decide which shapes are constrained, and
     /// their attributes give new annotations their values.
     labels: Vec<Label>,
     /// The image's width and height in pixels.
@@ -437,7 +425,7 @@ impl Session {
         self.label
     }
 
-    /// Sets the label new shapes get; a fixed-size shape being placed no longer matches its size.
+    /// Sets the label new shapes get; a constrained shape being placed no longer matches its size.
     pub fn set_label(&mut self, label: Option<i64>) {
         if self.label != label {
             if matches!(self.gesture, Gesture::Placing { .. }) {
@@ -570,9 +558,12 @@ impl Session {
         self.selection.retain(|&index| annotations.get(index).is_some_and(|a| a.shown(threshold)));
     }
 
-    /// Ends the gesture in progress without changing anything.
+    /// Ends the gesture in progress without changing anything: a brush being sized with F gets
+    /// back the size it had, whether Esc, a tool switch or the pie cancelled it.
     pub fn cancel(&mut self) {
-        self.gesture = Gesture::Idle;
+        if let Gesture::BrushSizing { before, .. } = std::mem::replace(&mut self.gesture, Gesture::Idle) {
+            self.options.brush_size = before;
+        }
         self.stroke_change = None;
     }
 
@@ -596,7 +587,6 @@ impl Session {
             Action::Finish if self.is_sizing_brush() => return self.confirm_brush_sizing(),
             Action::Finish => return self.finish_path(),
             Action::RemoveLastPoint => return self.remove_last_point(),
-            Action::Cancel if self.is_sizing_brush() => self.restore_brush_size(),
             Action::Cancel if self.is_busy() => self.cancel(),
             Action::Cancel if !self.selection.is_empty() => self.selection.clear(),
             Action::Cancel if self.tool != Tool::Select => return self.switch_tool(Tool::Select),

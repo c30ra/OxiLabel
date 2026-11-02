@@ -338,11 +338,4 @@ impl Session {
         self.gesture = Gesture::Idle;
         true
     }
-
-    /// Esc while sizing the brush: restores the size it had.
-    pub(super) fn restore_brush_size(&mut self) {
-        if let Gesture::BrushSizing { before, .. } = mem::replace(&mut self.gesture, Gesture::Idle) {
-            self.options.brush_size = before;
-        }
-    }
 }
