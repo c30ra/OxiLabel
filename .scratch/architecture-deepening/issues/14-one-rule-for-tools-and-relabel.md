@@ -32,3 +32,11 @@ Tests:
 - `cargo test --workspace --exclude oxilabel-ui` passes; `scripts/ui-test.sh` passes all 70 browser flows, including the Q flick/tap, tool pie, label pie relabel, objects-list relabel and the new rail flow. One unrelated full-suite run timed out in the settings page's save check while other worktrees were building; it passed alone and in the last two full runs.
 
 Merged `architecture-deepening` (ticket 12's drawing-tools session) before finishing; conflicts were limited to the session's tool/method blocks and the annotation layer's imports and options effects.
+
+**Final review fixes (`16e80e5`, merged in `59e1236`):**
+
+- Tag from the tool pie now opens the label pie like keyboard T (held while Q or the right button is down) instead of making Tag the active tool; Tag never becomes active, so the current tool and its gesture stay.
+- While the brush is being sized with F, tool keys and Q are no longer swallowed: `Session::cancel` restores the size from before sizing, so a tool switch, Q and Esc all end sizing the same way (`restore_brush_size` is gone).
+- The core test that claimed four entry points is now `switching_to_brush_resets_its_modes_and_chooses_a_mask_label` (the shared rule only); the browser flow `key, tool pie, rail and Q tap choose Brush with the same mode and label` exercises the real entry points, and the F and T/Tag flows cover the two fixes.
+- Standards: shape-constraint vocabulary (`constrained_shape`, `constrained_preview`), one `TOOL_METADATA` table for `Tool`, `BrushMode::from_flags`, `Editor::mirror_tool_state`, `with_analysis_layer`, and one radio-group renderer in `tool_options.rs`.
+- `cargo test --workspace --exclude oxilabel-ui`: 425 passed. `scripts/ui-test.sh`: 69/70 passed; the settings save check timed out again under load and passed alone.
