@@ -10,6 +10,7 @@ use crate::{
     geometry::{Point, Rect},
 };
 
+mod brush;
 mod drawing;
 mod select;
 

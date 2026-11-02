@@ -2,16 +2,16 @@
 //! pixels in the label colour at image resolution, scaled by the view; sprites of stored masks are
 //! cached, and a brush stroke updates only the pixels it touched.
 //!
-//! The stroke's mask logic lives in `oxilabel_core::stroke`; this only draws it.
+//! The stroke's and the fill's decisions are the editor session's; this only draws what it keeps.
 
 use std::collections::BTreeMap;
 
 use leptos::prelude::*;
 use oxilabel_core::{
-    annotation::Annotation,
+    editor::Session,
     geometry::Point,
     mask::{Bitmap, Mask, PixelRect},
-    stroke::MaskStroke,
+    stroke::SegmentChange,
     view::View,
 };
 use wasm_bindgen::{Clamped, JsCast};
@@ -140,13 +140,14 @@ impl SpriteCache {
 pub struct FillPreview {
     pub region: Bitmap,
     pub factor: u32,
+    pub color: String,
     sprite: Option<Sprite>,
 }
 
 impl FillPreview {
     pub fn new(region: Bitmap, factor: u32, color: &str) -> FillPreview {
         let sprite = Sprite::new(&region, color);
-        FillPreview { region, factor, sprite }
+        FillPreview { region, factor, color: color.to_owned(), sprite }
     }
 
     pub fn draw(&self, context: &CanvasRenderingContext2d, view: View) {
@@ -157,9 +158,9 @@ impl FillPreview {
     }
 }
 
-/// A brush or eraser stroke in progress: the core stroke and the sprites showing it.
+/// A brush or eraser stroke in progress: the sprites showing the pixels the session's stroke has
+/// changed so far.
 pub struct Stroke {
-    pub core: MaskStroke,
     /// Brush: the painted pixels (with the masks they joined).
     sprite: Option<Sprite>,
     color: String,
@@ -168,23 +169,23 @@ pub struct Stroke {
 }
 
 impl Stroke {
-    /// A stroke at `at` in `color`; its first dab comes with `extend(at, …)`.
-    pub fn start(core: MaskStroke, color: String) -> Stroke {
-        Stroke { core, sprite: None, color, erased: BTreeMap::new() }
+    /// A stroke drawing in `color`.
+    pub fn new(color: String) -> Stroke {
+        Stroke { sprite: None, color, erased: BTreeMap::new() }
     }
 
-    /// Drags the brush to `to` and updates the sprites it changed.
-    pub fn extend(&mut self, to: Point, annotations: &[Annotation], colors: &dyn Fn(i64) -> String) {
-        let change = self.core.segment(to, annotations);
-        if let Some(region) = change.painted {
-            Sprite::refresh(&mut self.sprite, self.core.painted(), region, &self.color);
+    /// Updates the sprites for the pixels the session's stroke changed in its last segment;
+    /// `colors` gives the colour of the annotation at an index.
+    pub fn extend(&mut self, change: SegmentChange, session: &Session, colors: &dyn Fn(usize) -> String) {
+        if let (Some(region), Some(painted)) = (change.painted, session.stroke_painted()) {
+            Sprite::refresh(&mut self.sprite, painted, region, &self.color);
         }
         for (index, region) in change.erased {
-            let Some(bitmap) = self.core.erased(index) else { continue };
+            let Some(bitmap) = session.stroke_erased(index) else { continue };
             match self.erased.get_mut(&index) {
                 Some((sprite, color)) => Sprite::refresh(sprite, bitmap, region, color),
                 None => {
-                    let color = annotations.get(index).map(|a| colors(a.label)).unwrap_or_default();
+                    let color = colors(index);
                     self.erased.insert(index, (Sprite::new(bitmap, &color), color));
                 }
             }
@@ -193,21 +194,20 @@ impl Stroke {
 
     /// Draws annotation `index` as the stroke has changed it so far: as the eraser left it, or
     /// not at all if it joined the brush stroke. False if the stroke has not changed it.
-    pub fn draw_changed(&self, context: &CanvasRenderingContext2d, view: View, index: usize, selected: bool) -> bool {
+    pub fn draw_changed(&self, context: &CanvasRenderingContext2d, view: View, index: usize, selected: bool, session: &Session) -> bool {
         if let Some((sprite, _)) = self.erased.get(&index) {
-            if let (Some(sprite), Some(bitmap)) = (sprite, self.core.erased(index)) {
+            if let (Some(sprite), Some(bitmap)) = (sprite, session.stroke_erased(index)) {
                 sprite.draw(context, view, bitmap.area.left, bitmap.area.top, selected);
             }
             return true;
         }
-        self.core.is_merged(index)
+        session.stroke_is_merged(index)
     }
 
     /// Draws the brush stroke (with the masks it joined).
-    pub fn draw_painted(&self, context: &CanvasRenderingContext2d, view: View) {
-        if let Some(sprite) = &self.sprite {
-            let area = self.core.painted().area;
-            sprite.draw(context, view, area.left, area.top, false);
+    pub fn draw_painted(&self, context: &CanvasRenderingContext2d, view: View, session: &Session) {
+        if let (Some(sprite), Some(painted)) = (&self.sprite, session.stroke_painted()) {
+            sprite.draw(context, view, painted.area.left, painted.area.top, false);
         }
     }
 }

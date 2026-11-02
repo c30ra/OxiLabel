@@ -8,8 +8,8 @@
 //! run, a reload) cancels a gesture that holds annotation indices, so it can never change the
 //! wrong annotation. A gesture's own result is applied after it has ended.
 //!
-//! The Select tool's gestures are in `select`, the drawing tools' in `draw`, and which handles a
-//! shape has is in `grip`.
+//! The Select tool's gestures are in `select`, the drawing tools' in `draw`, the brush, its F
+//! sizing and the fuzzy fill in `brush`, and which handles a shape has is in `grip`.
 
 use std::collections::BTreeSet;
 
@@ -23,11 +23,16 @@ use crate::{
     keymap::Action,
     ellipse::Ellipse,
     oriented::OrientedRect,
+    stroke::{MaskStroke, SegmentChange},
 };
 
+mod brush;
 mod draw;
 pub mod grip;
 mod select;
+
+pub use brush::{FillRegion, FillSource, Layer, LimitSource};
+
 #[cfg(test)]
 mod tests;
 
@@ -48,6 +53,19 @@ pub const ROTATION_HANDLE_DISTANCE: f64 = 24.0;
 pub const DEFAULT_SPACING: f64 = 20.0;
 pub const MIN_SPACING: f64 = 1.0;
 pub const MAX_SPACING: f64 = 500.0;
+/// The brush's diameter in image pixels, and its limits.
+pub const DEFAULT_BRUSH_SIZE: f64 = 20.0;
+pub const MIN_BRUSH_SIZE: f64 = 1.0;
+pub const MAX_BRUSH_SIZE: f64 = 1000.0;
+/// `[` and `]` change the brush's size by this factor.
+pub const BRUSH_STEP: f64 = 1.25;
+/// The fuzzy fill's largest channel difference from the clicked pixel (GIMP's default), its
+/// limits, how much a drag (in screen pixels, right and down) raises it and what `[` and `]`
+/// change it by.
+pub const DEFAULT_THRESHOLD: f64 = 15.0;
+pub const MAX_THRESHOLD: f64 = 255.0;
+pub const THRESHOLD_PER_PIXEL: f64 = 0.5;
+pub const THRESHOLD_STEP: f64 = 5.0;
 
 /// The drawing tools, and the brush, tag and Select. `Select` handles shapes; `Brush` paints masks
 /// and `Tag` is never active (picking it toggles a label as an image tag).
@@ -143,6 +161,17 @@ pub struct Options {
     pub ellipse_from_centre: bool,
     /// Freehand polylines follow the image's edges (Shift inverts it).
     pub edge_snap: bool,
+    /// The brush's diameter in image pixels.
+    pub brush_size: f64,
+    /// The brush erases instead of painting (Ctrl inverts it).
+    pub eraser: bool,
+    /// The brush's fuzzy fill instead of painting.
+    pub fill: bool,
+    /// The fuzzy fill's largest channel difference from the seeded pixel (0–255); a drag after
+    /// the press changes it.
+    pub threshold: f64,
+    /// The brush paints only the region similar to where the stroke starts (Shift inverts it).
+    pub stop_at_edges: bool,
 }
 
 impl Default for Options {
@@ -157,6 +186,11 @@ impl Default for Options {
             single_point: false,
             ellipse_from_centre: true,
             edge_snap: false,
+            brush_size: DEFAULT_BRUSH_SIZE,
+            eraser: false,
+            fill: false,
+            threshold: DEFAULT_THRESHOLD,
+            stop_at_edges: false,
         }
     }
 }
@@ -176,7 +210,7 @@ enum BoxMode {
 }
 
 /// What the pointer is doing right now.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 enum Gesture {
     Idle,
     /// Dragging a selection box over empty space.
@@ -207,6 +241,15 @@ enum Gesture {
     /// A fixed-size shape centred on `centre`, its angle following the pointer until a second
     /// click sets it.
     Placing { centre: Point, angle: f64 },
+    /// A brush or eraser stroke, from `seed`; `limited` is whether "Stop at edges" is on.
+    Painting { stroke: MaskStroke, seed: Point, limited: bool },
+    /// F with the brush: the outline stays at `centre` (where the pointer was) and the size
+    /// changes by twice the pointer's horizontal move: right larger, left smaller. `before` is
+    /// restored on cancel.
+    BrushSizing { centre: Point, before: f64 },
+    /// A fuzzy fill from `seed`: dragging from `anchor` changes the threshold from `base`. Once
+    /// `released`, it is committed as soon as its region no longer reaches unloaded tiles.
+    Filling { seed: Point, anchor: Point, base: f64, erase: bool, released: bool, region: Option<FillRegion> },
 }
 
 impl Gesture {
@@ -220,6 +263,8 @@ impl Gesture {
                 | Gesture::Rotating { .. }
                 | Gesture::Radius { .. }
                 | Gesture::Turning { .. }
+                // The stroke keeps the indices of the masks it merges and erases.
+                | Gesture::Painting { .. }
         )
     }
 }
@@ -265,6 +310,8 @@ pub struct Session {
     options: Options,
     /// Increases with every change to the annotations.
     revision: u64,
+    /// The pixels the brush or eraser changed in its last press or move, for the layer's sprites.
+    stroke_change: Option<SegmentChange>,
     /// A short hint for the user from the last event, e.g. why a change was refused.
     notice: Option<String>,
 }
@@ -283,6 +330,7 @@ impl Session {
             threshold: 0.0,
             options: Options::default(),
             revision: 0,
+            stroke_change: None,
             notice: None,
         }
     }
@@ -308,7 +356,7 @@ impl Session {
 
     /// Whether a gesture is in progress.
     pub fn is_busy(&self) -> bool {
-        self.gesture != Gesture::Idle
+        !matches!(self.gesture, Gesture::Idle)
     }
 
     /// The hint left by the last events, if any, which it clears.
@@ -350,31 +398,33 @@ impl Session {
 
     /// A press of the main button.
     pub fn press(&mut self, pointer: Pointer) {
-        self.press_with_edges(pointer, None);
+        self.press_in(pointer, Layer::default());
     }
 
-    /// A press where `edges` supplies the path a freehand polyline follows along the image's
-    /// edges; without it the line follows the pointer.
-    pub fn press_with_edges(&mut self, pointer: Pointer, edges: Option<EdgePath<'_>>) {
+    /// A press of the main button, with what the annotation layer supplies for the gestures that
+    /// need the image's pixels: the path a freehand polyline follows along the edges, the region
+    /// a fuzzy fill grows on, the pixels a "Stop at edges" brush may paint.
+    pub fn press_in(&mut self, pointer: Pointer, layer: Layer<'_>) {
         match self.tool {
             Tool::Select => self.select_press(pointer),
-            // The brush, eraser and fuzzy fill are the annotation layer's until ticket 13.
-            Tool::Brush | Tool::Tag => {}
-            tool => self.draw_press(pointer, edges, tool),
+            Tool::Brush => self.brush_press(pointer, layer),
+            Tool::Tag => {}
+            tool => self.draw_press(pointer, layer.edges, tool),
         }
     }
 
     /// The pointer moved (with or without a button down).
     pub fn move_to(&mut self, pointer: Pointer) {
-        self.move_to_with_edges(pointer, None);
+        self.move_to_in(pointer, Layer::default());
     }
 
-    /// A move where `edges` supplies the path a freehand polyline follows along the image's edges.
-    pub fn move_to_with_edges(&mut self, pointer: Pointer, edges: Option<EdgePath<'_>>) {
+    /// A move, with what the annotation layer supplies (as for [`Session::press_in`]).
+    pub fn move_to_in(&mut self, pointer: Pointer, layer: Layer<'_>) {
         match self.tool {
             Tool::Select => self.select_move_to(pointer),
-            Tool::Brush | Tool::Tag => {}
-            _ => self.draw_move_to(pointer, edges),
+            Tool::Brush => self.brush_move_to(pointer, layer),
+            Tool::Tag => {}
+            _ => self.draw_move_to(pointer, layer.edges),
         }
     }
 
@@ -382,7 +432,8 @@ impl Session {
     pub fn release(&mut self, pointer: Pointer) {
         match self.tool {
             Tool::Select => self.select_release(pointer),
-            Tool::Brush | Tool::Tag => {}
+            Tool::Brush => self.brush_release(),
+            Tool::Tag => {}
             _ => self.draw_release(pointer),
         }
     }
@@ -402,6 +453,7 @@ impl Session {
     /// Ends the gesture in progress without changing anything.
     pub fn cancel(&mut self) {
         self.gesture = Gesture::Idle;
+        self.stroke_change = None;
     }
 
     /// Handles a key action; returns whether it did anything. Cancel (Esc) first ends the
@@ -417,8 +469,13 @@ impl Session {
                 self.selection = self.annotations.iter().enumerate().filter(|(_, a)| a.shown(threshold)).map(|(i, _)| i).collect();
             }
             Action::Delete => self.delete_selected(),
+            Action::Larger => return self.change_brush(true),
+            Action::Smaller => return self.change_brush(false),
+            Action::ResizeBrush => return self.confirm_brush_sizing(),
+            Action::Finish if self.is_sizing_brush() => return self.confirm_brush_sizing(),
             Action::Finish => return self.finish_path(),
             Action::RemoveLastPoint => return self.remove_last_point(),
+            Action::Cancel if self.is_sizing_brush() => self.restore_brush_size(),
             Action::Cancel if self.is_busy() => self.cancel(),
             Action::Cancel if !self.selection.is_empty() => self.selection.clear(),
             _ => return false,
@@ -433,6 +490,7 @@ impl Session {
     fn list_changed(&mut self) {
         if self.gesture.holds_indices() {
             self.gesture = Gesture::Idle;
+            self.stroke_change = None;
         }
         self.revision += 1;
     }

@@ -2,8 +2,9 @@
 //! history, selection and every gesture of the Select and drawing tools live in the editor
 //! session (`oxilabel_core::editor`); this layer is its adapter: browser events in, signals and
 //! canvas drawing out. It forwards presses, moves, releases, Enter, Backspace and Esc to the
-//! session, hands it the edge path a freehand polyline follows once the analysis tiles have one,
-//! and draws the session's preview. The brush, eraser and fuzzy fill are still the layer's.
+//! session, hands it the pixels its gestures need (the edge path a freehand polyline follows, the
+//! region a fuzzy fill grows on, the pixels a "Stop at edges" brush may paint) and draws the
+//! session's preview and stroke sprites.
 //!
 //! Select (V) is the default tool: click picks the topmost shape, drag moves the selection, the
 //! handles of a single selected shape edit it (rectangle handles resize; vertices drag; the round
@@ -17,12 +18,12 @@
 //! Ellipse (C) draws from its centre or across its box by a drag or two clicks; Shift makes a
 //! circle and Alt switches between centre and box, as for rectangles. Brush (B) paints
 //! masks and its eraser mode (E) erases them (see `masks`); Ctrl inverts a stroke, and `[` and
-//! `]` or F (then move the pointer right or left and click; Esc cancels) change the size. Its fuzzy fill mode
-//! (U) fills the similar region around a click (`fill`), a drag changing the threshold. Freehand
-//! polylines can snap to edges (live-wire, `edges`) and the brush can stop at edges (painting
-//! only the similar region around the stroke's start); Shift inverts either while drawing. Esc
-//! ends the layer's brush gesture, then the session cancels the shape being drawn, then clears
-//! the selection, and then the layer returns to Select. Ctrl+Z and Ctrl+Y undo and redo. Ctrl+C
+//! `]` or F (then move the pointer right or left and click; Esc restores the size) change the
+//! size. Its fuzzy fill mode (U) fills the similar region around a click (`fill`), a drag
+//! changing the threshold. Freehand polylines can snap to edges (live-wire, `edges`) and the
+//! brush can stop at edges (painting only the similar region around the stroke's start); Shift
+//! inverts either while drawing. Esc ends the session's gesture (a shape being drawn, a stroke,
+//! a fill or the selection), and then the layer returns to Select. Ctrl+Z and Ctrl+Y undo and redo. Ctrl+C
 //! copies the selection and Ctrl+X cuts it; Ctrl+V pastes the copies on any image of the project
 //! at the same place, selected (see `oxilabel_core::clipboard`).
 //!
@@ -45,7 +46,7 @@ use oxilabel_core::{
     attribute::Attributes,
     clipboard,
     edges::EdgeMap,
-    editor::{Modifiers, Options, Pointer, Preview, Session, grip::GripKind},
+    editor::{FillRegion, Layer, Modifiers, Options, Pointer, Preview, Session, grip::GripKind},
     fill::{FillSettings, grow},
     geometry::{Point, Rect},
     mask::{Bitmap, PixelRect},
@@ -54,7 +55,6 @@ use oxilabel_core::{
     keymap::Action,
     pie::{Compass, is_tap},
     settings::LabelStyle,
-    stroke::{MaskStroke, StrokeOutcome},
     view::View,
 };
 
@@ -68,24 +68,13 @@ use crate::{
     viewer::{context_2d, typing_in_a_field},
 };
 
-/// Brush diameter in image pixels, and its limits.
-pub const DEFAULT_BRUSH_SIZE: f64 = 20.0;
-pub const MIN_BRUSH_SIZE: f64 = 1.0;
-pub const MAX_BRUSH_SIZE: f64 = 1000.0;
-/// Fuzzy fill defaults: the largest channel difference from the clicked pixel (GIMP's default),
-/// how much a drag (in screen pixels, right and down) raises it, and the largest region as a
-/// share of the image.
-pub const DEFAULT_THRESHOLD: f64 = 15.0;
-const THRESHOLD_PER_PIXEL: f64 = 0.5;
-/// `[` and `]` change the threshold by this much.
-const THRESHOLD_STEP: f64 = 5.0;
-pub const MAX_THRESHOLD: f64 = 255.0;
+/// The fuzzy fill's largest region, as a share of the image.
 pub const DEFAULT_MAX_FILL_PERCENT: f64 = 25.0;
 /// Edge snapping looks this far around the pointer, in screen pixels, by default.
 pub const DEFAULT_SNAP_RADIUS: f64 = 12.0;
 /// The largest "Stop at edges" offset either way, in image pixels.
 pub const MAX_EDGE_OFFSET: f64 = 200.0;
-/// `[` and `]` change the spacing and the brush size by this factor.
+/// `[` and `]` change the freehand spacing by this factor.
 const SIZE_STEP: f64 = 1.25;
 
 thread_local! {
@@ -94,7 +83,9 @@ thread_local! {
     static CLIPBOARD: RefCell<Option<(i64, Vec<Annotation>)>> = const { RefCell::new(None) };
 }
 
-pub use oxilabel_core::editor::{DEFAULT_SPACING, MAX_SPACING, MIN_SPACING, Tool};
+pub use oxilabel_core::editor::{
+    DEFAULT_BRUSH_SIZE, DEFAULT_SPACING, DEFAULT_THRESHOLD, MAX_BRUSH_SIZE, MAX_SPACING, MAX_THRESHOLD, MIN_BRUSH_SIZE, MIN_SPACING, Tool,
+};
 
 /// The tools a key selects directly (Tag opens its label pie instead).
 const KEY_TOOLS: [Tool; 7] = [Tool::Select, Tool::Rectangle, Tool::Polygon, Tool::Polyline, Tool::Points, Tool::Ellipse, Tool::Brush];
@@ -353,9 +344,11 @@ impl Editor {
         self.session.with_value(read)
     }
 
-    /// Changes the session, then notifies whatever changed and shows its notice.
+    /// Changes the session, then notifies whatever changed and shows its notice. The brush's size
+    /// and the fill's threshold are kept in the session while a gesture changes them; a change
+    /// the session made is mirrored into their signals, which persist the tools.
     pub fn update<T>(&self, change: impl FnOnce(&mut Session) -> T) -> T {
-        let (revision, selection, threshold) = self.peek(|s| (s.revision(), s.selection().clone(), s.threshold()));
+        let (revision, selection, threshold, brush) = self.peek(|s| (s.revision(), s.selection().clone(), s.threshold(), (s.brush_size(), s.fill_threshold())));
         let mut notice = None;
         let result = self
             .session
@@ -367,6 +360,13 @@ impl Editor {
             .expect("the editor's session lives as long as the editor");
         let (changed_list, changed_selection, changed_threshold) =
             self.peek(|s| (s.revision() != revision, *s.selection() != selection, s.threshold() != threshold));
+        let (brush_size, threshold) = self.peek(|s| (s.brush_size(), s.fill_threshold()));
+        if brush_size != brush.0 && self.tools.brush_size.get_untracked() != brush_size {
+            self.tools.brush_size.set(brush_size);
+        }
+        if threshold != brush.1 && self.tools.threshold.get_untracked() != threshold {
+            self.tools.threshold.set(threshold);
+        }
         if changed_list {
             self.annotations_changed.notify();
         }
@@ -427,21 +427,6 @@ impl Editor {
     }
 }
 
-/// What the brush is doing right now (the Select and drawing tools' gestures are the session's).
-#[derive(Debug, Clone, PartialEq)]
-enum Gesture {
-    Idle,
-    /// A brush or eraser stroke; its pixels are in the `Stroke` kept beside the gesture.
-    Painting,
-    /// F with the brush: the outline stays at `centre` (where the pointer was) and the size
-    /// changes by twice the pointer's horizontal move: right larger, left smaller. `before` is
-    /// restored on cancel.
-    BrushSizing { centre: Point, before: f64 },
-    /// A fuzzy fill from `seed`, on the tiles of the viewed level; dragging from `anchor` changes
-    /// the threshold from `base`. Once `released`, it is committed as soon as growing is complete.
-    Filling { seed: Point, anchor: Point, base: f64, erase: bool, released: bool },
-}
-
 #[component]
 pub fn AnnotationLayer(
     editor: Editor,
@@ -458,7 +443,6 @@ pub fn AnnotationLayer(
     let keymap = prefs.keymap;
     // A key's label in the user's keymap, for the pies.
     let key_of = move |action: Action| Some(keymap.with_untracked(|keys| keys.label(action))).filter(|label| !label.is_empty());
-    let gesture = RwSignal::new(Gesture::Idle);
     let cursor = RwSignal::new("default");
     let colors: StoredValue<HashMap<i64, String>> =
         StoredValue::new(labels.iter().map(|label| (label.id, label.color.clone())).collect());
@@ -507,73 +491,77 @@ pub fn AnnotationLayer(
         modifiers: Modifiers { shift: ev.shift_key(), ctrl: ev.ctrl_key() || ev.meta_key(), alt: ev.alt_key() },
     };
 
-    // `[` and `]`: the brush size in steps of 25%, but at least one pixel.
-    let resize_brush = move |larger: bool| {
-        editor.tools.brush_size.update(|size| {
-            let next = if larger { (*size * SIZE_STEP).max(*size + 1.0) } else { (*size / SIZE_STEP).min(*size - 1.0) };
-            *size = next.round().clamp(MIN_BRUSH_SIZE, MAX_BRUSH_SIZE);
-        });
-    };
-    let change_threshold = move |higher: bool| {
-        let step = if higher { THRESHOLD_STEP } else { -THRESHOLD_STEP };
-        editor.tools.threshold.update(|threshold| *threshold = (*threshold + step).clamp(0.0, MAX_THRESHOLD));
-    };
-    // The brush or eraser stroke in progress, sprites of the stored masks, and where the brush
+    // The brush or eraser stroke's sprites, the stored masks' sprites, and where the brush
     // outline is drawn.
     let stroke = StoredValue::new_local(None::<Stroke>);
     let sprites = StoredValue::new_local(SpriteCache::default());
     let hover = RwSignal::new(None::<Point>);
     // The fuzzy fill's region before it is committed.
     let fill_preview = StoredValue::new_local(None::<FillPreview>);
-    // Drops whatever is being drawn, a stroke included, and the session's gesture.
+    // Drops what the session is drawing and the sprites showing it.
     let cancel_gesture = move || {
         stroke.set_value(None);
         fill_preview.set_value(None);
-        gesture.set(Gesture::Idle);
         if editor.peek(Session::is_busy) {
             editor.update(Session::cancel);
         }
     };
-    // Applies a finished stroke and drops the annotations it removed from the selection.
-    let commit_stroke = move |outcome: StrokeOutcome| {
-        editor.update(|session| {
-            let selection = outcome.selection_after(session.selection());
-            session.set_selection(selection);
-            session.apply(with_defaults(outcome.edit, &defaults));
+    // Updates the stroke's sprites for the pixels the session's stroke changed, making them when
+    // the stroke starts and dropping them when it ends.
+    let sync_stroke = move || {
+        if !editor.peek(Session::is_brushing) {
+            stroke.set_value(None);
+            return;
+        }
+        let Some(change) = editor.update(Session::take_stroke_change) else { return };
+        if stroke.with_value(Option::is_none) {
+            let color = editor.label.get_untracked().map(color_of).unwrap_or_default();
+            stroke.set_value(Some(Stroke::new(color)));
+        }
+        editor.peek(|session| {
+            stroke.update_value(|slot| {
+                if let Some(stroke) = slot.as_mut() {
+                    let color = |index: usize| session.annotations().get(index).map(|a| color_of(a.label)).unwrap_or_default();
+                    stroke.extend(change, session, &color);
+                }
+            });
         });
     };
-    let finish_stroke = move || {
-        gesture.set(Gesture::Idle);
-        let mut done = None;
-        stroke.update_value(|current| done = current.take());
-        let Some(outcome) = done.and_then(|done| editor.peek(|session| done.core.finish(session.annotations()))) else { return };
-        commit_stroke(outcome);
+    // Shows the session's fill region as the preview sprite, rebuilding it only when it changed.
+    let sync_fill = move || {
+        editor.peek(|session| {
+            let built = session.fill_preview().map(|region| (region, session.fill_erases()));
+            fill_preview.update_value(|slot| match built {
+                None => *slot = None,
+                Some((region, erase)) => {
+                    let color = if erase { "#ffffff".to_owned() } else { editor.label.get_untracked().map(color_of).unwrap_or_default() };
+                    let same = slot.as_ref().is_some_and(|preview| preview.factor == region.factor && preview.color == color && preview.region == region.region);
+                    if !same {
+                        *slot = Some(FillPreview::new(region.region.clone(), region.factor, &color));
+                    }
+                }
+            });
+        });
     };
 
-    // ---- Fuzzy fill: grow on the analysis tiles loaded so far, ask for those the region reached,
-    // and grow again as they arrive.
+    // ---- Fuzzy fill and edge snapping: the analysed pixels the session's gestures read, grown on
+    // the tiles loaded so far, asking for those a region reached and growing again as they arrive.
     let analysis = Analysis::new(image_id);
     let pyramid = Pyramid::new(image_size.0, image_size.1);
-    // Whether the last growth reached unloaded tiles, or stopped at the maximum size.
-    let fill_incomplete = StoredValue::new(false);
-    let fill_capped = StoredValue::new(false);
-    // Bumped when the preview changes, to redraw it.
-    let fill_drawn = RwSignal::new(0_u32);
-    // The fill's threshold and maximum size (in pixels of a level whose pixels cover `factor` ×
-    // `factor` image pixels).
-    let fill_settings = move |within: Option<PixelRect>, factor: u32| {
+    // The pixels of a fill at `threshold` (in pixels of a level whose pixels cover `factor` ×
+    // `factor` image pixels), with its maximum size.
+    let fill_settings = move |within: Option<PixelRect>, factor: u32, threshold: f64| {
         let image_area = f64::from(image_size.0) * f64::from(image_size.1);
         let level_area = f64::from(factor) * f64::from(factor);
         FillSettings {
-            threshold: editor.tools.threshold.get_untracked().clamp(0.0, MAX_THRESHOLD) as u8,
+            threshold: threshold.clamp(0.0, MAX_THRESHOLD) as u8,
             within,
             max_pixels: (editor.tools.max_fill.get_untracked() / 100.0 * image_area / level_area).max(1.0) as u64,
         }
     };
-    let regrow = move || {
-        let Gesture::Filling { seed, erase, .. } = gesture.get_untracked() else { return };
-        let Some(current) = view.get_untracked() else { return };
-        // The level being viewed now: a zoom during a fill applies from then on (ADR 0002).
+    // The fuzzy fill's region around `seed` at `threshold`, on the tiles of the level being viewed
+    // (a zoom during a fill applies from then on, ADR 0002).
+    let fill_region = move |seed: Point, threshold: f64, current: View| -> FillRegion {
         let level = pyramid.level_for_scale(current.scale);
         let factor = 1u32 << level;
         let level_area = f64::from(factor) * f64::from(factor);
@@ -588,16 +576,10 @@ pub fn AnnotationLayer(
             let (left, top) = (level_pixel(min.x), level_pixel(min.y));
             PixelRect { left, top, width: level_pixel(max.x).saturating_sub(left) + 1, height: level_pixel(max.y).saturating_sub(top) + 1 }
         });
-        let settings = fill_settings(within, factor);
+        let settings = fill_settings(within, factor, threshold);
         let source = editor.analysed(editor.tools.fill_filtered);
         let growth = analysis.with_level(&source, level, |tiles| grow(pyramid, level, tiles, seed, settings));
         analysis.request(&source, level, &growth.missing);
-        fill_incomplete.set_value(!growth.missing.is_empty());
-        if growth.capped && !fill_capped.get_value() {
-            let max = editor.tools.max_fill.get_untracked();
-            editor.notice.set(Some(format!("The fill grows past {max:.0}% of the image and will not be added.")));
-        }
-        fill_capped.set_value(growth.capped);
         let min_area = (editor.tools.clean_up.get_untracked() / level_area).round() as usize;
         let region = growth.region.cropped();
         // Clean-up drops small patches, but never the whole fill.
@@ -605,43 +587,8 @@ pub fn AnnotationLayer(
             cleaned if cleaned.bounds().is_some() => cleaned,
             _ => region,
         };
-        let color = if erase { "#ffffff".to_owned() } else { editor.label.get_untracked().map(color_of).unwrap_or_default() };
-        fill_preview.set_value(Some(FillPreview::new(region, factor, &color)));
-        fill_drawn.update(|n| *n = n.wrapping_add(1));
+        FillRegion { region, factor, incomplete: !growth.missing.is_empty(), capped: growth.capped }
     };
-    // Adds the previewed region to the masks (or erases it from them): one undo step.
-    let commit_fill = move || {
-        let Gesture::Filling { erase, .. } = gesture.get_untracked() else { return };
-        gesture.set(Gesture::Idle);
-        let mut preview = None;
-        fill_preview.update_value(|current| preview = current.take());
-        let Some(preview) = preview else { return };
-        // A runaway fill is not added: it would be a cut-off part of a much larger region.
-        if fill_capped.get_value() {
-            let max = editor.tools.max_fill.get_untracked();
-            editor.notice.set(Some(format!("Not added: the fill grew past {max:.0}% of the image. Lower the threshold or raise Max.")));
-            return;
-        }
-        let region = preview.region.scaled_up(preview.factor, image_size);
-        let label = editor.label.get_untracked().unwrap_or_default();
-        let outcome = editor.peek(|session| {
-            let list = session.annotations();
-            MaskStroke::from_region(erase, label, region, image_size, list).finish(list)
-        });
-        if let Some(outcome) = outcome {
-            commit_stroke(outcome);
-        }
-    };
-    Effect::new(move |_| {
-        analysis.loaded.track();
-        if !matches!(gesture.get_untracked(), Gesture::Filling { .. }) {
-            return;
-        }
-        regrow();
-        if matches!(gesture.get_untracked(), Gesture::Filling { released: true, .. }) && !fill_incomplete.get_value() {
-            commit_fill();
-        }
-    });
     // ---- Edge snapping and the edge-limited brush, on the analysis tiles of the viewed level.
     let level_of = move |current: View| {
         let level = pyramid.level_for_scale(current.scale);
@@ -682,12 +629,14 @@ pub fn AnnotationLayer(
     };
     // "Stop at edges": the pixels similar to `seed` (the fill's threshold, on the tiles loaded so
     // far), grown or shrunk by the offset, in image pixels.
-    let edge_limit = move |seed: Point, level: u32| -> Bitmap {
+    let edge_limit = move |seed: Point, current: View| -> Bitmap {
+        let (level, _) = level_of(current);
         let factor = 1u32 << level;
         let (width, height) = pyramid.level_size(level);
         let seed = ((seed.x as u32 / factor).min(width - 1), (seed.y as u32 / factor).min(height - 1));
         let source = editor.analysed(editor.tools.edges_filtered);
-        let growth = analysis.with_level(&source, level, |tiles| grow(pyramid, level, tiles, seed, fill_settings(None, factor)));
+        let threshold = editor.tools.threshold.get_untracked();
+        let growth = analysis.with_level(&source, level, |tiles| grow(pyramid, level, tiles, seed, fill_settings(None, factor, threshold)));
         analysis.request(&source, level, &growth.missing);
         let region = growth.region.cropped().scaled_up(factor, image_size);
         // The offset is in image pixels, so it applies at full resolution.
@@ -696,35 +645,21 @@ pub fn AnnotationLayer(
             offset => region.expanded(offset, image_size),
         }
     };
-    // Where the stroke started and the level its limit was grown on: it is grown again when the
-    // view's level changes or tiles arrive.
-    let limit_seed = StoredValue::new(None::<Point>);
-    let limit_level = StoredValue::new(None::<u32>);
-    let shift_held = StoredValue::new(false);
-    // Applies "Stop at edges" (inverted by Shift) to the stroke, growing its limit if needed.
-    let update_limit = move |shift: bool, current: View, refresh: bool| {
-        let Some(seed) = limit_seed.get_value() else { return };
-        shift_held.set_value(shift);
-        let limited = editor.tools.stop_at_edges.get_untracked() != shift;
-        let (level, _) = level_of(current);
-        let limit = (limited && (refresh || limit_level.get_value() != Some(level))).then(|| {
-            limit_level.set_value(Some(level));
-            edge_limit(seed, level)
-        });
-        stroke.update_value(|s| {
-            if let Some(s) = s {
-                if let Some(limit) = limit {
-                    s.core.set_limit(limit);
-                }
-                s.core.limit(limited);
-            }
-        });
-    };
+    // The analysed pixels the session's gestures still need, grown again as they arrive or the
+    // view changes: a fill's region (committed once it is complete and released) and the "Stop at
+    // edges" limit of a stroke.
     Effect::new(move |_| {
         analysis.loaded.track();
-        if let (Gesture::Painting, Some(current)) = (gesture.get_untracked(), view.get_untracked()) {
-            update_limit(shift_held.get_value(), current, true);
+        let Some(current) = view.get() else { return };
+        if !editor.peek(Session::is_brushing) {
+            return;
         }
+        let fill = |seed, threshold| fill_region(seed, threshold, current);
+        let limit = |seed| edge_limit(seed, current);
+        let layer = Layer { fill: Some(&fill), limit: Some(&limit), ..Layer::default() };
+        editor.update(|session| session.pixels_ready(layer));
+        sync_stroke();
+        sync_fill();
     });
     // Brush and freehand lines load the view's analysis tiles ahead of the first stroke.
     Effect::new(move |_| {
@@ -747,7 +682,7 @@ pub fn AnnotationLayer(
         if analysis.failed.get() {
             editor.notice.set(Some("Could not load the image's pixels for the fill.".into()));
             fill_preview.set_value(None);
-            gesture.set(Gesture::Idle);
+            editor.update(Session::cancel);
             *analysis.failed.write_untracked() = false;
         }
     });
@@ -1029,7 +964,6 @@ pub fn AnnotationLayer(
             }
             PieAction::SetOriented(on) => {
                 close_pie();
-                gesture.set(Gesture::Idle);
                 editor.tools.oriented.set(on);
             }
             PieAction::ToggleSnap => {
@@ -1066,11 +1000,11 @@ pub fn AnnotationLayer(
             }
             PieAction::Threshold(higher) => {
                 close_pie();
-                change_threshold(higher);
+                editor.update(|session| session.key(if higher { Action::Larger } else { Action::Smaller }));
             }
             PieAction::BrushSize(larger) => {
                 close_pie();
-                resize_brush(larger);
+                editor.update(|session| session.key(if larger { Action::Larger } else { Action::Smaller }));
             }
             PieAction::FinishShape => {
                 close_pie();
@@ -1187,48 +1121,14 @@ pub fn AnnotationLayer(
         key_ups.remove();
     });
 
-    // ---- Pointer handling on the canvas.
-    // The brush and fuzzy fill only; every other tool's press is the session's.
-    let draw_press = move |ev: &ev::PointerEvent, point: Point, current: View| {
-        // Ctrl inverts a brush stroke: the brush erases, the eraser paints.
-        let erasing = editor.tools.eraser.get_untracked() != (ev.ctrl_key() || ev.meta_key());
-        if editor.label.get_untracked().is_none() && !erasing {
-            editor.notice.set(Some("Add a label that allows brush shapes on the Labels tab first.".into()));
-            return;
-        }
-        let point = inside(point);
-        if !erasing && !label_allows(editor.label.get_untracked().unwrap_or_default(), ShapeType::Mask) {
-            let label = label_name(editor.label.get_untracked().unwrap_or_default());
-            editor.notice.set(Some(format!("“{label}” cannot be used for masks.")));
-        } else if editor.tools.fill.get_untracked() {
-            let anchor = Point::new(f64::from(ev.client_x()), f64::from(ev.client_y()));
-            let base = editor.tools.threshold.get_untracked();
-            gesture.set(Gesture::Filling { seed: point, anchor, base, erase: erasing, released: false });
-            regrow();
-        } else {
-            let label = editor.label.get_untracked().unwrap_or_default();
-            let size = editor.tools.brush_size.get_untracked();
-            let core = MaskStroke::begin(erasing, label, size, image_size, point);
-            stroke.set_value(Some(Stroke::start(core, color_of(label))));
-            limit_seed.set_value(Some(point));
-            limit_level.set_value(None);
-            update_limit(ev.shift_key(), current, false);
-            stroke.update_value(|s| {
-                if let Some(s) = s {
-                    editor.peek(|session| s.extend(point, session.annotations(), &color_of));
-                }
-            });
-            gesture.set(Gesture::Painting);
-        }
-    };
+    // ---- Pointer handling on the canvas. Every gesture is the session's; the layer supplies the
+    // pixels its gestures read and keeps the sprites showing them.
     let on_pointer_down = move |ev: ev::PointerEvent| {
-        // While sizing the brush, a click confirms the size and the right button cancels.
-        if let Gesture::BrushSizing { before, .. } = gesture.get_untracked() {
+        // A click while sizing the brush keeps the size; the right button restores it.
+        if editor.peek(Session::is_sizing_brush) {
             ev.prevent_default();
-            if ev.button() == 2 {
-                editor.tools.brush_size.set(before);
-            }
-            gesture.set(Gesture::Idle);
+            let action = if ev.button() == 2 { Action::Cancel } else { Action::Finish };
+            editor.update(|session| session.key(action));
             return;
         }
         // The right button opens the pie, like holding Q.
@@ -1247,13 +1147,13 @@ pub fn AnnotationLayer(
         if let Some(canvas) = canvas_ref.get_untracked() {
             canvas.set_pointer_capture(ev.pointer_id()).ok();
         }
-        match editor.tool.get_untracked() {
-            Tool::Brush => draw_press(&ev, point, current),
-            _ => {
-                let edges = |from, to| edge_path(from, to, current);
-                editor.update(|session| session.press_with_edges(pointer_at(&ev, point, current), Some(&edges)));
-            }
-        }
+        let edges = |from, to| edge_path(from, to, current);
+        let fill = |seed, threshold| fill_region(seed, threshold, current);
+        let limit = |seed| edge_limit(seed, current);
+        let layer = Layer { edges: Some(&edges), fill: Some(&fill), limit: Some(&limit) };
+        editor.update(|session| session.press_in(pointer_at(&ev, point, current), layer));
+        sync_stroke();
+        sync_fill();
     };
 
     let on_pointer_move = move |ev: ev::PointerEvent| {
@@ -1261,33 +1161,8 @@ pub fn AnnotationLayer(
         if editor.tool.get_untracked() == Tool::Brush || fixed_shape().is_some() {
             hover.set(Some(inside(point)));
         }
-        match gesture.get_untracked() {
-            Gesture::BrushSizing { centre, before } => {
-                let size = before + 2.0 * (point.x - centre.x);
-                editor.tools.brush_size.set(size.round().clamp(MIN_BRUSH_SIZE, MAX_BRUSH_SIZE));
-            }
-            Gesture::Filling { anchor, base, released: false, .. } => {
-                let moved = (f64::from(ev.client_x()) - anchor.x) + (f64::from(ev.client_y()) - anchor.y);
-                editor.tools.threshold.set((base + moved * THRESHOLD_PER_PIXEL).round().clamp(0.0, MAX_THRESHOLD));
-                regrow();
-            }
-            // Released and waiting for tiles: the pointer no longer changes it.
-            Gesture::Filling { released: true, .. } => {}
-            Gesture::Painting => {
-                let to = inside(point);
-                update_limit(ev.shift_key(), current, false);
-                stroke.update_value(|current| {
-                    if let Some(current) = current {
-                        editor.peek(|session| current.extend(to, session.annotations(), &color_of));
-                    }
-                });
-                gesture.set(Gesture::Painting);
-            }
-            Gesture::Idle if editor.peek(Session::is_busy) => {
-                let edges = |from, to| edge_path(from, to, current);
-                editor.update(|session| session.move_to_with_edges(pointer_at(&ev, point, current), Some(&edges)));
-            }
-            Gesture::Idle => cursor.set(match editor.tool.get_untracked() {
+        if !editor.peek(Session::is_busy) {
+            cursor.set(match editor.tool.get_untracked() {
                 Tool::Select => match editor.peek(|session| session.grip_at(point, current.scale)).map(|grip| grip.kind) {
                     Some(GripKind::Resize(handle)) => handle.cursor(),
                     Some(GripKind::Turn { .. }) => "grab",
@@ -1297,25 +1172,26 @@ pub fn AnnotationLayer(
                     None => "default",
                 },
                 _ => "default",
-            }),
+            });
+            return;
         }
+        let edges = |from, to| edge_path(from, to, current);
+        let fill = |seed, threshold| fill_region(seed, threshold, current);
+        let limit = |seed| edge_limit(seed, current);
+        let layer = Layer { edges: Some(&edges), fill: Some(&fill), limit: Some(&limit) };
+        editor.update(|session| session.move_to_in(pointer_at(&ev, point, current), layer));
+        sync_stroke();
+        sync_fill();
     };
 
     let on_pointer_up = move |ev: ev::PointerEvent| {
-        let Some((_, point, current)) = locate(&ev) else { return };
-        match gesture.get_untracked() {
-            Gesture::Painting => finish_stroke(),
-            // Committed now, or once the tiles it still needs have arrived.
-            Gesture::Filling { seed, anchor, base, erase, released: false } => {
-                gesture.set(Gesture::Filling { seed, anchor, base, erase, released: true });
-                if !fill_incomplete.get_value() {
-                    commit_fill();
-                }
-            }
-            // Drawing and Select gestures are the session's.
-            _ if editor.peek(Session::is_busy) => editor.update(|session| session.release(pointer_at(&ev, point, current))),
-            _ => {}
+        if !editor.peek(Session::is_busy) {
+            return;
         }
+        let Some((_, point, current)) = locate(&ev) else { return };
+        editor.update(|session| session.release(pointer_at(&ev, point, current)));
+        sync_stroke();
+        sync_fill();
     };
 
     let keys = window_event_listener(ev::keydown, move |ev| {
@@ -1339,12 +1215,11 @@ pub fn AnnotationLayer(
             ev.prevent_default();
             return;
         }
-        if let Gesture::BrushSizing { before, .. } = gesture.get_untracked() {
-            if is(Action::ResizeBrush) || is(Action::Finish) {
-                gesture.set(Gesture::Idle);
-            } else if is(Action::Cancel) {
-                editor.tools.brush_size.set(before);
-                gesture.set(Gesture::Idle);
+        // The brush's F gesture owns F, Enter and Esc while it runs.
+        if editor.peek(Session::is_sizing_brush) {
+            let action = [Action::ResizeBrush, Action::Finish, Action::Cancel].into_iter().find(|&action| is(action));
+            if let Some(action) = action {
+                editor.update(|session| session.key(action));
             }
             ev.prevent_default();
             return;
@@ -1358,8 +1233,6 @@ pub fn AnnotationLayer(
             ev.prevent_default();
             return;
         }
-        // A stroke keeps the indices of the masks it changes: no undo or redo under it.
-        let painting = gesture.get_untracked() == Gesture::Painting;
         let tool = editor.tool.get_untracked();
         let (smaller, larger) = (is(Action::Smaller), is(Action::Larger));
         let brush_tool = |tool: Tool| {
@@ -1370,21 +1243,18 @@ pub fn AnnotationLayer(
                 false
             }
         };
-        if (is(Action::Undo) || is(Action::Redo)) && painting {
-        } else if let Some(action) = [Action::Redo, Action::Undo, Action::SelectNone, Action::SelectAll].into_iter().find(|&action| is(action)) {
+        if let Some(action) = [Action::Redo, Action::Undo, Action::SelectNone, Action::SelectAll].into_iter().find(|&action| is(action)) {
             editor.update(|session| session.key(action));
         } else if is(Action::Finish) {
             if !editor.update(|session| session.key(Action::Finish)) {
                 return;
             }
-        } else if (smaller || larger) && tool == Tool::Brush && editor.tools.fill.get_untracked() {
-            change_threshold(larger);
         } else if (smaller || larger) && tool == Tool::Brush {
-            resize_brush(larger);
-        } else if is(Action::ResizeBrush) && tool == Tool::Brush && !editor.tools.fill.get_untracked() && gesture.get_untracked() == Gesture::Idle {
+            editor.update(|session| session.key(if larger { Action::Larger } else { Action::Smaller }));
+        } else if is(Action::ResizeBrush) && tool == Tool::Brush && !editor.tools.fill.get_untracked() && !editor.peek(Session::is_busy) {
             // Resize the outline where it is, by moving the pointer right or left.
             let Some(centre) = hover.get_untracked() else { return };
-            gesture.set(Gesture::BrushSizing { centre, before: editor.tools.brush_size.get_untracked() });
+            editor.update(|session| session.begin_brush_sizing(centre));
         } else if (smaller || larger) && tool == Tool::Polyline {
             let factor = if larger { SIZE_STEP } else { 1.0 / SIZE_STEP };
             editor.tools.spacing.update(|spacing| *spacing = (*spacing * factor).clamp(MIN_SPACING, MAX_SPACING));
@@ -1394,11 +1264,9 @@ pub fn AnnotationLayer(
                 return;
             }
         } else if is(Action::Cancel) {
-            // Esc first drops the brush gesture, then the session ends its drawing gesture, then
-            // clears the selection; otherwise it returns to Select.
-            if gesture.get_untracked() != Gesture::Idle {
-                cancel_gesture();
-            } else if !editor.update(|session| session.key(Action::Cancel)) {
+            // Esc ends the gesture in progress (a shape, a stroke, a fill or the brush's size),
+            // then clears the selection; otherwise it returns to Select.
+            if !editor.update(|session| session.key(Action::Cancel)) {
                 editor.tool.set(Tool::Select);
             }
         } else if is(Action::Delete) {
@@ -1497,7 +1365,13 @@ pub fn AnnotationLayer(
         context.set_transform(ratio, 0.0, 0.0, ratio, 0.0, 0.0).ok();
         context.clear_rect(0.0, 0.0, css_width, css_height);
 
-        let gesture = gesture.get_untracked();
+        // The session may have ended a stroke or a fill itself (Esc, an undo).
+        if stroke.with_value(Option::is_some) && editor.peek(|session| !session.is_brushing()) {
+            stroke.set_value(None);
+        }
+        if fill_preview.with_value(Option::is_some) && editor.peek(|session| session.fill_preview().is_none()) {
+            fill_preview.set_value(None);
+        }
         editor.peek(|session| {
             let (list, selection, threshold) = (session.annotations(), session.selection(), session.threshold());
             let visible = |annotation: &Annotation| !annotation.shape.is_tag() && annotation.shown(threshold);
@@ -1531,7 +1405,7 @@ pub fn AnnotationLayer(
                 let color = color_of(annotation.label);
                 if let Shape::Mask(mask) = &*shape {
                     // Masks the stroke changes are drawn by the stroke.
-                    let shown = stroke.with_value(|s| s.as_ref().is_some_and(|s| s.draw_changed(&context, current, index, selected)));
+                    let shown = stroke.with_value(|s| s.as_ref().is_some_and(|s| s.draw_changed(&context, current, index, selected, session)));
                     if !shown {
                         sprites.update_value(|cache| cache.draw(&context, current, mask, &color, selected));
                     }
@@ -1561,15 +1435,15 @@ pub fn AnnotationLayer(
             }
         });
         sprites.update_value(SpriteCache::sweep);
-        stroke.with_value(|s| s.as_ref().map(|s| s.draw_painted(&context, current)));
+        editor.peek(|session| stroke.with_value(|s| s.as_ref().map(|s| s.draw_painted(&context, current, session))));
         fill_preview.with_value(|preview| preview.as_ref().map(|preview| preview.draw(&context, current)));
-        let brush_radius = editor.tools.brush_size.get_untracked() / 2.0;
-        if let Gesture::BrushSizing { centre, .. } = gesture {
-            draw::brush_outline(&context, current, centre, brush_radius);
-            let label = format!("{:.0} px", 2.0 * brush_radius);
-            draw::tag(&context, current.to_screen(centre.offset(-brush_radius, -brush_radius)), &label, "#e8e6e1");
+        if let Some((centre, size)) = editor.peek(Session::brush_sizing) {
+            let radius = size / 2.0;
+            draw::brush_outline(&context, current, centre, radius);
+            let label = format!("{size:.0} px");
+            draw::tag(&context, current.to_screen(centre.offset(-radius, -radius)), &label, "#e8e6e1");
         } else if let (Tool::Brush, false, Some(at)) = (editor.tool.get_untracked(), editor.tools.fill.get_untracked(), hover.get_untracked()) {
-            draw::brush_outline(&context, current, at, brush_radius);
+            draw::brush_outline(&context, current, at, editor.tools.brush_size.get_untracked() / 2.0);
         }
         let pen = editor.label.get_untracked().map(color_of).unwrap_or_else(|| "#ffffff".to_owned());
         // The fixed-size shape the next click places: it hangs at the pointer until a click fixes
@@ -1618,7 +1492,6 @@ pub fn AnnotationLayer(
     Effect::new(move |_| {
         view.track();
         size.track();
-        gesture.track();
         editor.track_changes();
         editor.label.track();
         editor.tool.track();
@@ -1626,18 +1499,17 @@ pub fn AnnotationLayer(
         prefs.settings.track();
         editor.tools.brush_size.track();
         editor.tools.fill.track();
-        fill_drawn.track();
         hover.track();
         draw();
     });
     Effect::new(move |_| {
         editor.track_changes();
-        let busy = gesture.with(|g| *g != Gesture::Idle) || editor.peek(Session::is_busy);
+        let busy = editor.peek(Session::is_busy);
         if editor.busy.get_untracked() != busy {
             editor.busy.set(busy);
         }
     });
-    // The session's drawing gestures follow the tool options.
+    // The session's gestures follow the tool options.
     Effect::new(move |_| {
         let options = Options {
             snap: editor.tools.snap.get(),
@@ -1649,6 +1521,11 @@ pub fn AnnotationLayer(
             single_point: editor.tools.single_point.get(),
             ellipse_from_centre: editor.tools.ellipse_from_centre.get(),
             edge_snap: editor.tools.edge_snap.get(),
+            brush_size: editor.tools.brush_size.get(),
+            eraser: editor.tools.eraser.get(),
+            fill: editor.tools.fill.get(),
+            threshold: editor.tools.threshold.get(),
+            stop_at_edges: editor.tools.stop_at_edges.get(),
         };
         editor.update(|session| session.set_options(options));
     });
@@ -1712,11 +1589,10 @@ pub fn AnnotationLayer(
                 });
                 if drawn > 0 {
                     drawn
+                } else if editor.peek(Session::is_brushing) {
+                    1
                 } else {
-                    match gesture.get() {
-                        Gesture::Painting | Gesture::Filling { .. } => 1,
-                        _ => 0,
-                    }
+                    0
                 }
             }}
             style:cursor=canvas_cursor
@@ -1729,19 +1605,5 @@ pub fn AnnotationLayer(
             }
             on:contextmenu=|ev: ev::MouseEvent| ev.prevent_default()
         ></canvas>
-    }
-}
-
-/// `edit` with new annotations given their label's default attribute values.
-fn with_defaults(edit: Edit, defaults: &dyn Fn(i64) -> Attributes) -> Edit {
-    match edit {
-        Edit::Add { index, mut annotation } => {
-            if annotation.attributes.is_empty() {
-                annotation.attributes = defaults(annotation.label);
-            }
-            Edit::Add { index, annotation }
-        }
-        Edit::Batch(edits) => Edit::Batch(edits.into_iter().map(|edit| with_defaults(edit, defaults)).collect()),
-        other => other,
     }
 }

@@ -204,8 +204,9 @@ fn a_freehand_polyline_follows_edges_unless_shift_is_held() {
         })
     };
     let mut session = with_options(drawing(Tool::Polyline), freehand);
-    session.press_with_edges(at(100.0, 300.0), Some(&detour));
-    session.move_to_with_edges(at(400.0, 300.0), Some(&detour));
+    let layer = crate::editor::Layer { edges: Some(&detour), ..crate::editor::Layer::default() };
+    session.press_in(at(100.0, 300.0), layer);
+    session.move_to_in(at(400.0, 300.0), layer);
     session.release(at(400.0, 300.0));
     let Shape::Polyline { points } = shape(&session, 0) else { panic!("not a polyline") };
     assert!(points.contains(&Point::new(100.0, 500.0)), "followed the detour: {points:?}");
@@ -213,8 +214,9 @@ fn a_freehand_polyline_follows_edges_unless_shift_is_held() {
 
     // Shift draws freely, past the edge path.
     let mut session = with_options(drawing(Tool::Polyline), freehand);
-    session.press_with_edges(shift(at(100.0, 300.0)), Some(&detour));
-    session.move_to_with_edges(shift(at(400.0, 300.0)), Some(&detour));
+    let layer = crate::editor::Layer { edges: Some(&detour), ..crate::editor::Layer::default() };
+    session.press_in(shift(at(100.0, 300.0)), layer);
+    session.move_to_in(shift(at(400.0, 300.0)), layer);
     session.release(shift(at(400.0, 300.0)));
     let Shape::Polyline { points } = shape(&session, 0) else { panic!("not a polyline") };
     assert!(points.iter().all(|point| point.y == 300.0), "a straight line: {points:?}");
