@@ -43,7 +43,9 @@ use oxilabel_core::{
     clipboard,
     constraint::ShapeConstraints,
     edges::EdgeMap,
-    editor::{DRAG_THRESHOLD, HANDLE_REACH, MIN_SHAPE_SIZE, Modifiers, Options, Pointer, SNAP_DEGREES, Session, grip::GripKind, snap_turn},
+    editor::{
+        BrushMode, DRAG_THRESHOLD, HANDLE_REACH, MIN_SHAPE_SIZE, Modifiers, Options, Pointer, SNAP_DEGREES, Session, grip::GripKind, snap_turn,
+    },
     ellipse::Ellipse,
     fill::{FillSettings, grow},
     geometry::{Point, Rect, snap_angle, steps_along, steps_towards},
@@ -99,62 +101,7 @@ thread_local! {
     static CLIPBOARD: RefCell<Option<(i64, Vec<Annotation>)>> = const { RefCell::new(None) };
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Tool {
-    Select,
-    Rectangle,
-    Polygon,
-    Polyline,
-    Points,
-    Ellipse,
-    /// Paints masks; its eraser mode erases them.
-    Brush,
-    /// Never active: picking it, then a label, toggles that label as an image tag.
-    Tag,
-}
-
-impl Tool {
-    /// The shape this tool draws; `None` for Select. (Oriented rectangles come from Rectangle.)
-    pub fn shape_type(self) -> Option<ShapeType> {
-        match self {
-            Tool::Select => None,
-            Tool::Rectangle => Some(ShapeType::Rectangle),
-            Tool::Polygon => Some(ShapeType::Polygon),
-            Tool::Polyline => Some(ShapeType::Polyline),
-            Tool::Points => Some(ShapeType::Points),
-            Tool::Ellipse => Some(ShapeType::Ellipse),
-            Tool::Brush => Some(ShapeType::Mask),
-            Tool::Tag => Some(ShapeType::Tag),
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Tool::Select => "Select",
-            Tool::Rectangle => "Rectangle",
-            Tool::Polygon => "Polygon",
-            Tool::Polyline => "Polyline",
-            Tool::Points => "Points",
-            Tool::Ellipse => "Ellipse",
-            Tool::Brush => "Brush",
-            Tool::Tag => "Tag",
-        }
-    }
-
-    /// The action that switches to the tool.
-    pub fn action(self) -> Action {
-        match self {
-            Tool::Select => Action::Select,
-            Tool::Rectangle => Action::Rectangle,
-            Tool::Polygon => Action::Polygon,
-            Tool::Polyline => Action::Polyline,
-            Tool::Points => Action::Points,
-            Tool::Ellipse => Action::Ellipse,
-            Tool::Brush => Action::Brush,
-            Tool::Tag => Action::Tag,
-        }
-    }
-}
+pub use oxilabel_core::editor::Tool;
 
 /// The tools a key selects directly (Tag opens its label pie instead).
 const KEY_TOOLS: [Tool; 7] = [Tool::Select, Tool::Rectangle, Tool::Polygon, Tool::Polyline, Tool::Points, Tool::Ellipse, Tool::Brush];
@@ -171,6 +118,8 @@ pub struct Editor {
     selection_changed: Trigger,
     threshold_changed: Trigger,
     changed: Trigger,
+    /// Notified after every successful tool switch, so the layer drops what it draws.
+    switched: Trigger,
     pub tool: RwSignal<Tool>,
     /// The label new shapes get.
     pub label: RwSignal<Option<i64>>,
@@ -180,8 +129,6 @@ pub struct Editor {
     pub tools: Tools,
     /// The enhancement filter shown (its key; `None` for the original), set by the view filter.
     pub view_filter: RwSignal<Option<String>>,
-    /// The shape types some label of the project allows; tools for others are disabled.
-    pub usable_shapes: RwSignal<Vec<ShapeType>>,
     /// Whether a shape, stroke or other gesture is in progress (moving to another image waits).
     pub busy: RwSignal<bool>,
 }
@@ -337,69 +284,113 @@ impl Tools {
     }
 }
 
-/// The tools' drawing modes, remembered with the last tool.
+/// The drawing modes remembered with the last tool, for a tap of the pie key. The brush's eraser
+/// and fuzzy fill modes are not among them: choosing Brush resets it to plain painting.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Modes {
     oriented: bool,
     freehand: bool,
     single_point: bool,
     ellipse_from_centre: bool,
-    fill: bool,
-    eraser: bool,
 }
 
 impl Editor {
     /// Whether `tool` can be used: Select always, a drawing tool when some label allows its shape.
     pub fn can_use(&self, tool: Tool) -> bool {
-        tool.shape_type().is_none_or(|shape| self.usable_shapes.with(|shapes| shapes.contains(&shape)))
+        self.peek(|session| session.can_use(tool))
     }
 
-    /// Why a tool cannot be used, for a notice.
-    pub fn unusable_notice(tool: Tool) -> String {
-        format!("No label allows {} shapes: create or edit labels on the Labels tab.", tool.name().to_lowercase())
-    }
-
-    fn mode_signals(&self) -> [RwSignal<bool>; 6] {
-        [self.tools.oriented, self.tools.freehand, self.tools.single_point, self.tools.ellipse_from_centre, self.tools.fill, self.tools.eraser]
+    fn mode_signals(&self) -> [RwSignal<bool>; 4] {
+        [self.tools.oriented, self.tools.freehand, self.tools.single_point, self.tools.ellipse_from_centre]
     }
 
     /// The current modes (tracked).
     pub fn modes(&self) -> Modes {
-        let [oriented, freehand, single_point, ellipse_from_centre, fill, eraser] = self.mode_signals().map(|mode| mode.get());
-        Modes { oriented, freehand, single_point, ellipse_from_centre, fill, eraser }
+        let [oriented, freehand, single_point, ellipse_from_centre] = self.mode_signals().map(|mode| mode.get());
+        Modes { oriented, freehand, single_point, ellipse_from_centre }
     }
 
-    /// Switches to `tool`, `label` and `modes`, touching only what differs, so a shape being
-    /// drawn with them is kept.
+    /// Repeats the last tool, label and modes (a tap of the pie key): the drawing modes are set
+    /// first, then the tool goes through the session's one switching rule, and the saved label is
+    /// restored only while it allows the tool's shape.
     fn restore(&self, tool: Tool, label: i64, modes: Modes) {
-        let Modes { oriented, freehand, single_point, ellipse_from_centre, fill, eraser } = modes;
-        for (signal, value) in self.mode_signals().into_iter().zip([oriented, freehand, single_point, ellipse_from_centre, fill, eraser]) {
+        let Modes { oriented, freehand, single_point, ellipse_from_centre } = modes;
+        for (signal, value) in self.mode_signals().into_iter().zip([oriented, freehand, single_point, ellipse_from_centre]) {
             if signal.get_untracked() != value {
                 signal.set(value);
             }
         }
-        if self.tool.get_untracked() != tool {
-            self.tool.set(tool);
-        }
-        if self.label.get_untracked() != Some(label) {
-            self.label.set(Some(label));
+        if self.switch_tool(tool)
+            && tool.shape_type().is_some_and(|shape| self.peek(|session| session.label_allows(label, shape)))
+        {
+            self.set_label(Some(label));
         }
     }
 
-    pub fn new(session: Session, label: Option<i64>, tools: Tools) -> Self {
+    pub fn new(mut session: Session, label: Option<i64>, tools: Tools) -> Self {
+        session.set_label(label);
         Editor {
             session: StoredValue::new(session),
             annotations_changed: Trigger::new(),
             selection_changed: Trigger::new(),
             threshold_changed: Trigger::new(),
             changed: Trigger::new(),
+            switched: Trigger::new(),
             tool: RwSignal::new(Tool::Select),
             label: RwSignal::new(label),
             notice: RwSignal::new(None),
             tools,
             view_filter: RwSignal::new(None),
-            usable_shapes: RwSignal::new(ShapeType::ALL.to_vec()),
             busy: RwSignal::new(false),
+        }
+    }
+
+    /// Switches to `tool` through the session's one rule (the tool keys, the tool pie, the rail
+    /// and a tap of the pie key all come here), then mirrors the session: the tool, its label, and
+    /// the brush mode (painting after choosing Brush).
+    pub fn switch_tool(&self, tool: Tool) -> bool {
+        let switched = self.update(|session| session.switch_tool(tool));
+        let (tool, label, brush) = self.peek(|session| (session.tool(), session.label(), session.brush_mode()));
+        if self.tool.get_untracked() != tool {
+            self.tool.set(tool);
+        }
+        if self.label.get_untracked() != label {
+            self.label.set(label);
+        }
+        self.mirror_brush_mode(brush);
+        if switched {
+            // Cancels what the annotation layer is drawing, even when the tool is chosen again.
+            self.switched.notify();
+        }
+        switched
+    }
+
+    /// Sets the label new shapes get, in the session and the signal the view reads.
+    pub fn set_label(&self, label: Option<i64>) {
+        self.update(|session| session.set_label(label));
+        if self.label.get_untracked() != label {
+            self.label.set(label);
+        }
+    }
+
+    /// Sets the brush's mode (the eraser and fuzzy fill keys, the options pie).
+    pub fn set_brush_mode(&self, mode: BrushMode) {
+        self.update(|session| session.set_brush_mode(mode));
+        self.mirror_brush_mode(mode);
+    }
+
+    /// The brush switch signals follow the session's mode.
+    fn mirror_brush_mode(&self, mode: BrushMode) {
+        let (eraser, fill) = match mode {
+            BrushMode::Paint => (false, false),
+            BrushMode::Erase => (true, false),
+            BrushMode::Fill => (false, true),
+        };
+        if self.tools.eraser.get_untracked() != eraser {
+            self.tools.eraser.set(eraser);
+        }
+        if self.tools.fill.get_untracked() != fill {
+            self.tools.fill.set(fill);
         }
     }
 
@@ -484,6 +475,17 @@ impl Editor {
     /// Tracks every change to the session, its gesture included.
     pub fn track_changes(&self) {
         self.changed.track();
+    }
+
+    /// Relabels the annotations at `indices` through the session's one rule, as the objects list
+    /// does for a single row.
+    pub fn relabel(&self, indices: &[usize], label: i64) -> bool {
+        self.update(|session| session.relabel(indices, label))
+    }
+
+    /// Relabels the selection through the session's one rule, as the label pie does.
+    pub fn relabel_selection(&self, label: i64) -> bool {
+        self.update(|session| session.relabel_selection(label))
     }
 }
 
@@ -1122,30 +1124,11 @@ pub fn AnnotationLayer(
         }
         match (relabelling, tool) {
             (true, _) => {
-                // An image has each tag once: a selected tag cannot become one it already has.
-                let (tagged, tags_selected) = editor.peek(|session| {
-                    let list = session.annotations();
-                    let tagged = list.iter().any(|a| a.shape.is_tag() && a.label == id);
-                    (tagged, session.selection().iter().any(|&i| list.get(i).is_some_and(|a| a.shape.is_tag())))
-                });
-                if tagged && tags_selected {
-                    editor.notice.set(Some(format!("The image already has the tag “{}”.", label_name(id))));
-                }
-                editor.update(|session| {
-                    session.change_selected(|annotation| {
-                        if annotation.shape.is_tag() && tagged {
-                            return annotation.clone();
-                        }
-                        Annotation { label: id, attributes: conform(id, &annotation.attributes), ..annotation.clone() }
-                    })
-                })
+                editor.relabel_selection(id);
             }
             (false, Some(Tool::Tag)) => toggle_tag(id),
-            (false, Some(tool)) => {
-                editor.tool.set(tool);
-                editor.label.set(Some(id));
-            }
-            (false, None) => editor.label.set(Some(id)),
+            // The tool was chosen through the session's rule when its pie item was picked.
+            (false, _) => editor.set_label(Some(id)),
         }
     };
     let choose = move |action: PieAction| {
@@ -1154,11 +1137,15 @@ pub fn AnnotationLayer(
         match action {
             PieAction::Tool(Tool::Select) => {
                 close_pie();
-                editor.tool.set(Tool::Select);
+                editor.switch_tool(Tool::Select);
             }
             // Picking a tool chains to the label pie, centred where the pointer is so the next
             // flick starts fresh; it stays held while Q or the right button is still down.
             PieAction::Tool(tool) => {
+                if !editor.switch_tool(tool) {
+                    close_pie();
+                    return;
+                }
                 pending_tool.set_value(Some(tool));
                 let at = cursor_at.get_value();
                 pointer.set(at);
@@ -1202,11 +1189,11 @@ pub fn AnnotationLayer(
             }
             PieAction::SetEraser(on) => {
                 close_pie();
-                editor.tools.eraser.set(on);
+                editor.set_brush_mode(if on { BrushMode::Erase } else { BrushMode::Paint });
             }
             PieAction::SetFill(on) => {
                 close_pie();
-                editor.tools.fill.set(on);
+                editor.set_brush_mode(if on { BrushMode::Fill } else { BrushMode::Paint });
             }
             PieAction::ToggleEdgeSnap => {
                 close_pie();
@@ -1285,21 +1272,6 @@ pub fn AnnotationLayer(
     if all_labels.with_value(Vec::is_empty) {
         editor.notice.set(Some("This project has no labels yet: create them on the Labels tab to start annotating.".into()));
     }
-    // A drawing tool needs a label that allows its shape: switch to the first one that does.
-    Effect::new(move |_| {
-        let Some(shape) = editor.tool.get().shape_type() else { return };
-        if editor.label.get_untracked().is_some_and(|label| label_allows(label, shape)) {
-            return;
-        }
-        let first = all_labels.with_value(|labels| labels.iter().find(|label| label.shape_types.contains(&shape)).map(|l| l.id));
-        match first {
-            Some(id) => editor.label.set(Some(id)),
-            None => editor.notice.set(Some(format!(
-                "No label allows {} shapes; allow it on the Labels tab first.",
-                editor.tool.get_untracked().name().to_lowercase()
-            ))),
-        }
-    });
     let pointer_moves = window_event_listener(ev::pointermove, move |ev| {
         let at = Point::new(f64::from(ev.client_x()), f64::from(ev.client_y()));
         cursor_at.set_value(at);
@@ -1654,14 +1626,6 @@ pub fn AnnotationLayer(
         let painting = gesture.get_untracked() == Gesture::Painting;
         let tool = editor.tool.get_untracked();
         let (smaller, larger) = (is(Action::Smaller), is(Action::Larger));
-        let brush_tool = |tool: Tool| {
-            if editor.can_use(tool) {
-                true
-            } else {
-                editor.notice.set(Some(Editor::unusable_notice(tool)));
-                false
-            }
-        };
         if (is(Action::Undo) || is(Action::Redo)) && painting {
         } else if let Some(action) = [Action::Redo, Action::Undo, Action::SelectNone, Action::SelectAll].into_iter().find(|&action| is(action)) {
             editor.update(|session| session.key(action));
@@ -1687,7 +1651,7 @@ pub fn AnnotationLayer(
             if gesture.get_untracked() != Gesture::Idle {
                 cancel_gesture();
             } else if !editor.update(|session| session.key(Action::Cancel)) {
-                editor.tool.set(Tool::Select);
+                editor.switch_tool(Tool::Select);
             }
         } else if is(Action::Delete) {
             editor.update(|session| session.key(Action::Delete));
@@ -1713,7 +1677,7 @@ pub fn AnnotationLayer(
             let copies = CLIPBOARD.with_borrow(|copied| copied.as_ref().filter(|(of, _)| *of == project).map(|(_, copies)| copies.clone()));
             let Some(copies) = copies.filter(|copies| !copies.is_empty()) else { return };
             cancel_gesture();
-            editor.tool.set(Tool::Select);
+            editor.switch_tool(Tool::Select);
             let pasted = all_labels.with_value(|labels| clipboard::paste(&copies, labels, image_size.0, image_size.1));
             editor.notice.set(pasted.notice());
             editor.update(|session| {
@@ -1727,43 +1691,37 @@ pub fn AnnotationLayer(
             });
         } else if is(Action::Eraser) {
             // The brush in eraser mode (Blender has no eraser tool either).
-            if brush_tool(Tool::Brush) {
+            if editor.switch_tool(Tool::Brush) {
                 cancel_gesture();
-                editor.tool.set(Tool::Brush);
-                editor.tools.eraser.set(true);
+                editor.set_brush_mode(BrushMode::Erase);
             }
         } else if is(Action::FuzzyFill) {
             // The brush's fuzzy fill (U, GIMP's fuzzy select key).
-            if brush_tool(Tool::Brush) {
+            if editor.switch_tool(Tool::Brush) {
                 cancel_gesture();
-                editor.tool.set(Tool::Brush);
-                editor.tools.fill.set(true);
-                editor.tools.eraser.set(false);
+                editor.set_brush_mode(BrushMode::Fill);
             }
         } else if is(Action::Tag) {
             // The label pie, whose label is toggled as a tag of the image.
-            if brush_tool(Tool::Tag) {
+            if editor.can_use(Tool::Tag) {
                 close_pie();
                 pending_tool.set_value(Some(Tool::Tag));
                 let at = cursor_at.get_value();
                 pointer.set(at);
                 pie.set(Some(label_pie(at, false)));
+            } else {
+                editor.notice.set(Some(Session::unusable_notice(Tool::Tag)));
             }
         } else if let Some(tool) = KEY_TOOLS.into_iter().find(|tool| is(tool.action())) {
-            if brush_tool(tool) {
+            if editor.switch_tool(tool) {
                 cancel_gesture();
-                editor.tool.set(tool);
-                if tool == Tool::Brush {
-                    editor.tools.eraser.set(false);
-                    editor.tools.fill.set(false);
-                }
             }
         } else if let Some((_, id)) = hotkeys.iter().find(|(hotkey, _)| !press.ctrl && !press.alt && hotkey.eq_ignore_ascii_case(&key)) {
             match tool.shape_type() {
                 Some(shape) if !label_allows(*id, shape) => {
                     editor.notice.set(Some(format!("“{}” cannot be used for {} shapes.", label_name(*id), tool.name().to_lowercase())))
                 }
-                _ => editor.label.set(Some(*id)),
+                _ => editor.set_label(Some(*id)),
             }
         } else {
             return;
@@ -1940,6 +1898,7 @@ pub fn AnnotationLayer(
         }
     });
     Effect::new(move |_| {
+        editor.switched.track();
         editor.tool.track();
         editor.tools.oriented.track();
         editor.tools.freehand.track();

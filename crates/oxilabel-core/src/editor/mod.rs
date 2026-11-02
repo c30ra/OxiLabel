@@ -12,8 +12,10 @@
 
 use std::collections::BTreeSet;
 
+use serde::{Deserialize, Serialize};
+
 use crate::{
-    Label,
+    Label, ShapeType,
     annotation::{Annotation, Shape},
     geometry::{Handle, Point, Rect},
     history::{Edit, History},
@@ -40,6 +42,72 @@ pub const MIN_SHAPE_SIZE: f64 = 3.0;
 pub const SNAP_DEGREES: f64 = 15.0;
 /// Screen distance from a shape's outline to its rotation handle.
 pub const ROTATION_HANDLE_DISTANCE: f64 = 24.0;
+
+/// The drawing tools, and the brush, tag and Select. `Select` handles shapes; `Brush` paints masks
+/// and `Tag` is never active (picking it toggles a label as an image tag).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Tool {
+    Select,
+    Rectangle,
+    Polygon,
+    Polyline,
+    Points,
+    Ellipse,
+    Brush,
+    Tag,
+}
+
+impl Tool {
+    /// The shape this tool draws; `None` for Select. (Oriented rectangles come from Rectangle.)
+    pub fn shape_type(self) -> Option<ShapeType> {
+        match self {
+            Tool::Select => None,
+            Tool::Rectangle => Some(ShapeType::Rectangle),
+            Tool::Polygon => Some(ShapeType::Polygon),
+            Tool::Polyline => Some(ShapeType::Polyline),
+            Tool::Points => Some(ShapeType::Points),
+            Tool::Ellipse => Some(ShapeType::Ellipse),
+            Tool::Brush => Some(ShapeType::Mask),
+            Tool::Tag => Some(ShapeType::Tag),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Tool::Select => "Select",
+            Tool::Rectangle => "Rectangle",
+            Tool::Polygon => "Polygon",
+            Tool::Polyline => "Polyline",
+            Tool::Points => "Points",
+            Tool::Ellipse => "Ellipse",
+            Tool::Brush => "Brush",
+            Tool::Tag => "Tag",
+        }
+    }
+
+    /// The action that switches to the tool.
+    pub fn action(self) -> Action {
+        match self {
+            Tool::Select => Action::Select,
+            Tool::Rectangle => Action::Rectangle,
+            Tool::Polygon => Action::Polygon,
+            Tool::Polyline => Action::Polyline,
+            Tool::Points => Action::Points,
+            Tool::Ellipse => Action::Ellipse,
+            Tool::Brush => Action::Brush,
+            Tool::Tag => Action::Tag,
+        }
+    }
+}
+
+/// What the brush does: paint a mask, erase it, or fill the similar region around a click.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BrushMode {
+    #[default]
+    Paint,
+    Erase,
+    Fill,
+}
 
 /// The modifier keys held during a pointer event. `ctrl` is Ctrl, or Cmd on a Mac.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -109,6 +177,12 @@ pub struct Session {
     /// Indices of the selected annotations.
     selection: BTreeSet<usize>,
     gesture: Gesture,
+    /// The tool the pointer acts with.
+    tool: Tool,
+    /// The label new shapes get.
+    label: Option<i64>,
+    /// The brush's mode; choosing Brush resets it to painting, so it is never kept.
+    brush: BrushMode,
     /// The project's labels: their shape constraints decide which shapes have a fixed size.
     labels: Vec<Label>,
     /// The image's width and height in pixels.
@@ -129,6 +203,9 @@ impl Session {
             history: History::default(),
             selection: BTreeSet::new(),
             gesture: Gesture::Idle,
+            tool: Tool::Select,
+            label: None,
+            brush: BrushMode::Paint,
             labels,
             image,
             threshold: 0.0,
@@ -169,6 +246,78 @@ impl Session {
 
     pub fn set_options(&mut self, options: Options) {
         self.options = options;
+    }
+
+    /// The tool the pointer acts with.
+    pub fn tool(&self) -> Tool {
+        self.tool
+    }
+
+    /// Switches tools; a gesture begun with the old tool no longer applies.
+    pub fn set_tool(&mut self, tool: Tool) {
+        if self.tool != tool {
+            self.cancel();
+            self.tool = tool;
+        }
+    }
+
+    /// The label new shapes get.
+    pub fn label(&self) -> Option<i64> {
+        self.label
+    }
+
+    /// Sets the label new shapes get.
+    pub fn set_label(&mut self, label: Option<i64>) {
+        self.label = label;
+    }
+
+    /// The brush's mode.
+    pub fn brush_mode(&self) -> BrushMode {
+        self.brush
+    }
+
+    /// Sets the brush's mode (the eraser and fuzzy fill keys, the options pie and bar).
+    pub fn set_brush_mode(&mut self, mode: BrushMode) {
+        self.brush = mode;
+    }
+
+    /// Whether some label allows the shape `tool` draws; Select always can be used.
+    pub fn can_use(&self, tool: Tool) -> bool {
+        tool.shape_type().is_none_or(|shape| self.labels.iter().any(|label| label.shape_types.contains(&shape)))
+    }
+
+    /// Whether label `label` allows `shape`.
+    pub fn label_allows(&self, label: i64, shape: ShapeType) -> bool {
+        self.labels.iter().any(|candidate| candidate.id == label && candidate.shape_types.contains(&shape))
+    }
+
+    /// Why `tool` cannot be used, for a notice.
+    pub fn unusable_notice(tool: Tool) -> String {
+        format!("No label allows {} shapes: create or edit labels on the Labels tab.", tool.name().to_lowercase())
+    }
+
+    /// Switches to `tool` through the one rule every entry point uses (the tool keys, the tool
+    /// pie, the tool rail and a tap of the pie key): the gesture in progress is cancelled, a
+    /// brush starts plain painting, and the label is kept only while it allows the tool's shape,
+    /// otherwise the first label that does is taken. A tool no label allows is refused with a
+    /// notice and nothing changes.
+    pub fn switch_tool(&mut self, tool: Tool) -> bool {
+        if !self.can_use(tool) {
+            self.notice = Some(Session::unusable_notice(tool));
+            return false;
+        }
+        // The same tool chosen again still drops whatever was being drawn with it.
+        self.cancel();
+        self.tool = tool;
+        if tool == Tool::Brush {
+            self.brush = BrushMode::Paint;
+        }
+        if let Some(shape) = tool.shape_type()
+            && !self.label.is_some_and(|label| self.label_allows(label, shape))
+        {
+            self.label = self.labels.iter().find(|label| label.shape_types.contains(&shape)).map(|label| label.id);
+        }
+        true
     }
 
     /// The confidence below which pending pre-annotations are neither drawn nor picked.
@@ -334,6 +483,60 @@ impl Session {
         if !edits.is_empty() {
             self.apply(Edit::Batch(edits));
         }
+    }
+
+    /// Relabels the annotations at `indices` as `label`, in one undo step: the label pie and the
+    /// side panel both come here. An annotation that is not shown (hidden, or a pre-annotation
+    /// below the threshold) or whose shape the label does not allow is left alone; attributes are
+    /// made to fit the new label; a pre-annotation becomes reviewed. An image has each tag once,
+    /// so a tag whose new label another tag already has is left alone (with a notice), and when
+    /// several selected tags take one label, the first one takes it.
+    pub fn relabel(&mut self, indices: &[usize], label: i64) -> bool {
+        let Some(target) = self.labels.iter().find(|target| target.id == label).cloned() else { return false };
+        let selected: BTreeSet<usize> = indices.iter().copied().collect();
+        // Tags that keep their labels still claim them, so a selected tag cannot join one.
+        let mut tags: BTreeSet<i64> = self
+            .annotations
+            .iter()
+            .enumerate()
+            .filter(|(index, annotation)| !selected.contains(index) && annotation.shape.is_tag())
+            .map(|(_, annotation)| annotation.label)
+            .collect();
+        let mut notice = None;
+        let mut edits = Vec::new();
+        for &index in &selected {
+            let Some(before) = self.annotations.get(index) else { continue };
+            if !before.shown(self.threshold) || !target.shape_types.contains(&before.shape.shape_type()) {
+                continue;
+            }
+            if before.shape.is_tag() {
+                if tags.contains(&label) {
+                    notice = Some(format!("The image already has the tag “{}”.", target.name));
+                    continue;
+                }
+                tags.insert(label);
+            }
+            // Relabelling a pre-annotation reviews it.
+            let after = Annotation { label, attributes: target.conform_attributes(&before.attributes), pending: false, ..before.clone() };
+            if after != *before {
+                edits.push(Edit::Replace { index, before: before.clone(), after });
+            }
+        }
+        if notice.is_some() {
+            self.notice = notice;
+        }
+        if edits.is_empty() {
+            return false;
+        }
+        self.apply(Edit::Batch(edits));
+        true
+    }
+
+    /// Relabels the selected annotations as `label`, as the label pie does; returns whether
+    /// anything changed.
+    pub fn relabel_selection(&mut self, label: i64) -> bool {
+        let indices: Vec<usize> = self.selection.iter().copied().collect();
+        self.relabel(&indices, label)
     }
 
     /// Replaces `source`'s pending pre-annotations with those it made in `latest` (the image as the

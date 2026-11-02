@@ -11,7 +11,6 @@ use oxilabel_core::{
     annotation::{Annotation, Shape},
     attribute::{AttributeDefinition, AttributeKind, AttributeValue},
     ellipse::Ellipse,
-    history::Edit,
 };
 
 use crate::annotate::Editor;
@@ -38,15 +37,9 @@ pub fn SidePanel(editor: Editor, labels: Vec<Label>, children: Children) -> impl
     let objects = move || {
         editor.with_annotations(|list| list.iter().enumerate().filter(|(_, a)| !a.shape.is_tag()).map(|(i, a)| (i, a.clone())).collect::<Vec<_>>())
     };
-    let relabel = move |index: usize, id: i64| {
-        let Some(before) = editor.peek(|session| session.annotations().get(index).cloned()) else { return };
-        let Some(target) = label(id) else { return };
-        // Relabelling a pre-annotation reviews it.
-        let after = Annotation { label: id, attributes: target.conform_attributes(&before.attributes), pending: false, ..before.clone() };
-        if after != before {
-            editor.update(|session| session.apply(Edit::Replace { index, before, after }));
-        }
-    };
+    // The same session rule as the label pie: one tag per label, conformed attributes, pending
+    // pre-annotations reviewed, hidden rows left alone.
+    let relabel = move |index: usize, id: i64| editor.relabel(&[index], id);
     let row = move |index: usize, annotation: Annotation| {
         let color = label(annotation.label).map(|l| l.color).unwrap_or_default();
         let shape = annotation.shape.shape_type();
@@ -54,12 +47,20 @@ pub fn SidePanel(editor: Editor, labels: Vec<Label>, children: Children) -> impl
         let name = label(annotation.label).map(|l| l.name).unwrap_or_default();
         let selected = move || editor.is_selected(index);
         let (hidden, locked, pending) = (annotation.hidden, annotation.locked, annotation.pending);
+        let current_label = annotation.label;
         view! {
             // Not "hidden"/"locked": the global .hidden class hides elements.
             <li class:selected=selected class:is-hidden=hidden class:is-locked=locked class:pending=pending>
                 <span class="swatch" style:background=color></span>
                 <select class="relabel" aria-label="Label" on:change:target=move |ev| {
-                    if let Ok(id) = ev.target().value().parse() { relabel(index, id) }
+                    let select = ev.target();
+                    if let Ok(id) = select.value().parse()
+                        && !relabel(index, id)
+                    {
+                        // Left alone (hidden, not shown, or a tag the image already has): show the
+                        // label it still has.
+                        select.set_value(&current_label.to_string());
+                    }
                 }>
                     {choices.into_iter().map(|l| {
                         let current = l.id == annotation.label;
