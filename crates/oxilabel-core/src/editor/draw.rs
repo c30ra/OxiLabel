@@ -180,8 +180,10 @@ impl Session {
                 let angle = snap_turn((point.y - centre.y).atan2(point.x - centre.x), snap);
                 Gesture::Placing { centre, angle }
             }
+            // Only a move with the primary button held is a drag; a hover leaves the shape waiting
+            // for its second click.
             Gesture::Drawing { start, dragged, .. } => {
-                let moved = start.distance(point) * pointer.scale > DRAG_THRESHOLD;
+                let moved = pointer.primary && start.distance(point) * pointer.scale > DRAG_THRESHOLD;
                 Gesture::Drawing {
                     start,
                     current: inside,
@@ -191,7 +193,7 @@ impl Session {
                 }
             }
             Gesture::Ellipse { start, dragged, .. } => {
-                let moved = start.distance(point) * pointer.scale > DRAG_THRESHOLD;
+                let moved = pointer.primary && start.distance(point) * pointer.scale > DRAG_THRESHOLD;
                 Gesture::Ellipse {
                     start,
                     current: inside,
@@ -239,11 +241,12 @@ impl Session {
     /// The main button was released with a drawing tool.
     pub(super) fn draw_release(&mut self, pointer: Pointer) {
         match std::mem::replace(&mut self.gesture, Gesture::Idle) {
-            // A click without dragging leaves the rectangle or ellipse open for a second click.
-            Gesture::Drawing { start, current, dragged: true, square, from_centre } => {
+            // A click without dragging leaves the rectangle or ellipse open for a second click;
+            // only releasing the button that made the drag finishes it.
+            Gesture::Drawing { start, current, dragged: true, square, from_centre } if pointer.primary => {
                 self.finish_rectangle(start, current, square, from_centre, pointer.scale);
             }
-            Gesture::Ellipse { start, current, dragged: true, circle, from_centre } => {
+            Gesture::Ellipse { start, current, dragged: true, circle, from_centre } if pointer.primary => {
                 self.finish_ellipse(start, current, circle, from_centre, pointer.scale);
             }
             // Releasing ends a freehand stroke; a stroke too short for two vertices keeps its end.

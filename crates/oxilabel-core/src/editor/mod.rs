@@ -122,6 +122,22 @@ impl Tool {
             Tool::Tag => Action::Tag,
         }
     }
+
+    /// The tool a tool key switches to; `None` for other actions. `Action::Tag` opens the label
+    /// pie instead of making Tag the active tool, so it is not one.
+    pub fn from_action(action: Action) -> Option<Tool> {
+        [
+            Tool::Select,
+            Tool::Rectangle,
+            Tool::Polygon,
+            Tool::Polyline,
+            Tool::Points,
+            Tool::Ellipse,
+            Tool::Brush,
+        ]
+        .into_iter()
+        .find(|tool| tool.action() == action)
+    }
 }
 
 /// What the brush does: paint or erase a mask, and whether a click fills the similar region
@@ -181,6 +197,9 @@ pub struct Pointer {
     pub at: Point,
     pub scale: f64,
     pub modifiers: Modifiers,
+    /// Whether the primary (usually left) button is involved: down during a press or a move, and
+    /// the one released by a release.
+    pub primary: bool,
 }
 
 /// The tool options gestures follow.
@@ -412,14 +431,6 @@ impl Session {
         self.tool
     }
 
-    /// Switches tools; a gesture begun with the old tool no longer applies.
-    pub fn set_tool(&mut self, tool: Tool) {
-        if self.tool != tool {
-            self.cancel();
-            self.tool = tool;
-        }
-    }
-
     /// The label new shapes get.
     pub fn label(&self) -> Option<i64> {
         self.label
@@ -482,7 +493,7 @@ impl Session {
         }
         // The same tool chosen again still drops whatever was being drawn with it.
         self.cancel();
-        self.set_tool(tool);
+        self.tool = tool;
         if tool == Tool::Brush {
             self.brush = BrushMode::Paint;
         }
@@ -553,8 +564,9 @@ impl Session {
         self.stroke_change = None;
     }
 
-    /// Handles a key action; returns whether it did anything. Cancel (Esc) first ends the
-    /// gesture, then clears the selection, and otherwise is left to the caller.
+    /// Handles a key action; returns whether it did anything. A tool key switches through the one
+    /// switching rule. Cancel (Esc) first ends the gesture, then clears the selection, then returns
+    /// to Select.
     pub fn key(&mut self, action: Action) -> bool {
         match action {
             Action::Undo => self.undo(),
@@ -575,7 +587,9 @@ impl Session {
             Action::Cancel if self.is_sizing_brush() => self.restore_brush_size(),
             Action::Cancel if self.is_busy() => self.cancel(),
             Action::Cancel if !self.selection.is_empty() => self.selection.clear(),
-            _ => return false,
+            Action::Cancel if self.tool != Tool::Select => return self.switch_tool(Tool::Select),
+            Action::Cancel => return false,
+            action => return Tool::from_action(action).is_some_and(|tool| self.switch_tool(tool)),
         }
         true
     }
@@ -718,12 +732,16 @@ impl Session {
     pub fn relabel(&mut self, indices: &[usize], label: i64) -> bool {
         let Some(target) = self.labels.iter().find(|target| target.id == label).cloned() else { return false };
         let selected: BTreeSet<usize> = indices.iter().copied().collect();
-        // Tags that keep their labels still claim them, so a selected tag cannot join one.
+        // Tags that keep their labels still claim them, so a selected tag cannot join one: every
+        // tag not being relabelled, and any tag that already has the new label (it keeps it, since
+        // relabelling a tag to its own label changes nothing).
         let mut tags: BTreeSet<i64> = self
             .annotations
             .iter()
             .enumerate()
-            .filter(|(index, annotation)| !selected.contains(index) && annotation.shape.is_tag())
+            .filter(|(index, annotation)| {
+                annotation.shape.is_tag() && (!selected.contains(index) || annotation.label == label)
+            })
             .map(|(_, annotation)| annotation.label)
             .collect();
         let mut notice = None;

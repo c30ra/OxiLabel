@@ -21,7 +21,7 @@ use super::{
 impl Session {
     /// A press of the main button with the Select tool.
     pub(super) fn select_press(&mut self, pointer: Pointer) {
-        let Pointer { at: point, scale, modifiers } = pointer;
+        let Pointer { at: point, scale, modifiers, .. } = pointer;
         let (extend, subtract) = (modifiers.shift, modifiers.ctrl);
         if !extend && let Some((index, grip)) = self.grip_under(point, scale) {
             self.grab(index, grip, point, subtract);

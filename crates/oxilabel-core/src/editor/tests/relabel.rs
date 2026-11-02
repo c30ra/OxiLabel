@@ -88,6 +88,22 @@ fn relabelling_two_tags_to_one_label_leaves_one_tag() {
 }
 
 #[test]
+fn relabelling_two_tags_to_the_label_one_already_has_keeps_one_tag() {
+    let mut session = Session::new(
+        vec![tag(1), tag(2)],
+        vec![label_with(1, serde_json::json!({})), label_with(2, serde_json::json!({}))],
+        IMAGE,
+    );
+    select(&mut session, &[0, 1]);
+
+    assert!(!session.relabel_selection(2), "nothing changed");
+
+    assert_eq!(tags(&session), vec![1, 2], "tag 2 keeps its label and tag 1 cannot join it");
+    assert_eq!(session.revision(), 0);
+    assert!(session.take_notice().is_some(), "it says the image already has the tag");
+}
+
+#[test]
 fn relabelling_leaves_hidden_annotations_alone() {
     let hidden = Annotation { hidden: true, ..boxed(100.0, 100.0, 200.0, 200.0) };
     let visible = boxed(300.0, 100.0, 400.0, 200.0);

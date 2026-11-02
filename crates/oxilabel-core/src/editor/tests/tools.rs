@@ -6,6 +6,7 @@ use super::*;
 use crate::{
     ShapeType,
     editor::{BrushMode, Tool},
+    keymap::Action,
 };
 
 /// A label allowing only `shapes`.
@@ -21,7 +22,7 @@ fn ready(tool: Tool) -> Session {
         vec![label_shape(1, &[ShapeType::Rectangle]), label_shape(2, &[ShapeType::Polyline]), label_shape(3, &ShapeType::ALL)],
         IMAGE,
     );
-    session.set_tool(tool);
+    session.switch_tool(tool);
     session
 }
 
@@ -68,50 +69,56 @@ fn a_tool_no_label_allows_is_refused_with_a_notice() {
     );
 }
 
-// The four entry points all call `switch_tool`; each test starts from the tool and brush mode the
-// entry point leaves behind.
-
 #[test]
-fn the_brush_key_starts_plain_painting() {
-    let mut session = ready(Tool::Select);
-    session.set_brush_mode(BrushMode::Erase);
-
-    assert!(session.switch_tool(Tool::Brush));
-
-    assert_eq!((session.tool(), session.brush_mode(), session.label()), (Tool::Brush, BrushMode::Paint, Some(3)));
+fn every_tool_key_maps_back_to_its_tool() {
+    for tool in [Tool::Select, Tool::Rectangle, Tool::Polygon, Tool::Polyline, Tool::Points, Tool::Ellipse, Tool::Brush] {
+        assert_eq!(Tool::from_action(tool.action()), Some(tool));
+    }
 }
 
+// Each entry point starts where it does in the browser, then takes its own route into the
+// session's one switching rule: a tool key through `Session::key`, the pie, the rail and the
+// Q tap through it. All four must land on the same tool, brush mode and label.
 #[test]
-fn the_tool_pie_starts_plain_painting() {
-    let mut session = ready(Tool::Rectangle);
-    session.set_brush_mode(BrushMode::Fill);
-
-    assert!(session.switch_tool(Tool::Brush));
-
-    assert_eq!((session.tool(), session.brush_mode(), session.label()), (Tool::Brush, BrushMode::Paint, Some(3)));
-}
-
-#[test]
-fn the_tool_rail_starts_plain_painting() {
-    let mut session = ready(Tool::Ellipse);
-    session.set_brush_mode(BrushMode::FillErase);
-
-    assert!(session.switch_tool(Tool::Brush));
-
-    assert_eq!((session.tool(), session.brush_mode(), session.label()), (Tool::Brush, BrushMode::Paint, Some(3)));
-}
-
-#[test]
-fn a_tap_of_the_pie_key_starts_plain_painting() {
-    let mut session = ready(Tool::Select);
-    assert!(session.switch_tool(Tool::Brush));
-    session.set_brush_mode(BrushMode::Erase);
-    assert!(session.switch_tool(Tool::Select));
-
-    // The tap repeats the kind of tool: a brush starts plain painting again.
-    assert!(session.switch_tool(Tool::Brush));
-
-    assert_eq!((session.tool(), session.brush_mode(), session.label()), (Tool::Brush, BrushMode::Paint, Some(3)));
+fn every_entry_point_chooses_the_same_tool_modes_and_label() {
+    let entry_points: [(&str, fn() -> (Session, bool)); 4] = [
+        ("tool key", || {
+            let mut session = ready(Tool::Select);
+            session.set_brush_mode(BrushMode::Erase);
+            let switched = session.key(Action::Brush);
+            (session, switched)
+        }),
+        ("tool pie", || {
+            let mut session = ready(Tool::Rectangle);
+            session.set_brush_mode(BrushMode::Fill);
+            let switched = session.switch_tool(Tool::Brush);
+            (session, switched)
+        }),
+        ("tool rail", || {
+            let mut session = ready(Tool::Ellipse);
+            session.set_brush_mode(BrushMode::FillErase);
+            let switched = session.switch_tool(Tool::Brush);
+            (session, switched)
+        }),
+        ("Q tap", || {
+            // The tap repeats the last kind of tool: a brush starts plain painting again.
+            let mut session = ready(Tool::Select);
+            assert!(session.switch_tool(Tool::Brush));
+            session.set_brush_mode(BrushMode::Erase);
+            assert!(session.switch_tool(Tool::Select));
+            let switched = session.switch_tool(Tool::Brush);
+            (session, switched)
+        }),
+    ];
+    for (entry, enter) in entry_points {
+        let (session, switched) = enter();
+        assert!(switched, "{entry}");
+        assert_eq!(
+            (session.tool(), session.brush_mode(), session.label()),
+            (Tool::Brush, BrushMode::Paint, Some(3)),
+            "{entry}"
+        );
+    }
 }
 
 #[test]

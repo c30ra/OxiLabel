@@ -16,7 +16,7 @@ fn ellipse_of(shape: Shape) -> Ellipse {
 /// A session with the drawing `tool` and label 1 (which allows every shape), on no annotations.
 fn drawing(tool: Tool) -> Session {
     let mut session = session(vec![]);
-    session.set_tool(tool);
+    session.switch_tool(tool);
     session.set_label(Some(1));
     session
 }
@@ -49,6 +49,32 @@ fn two_clicks_draw_a_rectangle_and_a_click_alone_waits_for_the_second() {
     click(&mut session, at(300.0, 250.0));
     assert_eq!(session.annotations().len(), 1);
     assert_eq!(shape(&session, 0), Shape::Rectangle(Rect::new(100.0, 100.0, 300.0, 250.0)));
+}
+
+#[test]
+fn a_click_waits_for_its_second_click_after_a_hover_and_a_foreign_release() {
+    let mut session = drawing(Tool::Rectangle);
+    click(&mut session, at(100.0, 100.0));
+    // The pointer moves without the primary button held: that is a hover, not a drag.
+    session.move_to(at(300.0, 250.0));
+    // Nor does releasing another button finish the rectangle.
+    session.release(at(300.0, 250.0));
+    assert!(session.is_busy(), "the first click leaves the rectangle open");
+    assert!(session.annotations().is_empty(), "a hover and a foreign release draw nothing");
+    click(&mut session, at(300.0, 250.0));
+    assert_eq!(shape(&session, 0), Shape::Rectangle(Rect::new(100.0, 100.0, 300.0, 250.0)));
+}
+
+#[test]
+fn an_ellipse_click_waits_for_its_second_click_after_a_hover_and_a_foreign_release() {
+    let mut session = drawing(Tool::Ellipse);
+    click(&mut session, at(300.0, 300.0));
+    session.move_to(at(500.0, 400.0));
+    session.release(at(500.0, 400.0));
+    assert!(session.is_busy(), "the first click leaves the ellipse open");
+    assert!(session.annotations().is_empty());
+    click(&mut session, at(500.0, 400.0));
+    assert_eq!(ellipse_of(shape(&session, 0)), Ellipse { centre: Point::new(300.0, 300.0), rx: 200.0, ry: 100.0, angle: 0.0 });
 }
 
 #[test]
@@ -254,7 +280,7 @@ fn an_ellipse_too_small_on_screen_is_not_added() {
 #[test]
 fn a_fixed_size_shape_is_placed_by_one_click_and_oriented_by_a_second() {
     let mut rectangle = session(vec![]);
-    rectangle.set_tool(Tool::Rectangle);
+    rectangle.switch_tool(Tool::Rectangle);
     rectangle.set_label(Some(2));
     click(&mut rectangle, at(500.0, 300.0));
     assert_eq!(shape(&rectangle, 0), Shape::Rectangle(Rect::new(450.0, 275.0, 550.0, 325.0)));
@@ -262,7 +288,7 @@ fn a_fixed_size_shape_is_placed_by_one_click_and_oriented_by_a_second() {
 
     let oriented = crate::editor::Options { oriented: true, ..Default::default() };
     let mut turning = with_options(session(vec![]), oriented);
-    turning.set_tool(Tool::Rectangle);
+    turning.switch_tool(Tool::Rectangle);
     turning.set_label(Some(2));
     click(&mut turning, at(500.0, 300.0));
     assert!(turning.is_busy(), "the centre is fixed, the angle follows");
@@ -274,7 +300,7 @@ fn a_fixed_size_shape_is_placed_by_one_click_and_oriented_by_a_second() {
     );
 
     let mut round = session(vec![]);
-    round.set_tool(Tool::Ellipse);
+    round.switch_tool(Tool::Ellipse);
     round.set_label(Some(2));
     click(&mut round, at(500.0, 300.0));
     click(&mut round, at(600.0, 300.0));
@@ -285,7 +311,7 @@ fn a_fixed_size_shape_is_placed_by_one_click_and_oriented_by_a_second() {
 fn a_fixed_size_that_cannot_fit_is_reported_and_nothing_is_drawn() {
     let huge = label_with(4, json!({ "rectangle": { "width": 2000.0, "height": 50.0 } }));
     let mut session = Session::new(vec![], vec![huge], IMAGE);
-    session.set_tool(Tool::Rectangle);
+    session.switch_tool(Tool::Rectangle);
     session.set_label(Some(4));
     click(&mut session, at(500.0, 300.0));
     assert_eq!(session.annotations().len(), 0);
@@ -300,7 +326,7 @@ fn new_annotations_get_their_labels_default_attribute_values() {
     ]);
     let label = label_with_attributes(5, &["rectangle"], definitions);
     let mut session = Session::new(vec![], vec![label], IMAGE);
-    session.set_tool(Tool::Rectangle);
+    session.switch_tool(Tool::Rectangle);
     session.set_label(Some(5));
     drag(&mut session, at(100.0, 100.0), at(300.0, 200.0));
     let attributes = &session.annotations()[0].attributes;
@@ -311,8 +337,10 @@ fn new_annotations_get_their_labels_default_attribute_values() {
 #[test]
 fn a_label_that_does_not_allow_the_shape_adds_nothing() {
     let polygons = label_with_attributes(6, &["polygon"], json!([]));
-    let mut session = Session::new(vec![], vec![polygons], IMAGE);
-    session.set_tool(Tool::Rectangle);
+    let rectangles = label_with_attributes(7, &["rectangle"], json!([]));
+    let mut session = Session::new(vec![], vec![rectangles, polygons], IMAGE);
+    session.switch_tool(Tool::Rectangle);
+    // The label was changed to one that no longer allows the tool's shape.
     session.set_label(Some(6));
     drag(&mut session, at(100.0, 100.0), at(300.0, 200.0));
     assert_eq!(session.annotations().len(), 0);
@@ -320,9 +348,9 @@ fn a_label_that_does_not_allow_the_shape_adds_nothing() {
 }
 
 #[test]
-fn escape_cancels_the_shape_then_the_selection_then_is_left_to_the_caller() {
+fn escape_cancels_the_shape_then_the_selection_then_returns_to_select() {
     let mut session = session(vec![boxed(100.0, 100.0, 200.0, 200.0)]);
-    session.set_tool(Tool::Polygon);
+    session.switch_tool(Tool::Polygon);
     session.set_label(Some(1));
     click(&mut session, at(100.0, 100.0));
     click(&mut session, at(300.0, 100.0));
@@ -334,8 +362,9 @@ fn escape_cancels_the_shape_then_the_selection_then_is_left_to_the_caller() {
     assert_eq!(selected(&session), [0], "the selection stays for the next Esc");
     assert!(session.key(Action::Cancel), "then the selection");
     assert!(selected(&session).is_empty());
-    assert!(!session.key(Action::Cancel), "then the caller switches to Select");
-    assert_eq!(session.tool(), Tool::Polygon);
+    assert!(session.key(Action::Cancel), "then back to Select");
+    assert_eq!(session.tool(), Tool::Select);
+    assert!(!session.key(Action::Cancel), "nothing is left to cancel in Select");
 }
 
 #[test]
@@ -364,7 +393,7 @@ fn escape_drops_every_kind_of_drawing_gesture() {
 
     // A fixed-size shape waiting for its angle is cancelled the same way.
     let mut session = with_options(session(vec![]), oriented);
-    session.set_tool(Tool::Rectangle);
+    session.switch_tool(Tool::Rectangle);
     session.set_label(Some(2));
     click(&mut session, at(500.0, 300.0));
     assert!(session.is_busy());
@@ -377,7 +406,7 @@ fn escape_drops_every_kind_of_drawing_gesture() {
 fn changing_tools_drops_the_shape_being_drawn() {
     let mut session = drawing(Tool::Rectangle);
     session.press(at(100.0, 100.0));
-    session.set_tool(Tool::Polygon);
+    session.switch_tool(Tool::Polygon);
     assert!(!session.is_busy());
     session.release(at(300.0, 200.0));
     assert_eq!(session.annotations().len(), 0);
