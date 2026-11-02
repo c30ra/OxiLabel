@@ -6,7 +6,7 @@ use std::cell::Cell;
 use super::{IMAGE, at, ctrl, session};
 use crate::{
     annotation::{Annotation, Shape},
-    editor::{FillRegion, Layer, Options, Session, Tool},
+    editor::{BrushMode, FillRegion, Layer, Options, Session, Tool},
     geometry::Point,
     keymap::Action,
     mask::Bitmap,
@@ -72,7 +72,7 @@ fn ctrl_inverts_the_brush_and_the_eraser() {
 
     // The eraser with Ctrl held paints instead.
     let mut session = brushing(Vec::new());
-    session.set_options(Options { eraser: true, ..Options::default() });
+    session.set_brush_mode(BrushMode::Erase);
     session.press(ctrl(at(300.0, 300.0)));
     session.release(ctrl(at(300.0, 300.0)));
     assert_eq!(session.annotations().len(), 1);
@@ -102,7 +102,8 @@ fn f_resizes_the_brush_and_esc_restores_its_size() {
 #[test]
 fn a_fill_grows_with_the_threshold_drag() {
     let mut session = brushing(Vec::new());
-    session.set_options(Options { fill: true, threshold: 15.0, ..Options::default() });
+    session.set_brush_mode(BrushMode::Fill);
+    session.set_options(Options { threshold: 15.0, ..Options::default() });
     let layer = Layer { fill: Some(&fill_of), ..Layer::default() };
     session.press_in(at(500.0, 500.0), layer);
     assert_eq!(session.fill_threshold(), 15.0);
@@ -117,7 +118,8 @@ fn a_fill_grows_with_the_threshold_drag() {
 #[test]
 fn a_fill_is_committed_when_the_button_is_released() {
     let mut session = brushing(Vec::new());
-    session.set_options(Options { fill: true, threshold: 20.0, ..Options::default() });
+    session.set_brush_mode(BrushMode::Fill);
+    session.set_options(Options { threshold: 20.0, ..Options::default() });
     let layer = Layer { fill: Some(&fill_of), ..Layer::default() };
     session.press_in(at(500.0, 500.0), layer);
     assert!(session.annotations().is_empty(), "nothing is added while the button is held");
@@ -135,7 +137,8 @@ fn a_fill_waits_for_the_tiles_it_reached() {
     let pixels = |seed: Point, threshold: f64| FillRegion { incomplete: !ready.get(), ..fill_of(seed, threshold) };
     let layer = Layer { fill: Some(&pixels), ..Layer::default() };
     let mut session = brushing(Vec::new());
-    session.set_options(Options { fill: true, threshold: 20.0, ..Options::default() });
+    session.set_brush_mode(BrushMode::Fill);
+    session.set_options(Options { threshold: 20.0, ..Options::default() });
     session.press_in(at(500.0, 500.0), layer);
     session.release(at(500.0, 500.0));
     assert!(session.annotations().is_empty(), "the tiles it still needs are not loaded");

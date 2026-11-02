@@ -1904,3 +1904,16 @@ tests.push({
     equal(await t.b.eval(`document.querySelector('button[aria-label="Next page"]').disabled`), true, 'Next page disabled at the end');
   },
 });
+
+tests.push({
+  name: 'the tool rail switches tools through the same rule and starts the brush painting',
+  async run(t) {
+    const w = await openWorkspace(t.b, t.base, t.project);
+    await t.b.key('e');
+    equal(await toolOptions(t), 'Paint* | Fuzzy fill | Brush | Eraser* | Stop at edgesShift | Filtered view', 'eraser mode from the key');
+    // The rail is another entry point: choosing Brush there is plain painting, as the B key is.
+    await t.b.eval(`document.querySelector('.tool-rail .tool[aria-label="Brush"]').click(), 1`);
+    equal((await w.state()).tool, 'Brush', 'tool after the rail');
+    equal(await toolOptions(t), 'Paint* | Fuzzy fill | Brush* | Eraser | Stop at edgesShift | Filtered view', 'the rail resets the brush to painting');
+  },
+});

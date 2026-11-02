@@ -82,7 +82,7 @@ impl Session {
     /// Starts changing the brush's size around `centre` (F where the pointer is); false when the
     /// brush is not painting or something else is in progress.
     pub fn begin_brush_sizing(&mut self, centre: Point) -> bool {
-        if self.tool != Tool::Brush || self.options.fill || !matches!(self.gesture, Gesture::Idle) {
+        if self.tool != Tool::Brush || self.brush.fills() || !matches!(self.gesture, Gesture::Idle) {
             return false;
         }
         self.gesture = Gesture::BrushSizing { centre: self.inside(centre), before: self.options.brush_size };
@@ -160,7 +160,7 @@ impl Session {
             return;
         }
         // Ctrl inverts a stroke: the brush erases, the eraser paints.
-        let erasing = self.options.eraser != pointer.modifiers.ctrl;
+        let erasing = self.brush.erases() != pointer.modifiers.ctrl;
         if self.label.is_none() && !erasing {
             self.notice = Some("Add a label that allows brush shapes on the Labels tab first.".into());
             return;
@@ -171,7 +171,7 @@ impl Session {
             return;
         }
         let at = self.inside(pointer.at);
-        if self.options.fill {
+        if self.brush.fills() {
             self.gesture = Gesture::Filling {
                 seed: at,
                 anchor: pointer.at,
@@ -330,7 +330,7 @@ impl Session {
         if self.tool != Tool::Brush {
             return false;
         }
-        if self.options.fill {
+        if self.brush.fills() {
             let step = if larger { THRESHOLD_STEP } else { -THRESHOLD_STEP };
             self.options.threshold = (self.options.threshold + step).clamp(0.0, MAX_THRESHOLD);
         } else {

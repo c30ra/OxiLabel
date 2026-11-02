@@ -12,7 +12,9 @@ use crate::{
 
 mod brush;
 mod drawing;
+mod relabel;
 mod select;
+mod tools;
 
 /// The image every test edits.
 const IMAGE: (u32, u32) = (1000, 800);
