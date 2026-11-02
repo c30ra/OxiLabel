@@ -1,7 +1,9 @@
 //! Drawing and editing annotations on top of the tile viewer. The image's annotations, undo
-//! history, selection and the Select tool's gestures live in the editor session
-//! (`oxilabel_core::editor`); this layer is its adapter: browser events in, signals and canvas
-//! drawing out.
+//! history, selection and every gesture of the Select and drawing tools live in the editor
+//! session (`oxilabel_core::editor`); this layer is its adapter: browser events in, signals and
+//! canvas drawing out. It forwards presses, moves, releases, Enter, Backspace and Esc to the
+//! session, hands it the edge path a freehand polyline follows once the analysis tiles have one,
+//! and draws the session's preview. The brush, eraser and fuzzy fill are still the layer's.
 //!
 //! Select (V) is the default tool: click picks the topmost shape, drag moves the selection, the
 //! handles of a single selected shape edit it (rectangle handles resize; vertices drag; the round
@@ -19,9 +21,10 @@
 //! (U) fills the similar region around a click (`fill`), a drag changing the threshold. Freehand
 //! polylines can snap to edges (live-wire, `edges`) and the brush can stop at edges (painting
 //! only the similar region around the stroke's start); Shift inverts either while drawing. Esc
-//! first cancels the shape being drawn, then clears the selection, then returns to Select. Ctrl+Z
-//! and Ctrl+Y undo and redo. Ctrl+C copies the selection and Ctrl+X cuts it; Ctrl+V pastes the
-//! copies on any image of the project at the same place, selected (see `oxilabel_core::clipboard`).
+//! ends the layer's brush gesture, then the session cancels the shape being drawn, then clears
+//! the selection, and then the layer returns to Select. Ctrl+Z and Ctrl+Y undo and redo. Ctrl+C
+//! copies the selection and Ctrl+X cuts it; Ctrl+V pastes the copies on any image of the project
+//! at the same place, selected (see `oxilabel_core::clipboard`).
 //!
 //! Holding Q or the right mouse button opens a pie at the cursor: with Select active the tool pie
 //! (then the label pie), with a drawing tool its options pie, with a shape selected the label pie
@@ -41,16 +44,13 @@ use oxilabel_core::{
     annotation::{Annotation, Shape},
     attribute::Attributes,
     clipboard,
-    constraint::ShapeConstraints,
     edges::EdgeMap,
-    editor::{DRAG_THRESHOLD, HANDLE_REACH, MIN_SHAPE_SIZE, Modifiers, Options, Pointer, SNAP_DEGREES, Session, grip::GripKind, snap_turn},
-    ellipse::Ellipse,
+    editor::{Modifiers, Options, Pointer, Preview, Session, grip::GripKind},
     fill::{FillSettings, grow},
-    geometry::{Point, Rect, snap_angle, steps_along, steps_towards},
+    geometry::{Point, Rect},
     mask::{Bitmap, PixelRect},
     pyramid::Pyramid,
     history::Edit,
-    oriented::OrientedRect,
     keymap::Action,
     pie::{Compass, is_tap},
     settings::LabelStyle,
@@ -68,11 +68,6 @@ use crate::{
     viewer::{context_2d, typing_in_a_field},
 };
 
-/// Distance between freehand polyline vertices, in image pixels, and its limits; `[` and `]`
-/// change it by this factor.
-pub const DEFAULT_SPACING: f64 = 20.0;
-pub const MIN_SPACING: f64 = 1.0;
-pub const MAX_SPACING: f64 = 500.0;
 /// Brush diameter in image pixels, and its limits.
 pub const DEFAULT_BRUSH_SIZE: f64 = 20.0;
 pub const MIN_BRUSH_SIZE: f64 = 1.0;
@@ -99,7 +94,7 @@ thread_local! {
     static CLIPBOARD: RefCell<Option<(i64, Vec<Annotation>)>> = const { RefCell::new(None) };
 }
 
-pub use oxilabel_core::editor::Tool;
+pub use oxilabel_core::editor::{DEFAULT_SPACING, MAX_SPACING, MIN_SPACING, Tool};
 
 /// The tools a key selects directly (Tag opens its label pie instead).
 const KEY_TOOLS: [Tool; 7] = [Tool::Select, Tool::Rectangle, Tool::Polygon, Tool::Polyline, Tool::Points, Tool::Ellipse, Tool::Brush];
@@ -432,25 +427,10 @@ impl Editor {
     }
 }
 
-/// What the pointer is doing right now with a drawing tool (the Select tool's gestures are the
-/// session's).
+/// What the brush is doing right now (the Select and drawing tools' gestures are the session's).
 #[derive(Debug, Clone, PartialEq)]
 enum Gesture {
     Idle,
-    /// A rectangle from `start`; `dragged` is false while waiting for the second click.
-    Drawing { start: Point, current: Point, dragged: bool, square: bool, from_centre: bool },
-    /// An oriented rectangle: one or two points placed, the next follows the pointer.
-    Oriented { points: Vec<Point>, current: Point },
-    /// A polygon, polyline or points shape being placed vertex by vertex.
-    Path { points: Vec<Point>, current: Point },
-    /// A freehand polyline: vertices are added every `spacing` while the button is down.
-    Stroke { points: Vec<Point>, current: Point },
-    /// An ellipse from `start` (its centre, or a corner of its box); like a rectangle, it is
-    /// finished by releasing a drag or by a second click.
-    Ellipse { start: Point, current: Point, dragged: bool, circle: bool, from_centre: bool },
-    /// A fixed-size shape centred on `centre`, its angle following the pointer until a second
-    /// click sets it.
-    Placing { centre: Point, angle: f64 },
     /// A brush or eraser stroke; its pixels are in the `Stroke` kept beside the gesture.
     Painting,
     /// F with the brush: the outline stays at `centre` (where the pointer was) and the size
@@ -502,7 +482,6 @@ pub fn AnnotationLayer(
     };
     let defaults = move |id: i64| conform(id, &Attributes::new());
     let label_name = move |id: i64| all_labels.with_value(|labels| labels.iter().find(|l| l.id == id).map(|l| l.name.clone()).unwrap_or_default());
-    let constraints_of = move |id: i64| all_labels.with_value(|labels| labels.iter().find(|l| l.id == id).map(|l| l.constraints).unwrap_or_default());
     // The footprints the editor shows, by label (labels that show theirs).
     let footprints: StoredValue<HashMap<i64, Footprint>> =
         StoredValue::new(labels.iter().filter(|label| label.show_footprint).map(|label| (label.id, label.footprint)).collect());
@@ -510,17 +489,8 @@ pub fn AnnotationLayer(
     // they were made from: a region is only made again when either changes.
     let ghosts: StoredValue<HashMap<usize, (Shape, Footprint, Vec<Vec<Point>>)>> = StoredValue::new(HashMap::new());
     // The shape type the current tool draws and the current label's constraints, when the label
-    // fixes that type's size: the tool then places shapes instead of dragging them out.
-    let fixed_tool = move || -> Option<(ShapeType, ShapeConstraints)> {
-        let shape = match editor.tool.get_untracked() {
-            Tool::Rectangle if editor.tools.oriented.get_untracked() => ShapeType::OrientedRectangle,
-            Tool::Rectangle => ShapeType::Rectangle,
-            Tool::Ellipse => ShapeType::Ellipse,
-            _ => return None,
-        };
-        let constraints = constraints_of(editor.label.get_untracked()?);
-        constraints.fixes(shape).then_some((shape, constraints))
-    };
+    // fixes that type's size (the session then places shapes instead of dragging them out).
+    let fixed_shape = move || editor.peek(Session::fixed_shape);
 
     // Pointer position in canvas pixels and in image coordinates.
     let locate = move |ev: &ev::MouseEvent| -> Option<(Point, Point, View)> {
@@ -535,65 +505,6 @@ pub fn AnnotationLayer(
         at: point,
         scale: current.scale,
         modifiers: Modifiers { shift: ev.shift_key(), ctrl: ev.ctrl_key() || ev.meta_key(), alt: ev.alt_key() },
-    };
-
-    // Adds a finished shape with the current label, if it is valid and the label allows it.
-    let add_shape = move |shape: Shape| {
-        gesture.set(Gesture::Idle);
-        let Some(label) = editor.label.get_untracked() else { return };
-        if !label_allows(label, shape.shape_type()) {
-            editor.notice.set(Some(format!("“{}” cannot be used for this shape.", label_name(label))));
-            return;
-        }
-        if let Err(reason) = shape.validate(image_size.0, image_size.1) {
-            editor.notice.set(Some(format!("Not added: {reason}.")));
-            return;
-        }
-        let annotation = Annotation { attributes: defaults(label), ..Annotation::manual(label, shape) };
-        editor.update(|session| session.apply(Edit::Add { index: session.annotations().len(), annotation }));
-    };
-    let finish_rectangle = move |start: Point, end: Point, square: bool, from_centre: bool, scale: f64| {
-        let rect = Rect::from_drag(start, end, square, from_centre).clamped(width, height);
-        if rect.width() * scale < MIN_SHAPE_SIZE || rect.height() * scale < MIN_SHAPE_SIZE {
-            gesture.set(Gesture::Idle);
-            return;
-        }
-        add_shape(Shape::Rectangle(rect));
-    };
-    // The ellipse filling the box a drag spans (as for rectangles), shrunk around its centre
-    // to stay inside the image.
-    let ellipse_from = move |start: Point, end: Point, circle: bool, from_centre: bool| {
-        let rect = Rect::from_drag(start, end, circle, from_centre);
-        let ellipse = Ellipse::in_box(rect.min, rect.max);
-        // Exactly round: the box's halves can differ in the last bit.
-        let ellipse = if circle { Ellipse { ry: ellipse.rx, ..ellipse } } else { ellipse };
-        ellipse.fitted(image_size.0, image_size.1)
-    };
-    let finish_ellipse = move |start: Point, end: Point, circle: bool, from_centre: bool, scale: f64| {
-        let ellipse = ellipse_from(start, end, circle, from_centre);
-        if ellipse.rx.min(ellipse.ry) * scale >= MIN_SHAPE_SIZE / 2.0 {
-            add_shape(Shape::Ellipse(ellipse));
-        } else {
-            gesture.set(Gesture::Idle);
-        }
-    };
-    // Finishes the polygon, polyline or points being placed.
-    let finish_path = move || {
-        let (Gesture::Path { mut points, .. } | Gesture::Stroke { mut points, .. }) = gesture.get_untracked() else { return };
-        // A double-click places the same point twice.
-        points.dedup_by(|a, b| a.distance(*b) < 0.5);
-        let shape = match editor.tool.get_untracked() {
-            Tool::Polygon => Shape::Polygon { points },
-            Tool::Polyline => Shape::Polyline { points },
-            Tool::Points => Shape::Points { points },
-            _ => return gesture.set(Gesture::Idle),
-        };
-        add_shape(shape);
-    };
-    // Shift (or the snap option) snaps a line from the last placed vertex to 15° steps.
-    let snapped = move |from: Option<Point>, to: Point, shift: bool| match from {
-        Some(from) if shift != editor.tools.snap.get_untracked() => inside(snap_angle(from, to, SNAP_DEGREES)),
-        _ => to,
     };
 
     // `[` and `]`: the brush size in steps of 25%, but at least one pixel.
@@ -923,7 +834,7 @@ pub fn AnnotationLayer(
         Pie { label: "Labels", items, centre, wide: false, held, opened_at: now() }
     };
     let options_pie = move |centre: Point, held: bool| {
-        let drawing = matches!(gesture.get_untracked(), Gesture::Path { .. });
+        let drawing = editor.peek(|session| matches!(session.preview(), Some(Preview::Path { .. })));
         let (label, mut items) = match editor.tool.get_untracked() {
             Tool::Rectangle => {
                 let oriented = editor.tools.oriented.get_untracked();
@@ -1037,14 +948,6 @@ pub fn AnnotationLayer(
         };
         pointer.set(centre);
         pie.set(Some(opened));
-    };
-    let undo_point = move || match gesture.get_untracked() {
-        Gesture::Path { mut points, current } if points.len() > 1 => {
-            points.pop();
-            gesture.set(Gesture::Path { points, current });
-        }
-        Gesture::Path { .. } => gesture.set(Gesture::Idle),
-        _ => {}
     };
     // Adds `id` as a tag of the image, or removes it if the image has it.
     let toggle_tag = move |id: i64| {
@@ -1171,11 +1074,11 @@ pub fn AnnotationLayer(
             }
             PieAction::FinishShape => {
                 close_pie();
-                finish_path();
+                editor.update(|session| session.key(Action::Finish));
             }
             PieAction::UndoPoint => {
                 close_pie();
-                undo_point();
+                editor.update(|session| session.key(Action::RemoveLastPoint));
             }
         }
     };
@@ -1285,107 +1188,37 @@ pub fn AnnotationLayer(
     });
 
     // ---- Pointer handling on the canvas.
-    let draw_press = move |ev: &ev::PointerEvent, tool: Tool, point: Point, current: View| {
+    // The brush and fuzzy fill only; every other tool's press is the session's.
+    let draw_press = move |ev: &ev::PointerEvent, point: Point, current: View| {
         // Ctrl inverts a brush stroke: the brush erases, the eraser paints.
-        let erasing = tool == Tool::Brush && editor.tools.eraser.get_untracked() != (ev.ctrl_key() || ev.meta_key());
+        let erasing = editor.tools.eraser.get_untracked() != (ev.ctrl_key() || ev.meta_key());
         if editor.label.get_untracked().is_none() && !erasing {
-            let shape = tool.name().to_lowercase();
-            editor.notice.set(Some(format!("Add a label that allows {shape} shapes on the Labels tab first.")));
+            editor.notice.set(Some("Add a label that allows brush shapes on the Labels tab first.".into()));
             return;
         }
         let point = inside(point);
-        // A label with a fixed size places its shape: one click, and one more for its angle.
-        if let Some((shape_type, constraints)) = fixed_tool() {
-            let (centre, angle) = match gesture.get_untracked() {
-                Gesture::Placing { centre, angle } => (centre, angle),
-                _ if constraints.needs_angle(shape_type) => return gesture.set(Gesture::Placing { centre: point, angle: 0.0 }),
-                _ => (point, 0.0),
-            };
-            match constraints.place(shape_type, centre, angle, image_size.0, image_size.1) {
-                Some(shape) => add_shape(shape),
-                None => {
-                    gesture.set(Gesture::Idle);
-                    editor.notice.set(Some(format!("“{}” has a fixed size that does not fit this image.", label_name(editor.label.get_untracked().unwrap_or_default()))));
+        if !erasing && !label_allows(editor.label.get_untracked().unwrap_or_default(), ShapeType::Mask) {
+            let label = label_name(editor.label.get_untracked().unwrap_or_default());
+            editor.notice.set(Some(format!("“{label}” cannot be used for masks.")));
+        } else if editor.tools.fill.get_untracked() {
+            let anchor = Point::new(f64::from(ev.client_x()), f64::from(ev.client_y()));
+            let base = editor.tools.threshold.get_untracked();
+            gesture.set(Gesture::Filling { seed: point, anchor, base, erase: erasing, released: false });
+            regrow();
+        } else {
+            let label = editor.label.get_untracked().unwrap_or_default();
+            let size = editor.tools.brush_size.get_untracked();
+            let core = MaskStroke::begin(erasing, label, size, image_size, point);
+            stroke.set_value(Some(Stroke::start(core, color_of(label))));
+            limit_seed.set_value(Some(point));
+            limit_level.set_value(None);
+            update_limit(ev.shift_key(), current, false);
+            stroke.update_value(|s| {
+                if let Some(s) = s {
+                    editor.peek(|session| s.extend(point, session.annotations(), &color_of));
                 }
-            }
-            return;
-        }
-        match (tool, gesture.get_untracked()) {
-            (Tool::Rectangle, Gesture::Drawing { start, square, from_centre, .. }) => {
-                finish_rectangle(start, point, square, from_centre, current.scale)
-            }
-            (Tool::Rectangle, Gesture::Oriented { mut points, .. }) => {
-                let point = snapped(points.last().copied(), point, ev.shift_key());
-                points.push(point);
-                if let [a, b, c] = points[..] {
-                    add_shape(Shape::OrientedRectangle(OrientedRect::from_three_points(a, b, c)));
-                } else {
-                    gesture.set(Gesture::Oriented { points, current: point });
-                }
-            }
-            (Tool::Rectangle, _) if editor.tools.oriented.get_untracked() => {
-                gesture.set(Gesture::Oriented { points: vec![point], current: point });
-            }
-            (Tool::Rectangle, _) => gesture.set(Gesture::Drawing {
-                start: point,
-                current: point,
-                dragged: false,
-                square: ev.shift_key() != editor.tools.square.get_untracked(),
-                from_centre: ev.alt_key() != editor.tools.from_centre.get_untracked(),
-            }),
-            (Tool::Ellipse, Gesture::Ellipse { start, circle, from_centre, .. }) => finish_ellipse(start, point, circle, from_centre, current.scale),
-            (Tool::Ellipse, _) => gesture.set(Gesture::Ellipse {
-                start: point,
-                current: point,
-                dragged: false,
-                circle: ev.shift_key(),
-                from_centre: ev.alt_key() != editor.tools.ellipse_from_centre.get_untracked(),
-            }),
-            (Tool::Brush, _) if !erasing && !label_allows(editor.label.get_untracked().unwrap_or_default(), ShapeType::Mask) => {
-                let label = label_name(editor.label.get_untracked().unwrap_or_default());
-                editor.notice.set(Some(format!("“{label}” cannot be used for masks.")));
-            }
-            (Tool::Brush, _) if editor.tools.fill.get_untracked() => {
-                let anchor = Point::new(f64::from(ev.client_x()), f64::from(ev.client_y()));
-                let base = editor.tools.threshold.get_untracked();
-                gesture.set(Gesture::Filling { seed: point, anchor, base, erase: erasing, released: false });
-                regrow();
-            }
-            (Tool::Brush, _) => {
-                let label = editor.label.get_untracked().unwrap_or_default();
-                let size = editor.tools.brush_size.get_untracked();
-                let core = MaskStroke::begin(erasing, label, size, image_size, point);
-                stroke.set_value(Some(Stroke::start(core, color_of(label))));
-                limit_seed.set_value(Some(point));
-                limit_level.set_value(None);
-                update_limit(ev.shift_key(), current, false);
-                stroke.update_value(|s| {
-                    if let Some(s) = s {
-                        editor.peek(|session| s.extend(point, session.annotations(), &color_of));
-                    }
-                });
-                gesture.set(Gesture::Painting);
-            }
-            (Tool::Polyline, _) if editor.tools.freehand.get_untracked() => {
-                let snapping = editor.tools.edge_snap.get_untracked() != ev.shift_key();
-                let start = snapping.then(|| edge_path(None, point, current)).flatten().and_then(|path| path.first().copied()).unwrap_or(point);
-                gesture.set(Gesture::Stroke { points: vec![start], current: start });
-            }
-            (Tool::Points, _) if editor.tools.single_point.get_untracked() => add_shape(Shape::Points { points: vec![point] }),
-            (_, Gesture::Path { mut points, .. }) => {
-                // Clicking a polygon's first vertex closes it.
-                let closes = tool == Tool::Polygon
-                    && points.len() >= 3
-                    && current.to_screen(points[0]).distance(current.to_screen(point)) <= HANDLE_REACH;
-                if closes {
-                    finish_path();
-                } else {
-                    let next = if tool == Tool::Points { point } else { snapped(points.last().copied(), point, ev.shift_key()) };
-                    points.push(next);
-                    gesture.set(Gesture::Path { points, current: next });
-                }
-            }
-            _ => gesture.set(Gesture::Path { points: vec![point], current: point }),
+            });
+            gesture.set(Gesture::Painting);
         }
     };
     let on_pointer_down = move |ev: ev::PointerEvent| {
@@ -1415,61 +1248,20 @@ pub fn AnnotationLayer(
             canvas.set_pointer_capture(ev.pointer_id()).ok();
         }
         match editor.tool.get_untracked() {
-            Tool::Select => editor.update(|session| session.press(pointer_at(&ev, point, current))),
-            tool => draw_press(&ev, tool, point, current),
+            Tool::Brush => draw_press(&ev, point, current),
+            _ => {
+                let edges = |from, to| edge_path(from, to, current);
+                editor.update(|session| session.press_with_edges(pointer_at(&ev, point, current), Some(&edges)));
+            }
         }
     };
 
     let on_pointer_move = move |ev: ev::PointerEvent| {
-        let Some((screen, point, current)) = locate(&ev) else { return };
-        if editor.tool.get_untracked() == Tool::Brush || fixed_tool().is_some() {
+        let Some((_, point, current)) = locate(&ev) else { return };
+        if editor.tool.get_untracked() == Tool::Brush || fixed_shape().is_some() {
             hover.set(Some(inside(point)));
         }
         match gesture.get_untracked() {
-            // Turning a fixed-size shape: its width side points at the pointer.
-            Gesture::Placing { centre, .. } => {
-                let angle = snap_turn((point.y - centre.y).atan2(point.x - centre.x), ev.shift_key() != editor.tools.snap.get_untracked());
-                gesture.set(Gesture::Placing { centre, angle });
-            }
-            Gesture::Drawing { start, dragged, .. } => {
-                let moved = current.to_screen(start).distance(screen) > DRAG_THRESHOLD;
-                gesture.set(Gesture::Drawing {
-                    start,
-                    current: inside(point),
-                    dragged: dragged || (moved && ev.buttons() & 1 == 1),
-                    square: ev.shift_key() != editor.tools.square.get_untracked(),
-                    from_centre: ev.alt_key() != editor.tools.from_centre.get_untracked(),
-                });
-            }
-            Gesture::Ellipse { start, dragged, .. } => {
-                let moved = current.to_screen(start).distance(screen) > DRAG_THRESHOLD;
-                gesture.set(Gesture::Ellipse {
-                    start,
-                    current: inside(point),
-                    dragged: dragged || (moved && ev.buttons() & 1 == 1),
-                    circle: ev.shift_key(),
-                    from_centre: ev.alt_key() != editor.tools.ellipse_from_centre.get_untracked(),
-                });
-            }
-            Gesture::Stroke { mut points, .. } => {
-                let to = inside(point);
-                let last = *points.last().expect("a stroke starts with a point");
-                let spacing = editor.tools.spacing.get_untracked();
-                // Snapping follows the edge path from the last vertex; until its tiles are
-                // loaded the line follows the pointer.
-                let snapping = editor.tools.edge_snap.get_untracked() != ev.shift_key();
-                let current = match snapping.then(|| edge_path(Some(last), to, current)).flatten() {
-                    Some(path) => {
-                        points.extend(steps_along(&path, spacing));
-                        *path.last().expect("a path has its ends")
-                    }
-                    None => {
-                        points.extend(steps_towards(last, to, spacing));
-                        to
-                    }
-                };
-                gesture.set(Gesture::Stroke { points, current });
-            }
             Gesture::BrushSizing { centre, before } => {
                 let size = before + 2.0 * (point.x - centre.x);
                 editor.tools.brush_size.set(size.round().clamp(MIN_BRUSH_SIZE, MAX_BRUSH_SIZE));
@@ -1491,20 +1283,10 @@ pub fn AnnotationLayer(
                 });
                 gesture.set(Gesture::Painting);
             }
-            Gesture::Oriented { points, .. } => {
-                let current = snapped(points.last().copied(), inside(point), ev.shift_key() && points.len() == 1);
-                gesture.set(Gesture::Oriented { points, current });
+            Gesture::Idle if editor.peek(Session::is_busy) => {
+                let edges = |from, to| edge_path(from, to, current);
+                editor.update(|session| session.move_to_with_edges(pointer_at(&ev, point, current), Some(&edges)));
             }
-            Gesture::Path { points, .. } => {
-                let current = if editor.tool.get_untracked() == Tool::Points {
-                    inside(point)
-                } else {
-                    snapped(points.last().copied(), inside(point), ev.shift_key())
-                };
-                gesture.set(Gesture::Path { points, current });
-            }
-            // The Select tool's gestures are the session's.
-            Gesture::Idle if editor.peek(Session::is_busy) => editor.update(|session| session.move_to(pointer_at(&ev, point, current))),
             Gesture::Idle => cursor.set(match editor.tool.get_untracked() {
                 Tool::Select => match editor.peek(|session| session.grip_at(point, current.scale)).map(|grip| grip.kind) {
                     Some(GripKind::Resize(handle)) => handle.cursor(),
@@ -1522,24 +1304,6 @@ pub fn AnnotationLayer(
     let on_pointer_up = move |ev: ev::PointerEvent| {
         let Some((_, point, current)) = locate(&ev) else { return };
         match gesture.get_untracked() {
-            // A click without dragging leaves the rectangle open for a second click.
-            Gesture::Drawing { start, current: end, dragged: true, square, from_centre } => {
-                finish_rectangle(start, end, square, from_centre, current.scale)
-            }
-            // A click without dragging leaves the ellipse open for a second click.
-            Gesture::Ellipse { start, current: end, dragged: true, circle, from_centre } => finish_ellipse(start, end, circle, from_centre, current.scale),
-            // Releasing ends a freehand stroke; a stroke too short for two vertices keeps its end.
-            Gesture::Stroke { mut points, current: end } => {
-                if points.len() < 2 && points[0].distance(end) * current.scale >= MIN_SHAPE_SIZE {
-                    points.push(end);
-                }
-                if points.len() < 2 {
-                    gesture.set(Gesture::Idle);
-                } else {
-                    gesture.set(Gesture::Stroke { points, current: end });
-                    finish_path();
-                }
-            }
             Gesture::Painting => finish_stroke(),
             // Committed now, or once the tiles it still needs have arrived.
             Gesture::Filling { seed, anchor, base, erase, released: false } => {
@@ -1548,8 +1312,8 @@ pub fn AnnotationLayer(
                     commit_fill();
                 }
             }
-            // The Select tool's gestures are the session's.
-            Gesture::Idle if editor.peek(Session::is_busy) => editor.update(|session| session.release(pointer_at(&ev, point, current))),
+            // Drawing and Select gestures are the session's.
+            _ if editor.peek(Session::is_busy) => editor.update(|session| session.release(pointer_at(&ev, point, current))),
             _ => {}
         }
     };
@@ -1594,7 +1358,6 @@ pub fn AnnotationLayer(
             ev.prevent_default();
             return;
         }
-        let drawing_path = matches!(gesture.get_untracked(), Gesture::Path { .. });
         // A stroke keeps the indices of the masks it changes: no undo or redo under it.
         let painting = gesture.get_untracked() == Gesture::Painting;
         let tool = editor.tool.get_untracked();
@@ -1610,8 +1373,10 @@ pub fn AnnotationLayer(
         if (is(Action::Undo) || is(Action::Redo)) && painting {
         } else if let Some(action) = [Action::Redo, Action::Undo, Action::SelectNone, Action::SelectAll].into_iter().find(|&action| is(action)) {
             editor.update(|session| session.key(action));
-        } else if is(Action::Finish) && drawing_path {
-            finish_path();
+        } else if is(Action::Finish) {
+            if !editor.update(|session| session.key(Action::Finish)) {
+                return;
+            }
         } else if (smaller || larger) && tool == Tool::Brush && editor.tools.fill.get_untracked() {
             change_threshold(larger);
         } else if (smaller || larger) && tool == Tool::Brush {
@@ -1624,11 +1389,13 @@ pub fn AnnotationLayer(
             let factor = if larger { SIZE_STEP } else { 1.0 / SIZE_STEP };
             editor.tools.spacing.update(|spacing| *spacing = (*spacing * factor).clamp(MIN_SPACING, MAX_SPACING));
             editor.notice.set(Some(format!("Freehand spacing {:.0} px", editor.tools.spacing.get_untracked())));
-        } else if is(Action::RemoveLastPoint) && drawing_path {
-            undo_point();
+        } else if is(Action::RemoveLastPoint) {
+            if !editor.update(|session| session.key(Action::RemoveLastPoint)) {
+                return;
+            }
         } else if is(Action::Cancel) {
-            // Esc first drops the shape being drawn; the session then ends its gesture or clears
-            // the selection; otherwise it returns to Select.
+            // Esc first drops the brush gesture, then the session ends its drawing gesture, then
+            // clears the selection; otherwise it returns to Select.
             if gesture.get_untracked() != Gesture::Idle {
                 cancel_gesture();
             } else if !editor.update(|session| session.key(Action::Cancel)) {
@@ -1805,48 +1572,47 @@ pub fn AnnotationLayer(
             draw::brush_outline(&context, current, at, brush_radius);
         }
         let pen = editor.label.get_untracked().map(color_of).unwrap_or_else(|| "#ffffff".to_owned());
-        // The fixed-size shape the next click places: at the pointer, or turning.
-        if let Some((shape_type, constraints)) = fixed_tool() {
-            let placing = match gesture {
-                Gesture::Placing { centre, angle } => Some((centre, angle, true)),
-                Gesture::Idle => hover.get_untracked().map(|at| (at, 0.0, false)),
-                _ => None,
-            };
-            if let Some((centre, angle, turning)) = placing {
-                if let Some(shape) = constraints.place(shape_type, centre, angle, image_size.0, image_size.1) {
+        // The fixed-size shape the next click places: it hangs at the pointer until a click fixes
+        // its centre, after which the session turns it with the pointer.
+        if editor.peek(Session::preview).is_none() {
+            if let Some(at) = hover.get_untracked() {
+                if let Some((shape, size)) = editor.peek(|session| session.fixed_preview(at)) {
                     draw::shape(&context, current, &shape, Look { color: &pen, selected: false, dashed: true });
-                    let text = match (turning, constraints.size(shape_type)) {
-                        (true, _) => format!("{:.0}°", angle.to_degrees()),
-                        (false, Some((a, b))) => format!("{a:.0} × {b:.0}"),
-                        (false, None) => String::new(),
+                    let text = match size {
+                        Some((a, b)) => format!("{a:.0} × {b:.0}"),
+                        None => String::new(),
                     };
                     draw::tag(&context, current.to_screen(shape.bounds().min), &text, &pen);
                 }
             }
         }
-        match gesture {
-            Gesture::Drawing { start, current: end, square, from_centre, .. } => {
-                let rect = Rect::from_drag(start, end, square, from_centre).clamped(width, height);
+        match editor.peek(Session::preview) {
+            Some(Preview::Rectangle(rect)) => {
                 draw::shape(&context, current, &Shape::Rectangle(rect), Look { color: &pen, selected: false, dashed: true });
                 draw::tag(&context, current.to_screen(rect.min), &format!("{:.0} × {:.0}", rect.width(), rect.height()), &pen);
             }
-            Gesture::Oriented { points, current: next } => match points[..] {
-                [a] => draw::path_preview(&context, current, &[a], next, false, false, &pen),
-                [a, b] => draw::oriented_preview(&context, current, OrientedRect::from_three_points(a, b, next), &pen),
-                _ => {}
+            Some(Preview::Oriented { points, current: next, shape }) => match shape {
+                Some(rect) => draw::oriented_preview(&context, current, rect, &pen),
+                None => match points[..] {
+                    [a] => draw::path_preview(&context, current, &[a], next, false, false, &pen),
+                    _ => {}
+                },
             },
-            Gesture::Path { points, current: next } => {
-                let tool = editor.tool.get_untracked();
-                draw::path_preview(&context, current, &points, next, tool == Tool::Polygon, tool == Tool::Points, &pen);
+            Some(Preview::Path { points, current: next, shape }) => {
+                draw::path_preview(&context, current, &points, next, shape == ShapeType::Polygon, shape == ShapeType::Points, &pen);
             }
-            Gesture::Stroke { points, current: next } => draw::path_preview(&context, current, &points, next, false, false, &pen),
-            Gesture::Ellipse { start, current: end, circle, from_centre, .. } => {
-                let ellipse = ellipse_from(start, end, circle, from_centre);
+            Some(Preview::Freehand { points, current: next }) => draw::path_preview(&context, current, &points, next, false, false, &pen),
+            Some(Preview::Ellipse(ellipse)) => {
                 let shape = Shape::Ellipse(ellipse);
                 draw::shape(&context, current, &shape, Look { color: &pen, selected: false, dashed: true });
                 draw::tag(&context, current.to_screen(shape.bounds().min), &side_panel::ellipse_size(&ellipse), &pen);
             }
-            _ => {}
+            Some(Preview::Placing { shape, angle, .. }) => {
+                draw::shape(&context, current, &shape, Look { color: &pen, selected: false, dashed: true });
+                let text = format!("{:.0}°", angle.to_degrees());
+                draw::tag(&context, current.to_screen(shape.bounds().min), &text, &pen);
+            }
+            None => {}
         }
     };
     Effect::new(move |_| {
@@ -1871,19 +1637,32 @@ pub fn AnnotationLayer(
             editor.busy.set(busy);
         }
     });
-    // The session's gestures follow the snap option.
+    // The session's drawing gestures follow the tool options.
     Effect::new(move |_| {
-        let snap = editor.tools.snap.get();
-        editor.update(|session| session.set_options(Options { snap, ..Options::default() }));
+        let options = Options {
+            snap: editor.tools.snap.get(),
+            square: editor.tools.square.get(),
+            from_centre: editor.tools.from_centre.get(),
+            oriented: editor.tools.oriented.get(),
+            freehand: editor.tools.freehand.get(),
+            spacing: editor.tools.spacing.get(),
+            single_point: editor.tools.single_point.get(),
+            ellipse_from_centre: editor.tools.ellipse_from_centre.get(),
+            edge_snap: editor.tools.edge_snap.get(),
+        };
+        editor.update(|session| session.set_options(options));
+    });
+    // The session acts with the editor's tool and label; a tool change drops the gesture begun
+    // with the old one and a label change drops a stale fixed-size placement.
+    Effect::new(move |_| {
+        let tool = editor.tool.get();
+        editor.update(|session| session.set_tool(tool));
+    });
+    Effect::new(move |_| {
+        let label = editor.label.get();
+        editor.update(|session| session.set_label(label));
     });
     // Drop a half-drawn shape when the tool or a drawing mode changes.
-    // Another label can fix another size, or none: drop a shape being placed.
-    Effect::new(move |_| {
-        editor.label.track();
-        if matches!(gesture.get_untracked(), Gesture::Placing { .. }) {
-            gesture.set(Gesture::Idle);
-        }
-    });
     Effect::new(move |_| {
         editor.tool.track();
         editor.tools.oriented.track();
@@ -1925,17 +1704,29 @@ pub fn AnnotationLayer(
             data-count=move || editor.with_annotations(<[Annotation]>::len)
             data-selected={move || editor.selection().iter().map(usize::to_string).collect::<Vec<_>>().join(",")}
             data-revision=move || editor.revision()
-            data-drawing={move || match gesture.get() {
-                Gesture::Path { points, .. } | Gesture::Oriented { points, .. } | Gesture::Stroke { points, .. } => points.len(),
-                Gesture::Painting | Gesture::Filling { .. } => 1,
-                _ => 0,
+            data-drawing={move || {
+                editor.track_changes();
+                let drawn = editor.peek(|session| match session.preview() {
+                    Some(Preview::Path { points, .. } | Preview::Oriented { points, .. } | Preview::Freehand { points, .. }) => points.len(),
+                    _ => 0,
+                });
+                if drawn > 0 {
+                    drawn
+                } else {
+                    match gesture.get() {
+                        Gesture::Painting | Gesture::Filling { .. } => 1,
+                        _ => 0,
+                    }
+                }
             }}
             style:cursor=canvas_cursor
             on:pointerdown=on_pointer_down
             on:pointermove=on_pointer_move
             on:pointerup=on_pointer_up
             on:pointerleave=move |_| hover.set(None)
-            on:dblclick=move |_| finish_path()
+            on:dblclick=move |_| {
+                editor.update(|session| session.key(Action::Finish));
+            }
             on:contextmenu=|ev: ev::MouseEvent| ev.prevent_default()
         ></canvas>
     }

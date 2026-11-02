@@ -337,6 +337,41 @@ fn escape_cancels_the_shape_then_the_selection_then_is_left_to_the_caller() {
 }
 
 #[test]
+fn escape_drops_every_kind_of_drawing_gesture() {
+    let oriented = crate::editor::Options { oriented: true, ..Default::default() };
+    let freehand = crate::editor::Options { freehand: true, ..Default::default() };
+    let cases = [
+        (Tool::Rectangle, crate::editor::Options::default()),
+        (Tool::Rectangle, oriented),
+        (Tool::Polygon, crate::editor::Options::default()),
+        (Tool::Polyline, crate::editor::Options::default()),
+        (Tool::Polyline, freehand),
+        (Tool::Points, crate::editor::Options::default()),
+        (Tool::Ellipse, crate::editor::Options::default()),
+    ];
+    for (tool, options) in cases {
+        let mut session = with_options(drawing(tool), options);
+        session.press(at(100.0, 100.0));
+        session.move_to(at(300.0, 250.0));
+        assert!(session.is_busy(), "{tool:?} started");
+        assert!(session.key(Action::Cancel));
+        assert!(!session.is_busy(), "{tool:?} cancelled");
+        session.release(at(300.0, 250.0));
+        assert!(session.annotations().is_empty(), "{tool:?} added nothing");
+    }
+
+    // A fixed-size shape waiting for its angle is cancelled the same way.
+    let mut session = with_options(session(vec![]), oriented);
+    session.set_tool(Tool::Rectangle);
+    session.set_label(Some(2));
+    click(&mut session, at(500.0, 300.0));
+    assert!(session.is_busy());
+    assert!(session.key(Action::Cancel));
+    assert!(!session.is_busy());
+    assert!(session.annotations().is_empty());
+}
+
+#[test]
 fn changing_tools_drops_the_shape_being_drawn() {
     let mut session = drawing(Tool::Rectangle);
     session.press(at(100.0, 100.0));

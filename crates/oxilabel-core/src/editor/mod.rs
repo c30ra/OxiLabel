@@ -8,7 +8,8 @@
 //! run, a reload) cancels a gesture that holds annotation indices, so it can never change the
 //! wrong annotation. A gesture's own result is applied after it has ended.
 //!
-//! The Select tool's gestures are in `select`; which handles a shape has is in `grip`.
+//! The Select tool's gestures are in `select`, the drawing tools' in `draw`, and which handles a
+//! shape has is in `grip`.
 
 use std::collections::BTreeSet;
 
@@ -228,8 +229,9 @@ impl Gesture {
 pub enum Preview {
     /// The rectangle as it would be made now, inside the image.
     Rectangle(Rect),
-    /// An oriented rectangle: one or two points placed, the next following the pointer.
-    Oriented { points: Vec<Point>, current: Point },
+    /// An oriented rectangle: one or two points placed, the next following the pointer; with two
+    /// placed, `shape` is the rectangle they and the pointer make.
+    Oriented { points: Vec<Point>, current: Point, shape: Option<OrientedRect> },
     /// The vertices placed so far and the one following the pointer; `shape` is what the tool
     /// draws (which closes and which joins the dots).
     Path { points: Vec<Point>, current: Point, shape: ShapeType },
