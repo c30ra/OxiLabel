@@ -235,7 +235,7 @@ fn an_oriented_rectangle_turns_by_its_handle_in_steps_with_shift_or_the_snap_opt
     assert!((angle_of(shape(&session, 0)) - 45f64.to_radians()).abs() < 1e-9);
 
     let mut session = super::session(vec![oriented(1)]);
-    session.set_options(Options { snap: true });
+    session.set_options(Options { snap: true, ..Options::default() });
     click(&mut session, at(500.0, 400.0));
     drag(&mut session, handle, around((500.0, 400.0), 50.0 - 90.0, 100.0));
     assert!((angle_of(shape(&session, 0)) - 45f64.to_radians()).abs() < 1e-9, "the snap option, without Shift");
