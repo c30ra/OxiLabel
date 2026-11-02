@@ -2,6 +2,35 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.3.0 - 2026-11-02
+#### Features
+- (**editor**) switch tools and relabel through one session rule - (905d42a) - c30ra
+#### Bug Fixes
+- (**editor**) route pie Tag and F-sizing tool choice through the shared entry-point rules - (16e80e5) - c30ra
+- (**editor**) one session rule for Escape, tool keys, drags and tags - (fa53086) - c30ra
+- (**editor**) keep fuzzy fill when the eraser is chosen and cover the rail - (81be435) - c30ra
+#### Documentation
+- record the final review fixes on the tools and relabelling ticket - (eadd733) - c30ra
+- mark the brush and fill ticket done with implementation notes - (57577e4) - c30ra
+- mark tools and relabelling ticket done with implementation notes - (d73a2b8) - c30ra
+- mark the drawing-tools ticket done with implementation notes - (08927a7) - c30ra
+#### Refactoring
+- (**editor**) one label lookup and honest brush, preview and pie names - (b67aaf1) - c30ra
+- (**editor**) move the brush, its sizing and the fuzzy fill into the editor session - (3d054a7) - c30ra
+- forward the drawing tools' events to the editor session - (0c3c884) - c30ra
+- move tools and drawing gestures into the editor session - (3dfe9be) - c30ra
+#### Miscellaneous Chores
+- (**merge**) final code-review fixes - (59e1236) - c30ra
+- (**merge**) code-review fixes - (22f5f9e) - c30ra
+- (**merge**) ticket 13 brush and fill in the editor session - (f9cfce8) - c30ra
+- (**merge**) ticket 13 brush and fill in the editor session - (bd38ca8) - c30ra
+- (**merge**) ticket 14 one rule for tools and relabel - (b6067c7) - c30ra
+- (**merge**) the integration tip into 14 - (620dfad) - c30ra
+- (**merge**) ticket 12 drawing tools in the editor session - (0f61b09) - c30ra
+- merge the tools and drawing-session commit into 14 - (2736bc3) - c30ra
+
+- - -
+
 ## v0.2.0 - 2026-10-26
 #### Features
 - (**ui**) limit the image grid to admins - (00ed2c7) - c30ra
