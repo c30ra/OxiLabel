@@ -53,6 +53,14 @@ impl Session {
         constraints.fixes(shape).then_some((shape, constraints))
     }
 
+    /// The fixed-size shape a click at `point` would place, and its size, for the layer's preview
+    /// while the pointer moves before the click.
+    pub fn fixed_preview(&self, point: Point) -> Option<(Shape, Option<(f64, f64)>)> {
+        let (shape_type, constraints) = self.fixed_shape()?;
+        let shape = constraints.place(shape_type, point, 0.0, self.image.0, self.image.1)?;
+        Some((shape, constraints.size(shape_type)))
+    }
+
     /// `to`, snapped to `SNAP_DEGREES` steps from `from` when Shift (or the snap option, which
     /// Shift inverts) is on, and kept inside the image.
     fn snapped(&self, from: Option<Point>, to: Point, shift: bool) -> Point {
@@ -347,7 +355,13 @@ impl Session {
             Gesture::Drawing { start, current, square, from_centre, .. } => {
                 Some(Preview::Rectangle(Rect::from_drag(*start, *current, *square, *from_centre).clamped(width, height)))
             }
-            Gesture::Oriented { points, current } => Some(Preview::Oriented { points: points.clone(), current: *current }),
+            Gesture::Oriented { points, current } => {
+                let shape = match points[..] {
+                    [a, b] => Some(OrientedRect::from_three_points(a, b, *current)),
+                    _ => None,
+                };
+                Some(Preview::Oriented { points: points.clone(), current: *current, shape })
+            }
             Gesture::Path { points, current } => {
                 Some(Preview::Path { points: points.clone(), current: *current, shape: self.tool.shape_type()? })
             }
