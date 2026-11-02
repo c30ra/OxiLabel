@@ -105,13 +105,46 @@ impl Tool {
     }
 }
 
-/// What the brush does: paint a mask, erase it, or fill the similar region around a click.
+/// What the brush does: paint or erase a mask, and whether a click fills the similar region
+/// instead of stroking. The two combine, so a fuzzy fill can erase the region from the masks.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum BrushMode {
     #[default]
     Paint,
     Erase,
     Fill,
+    /// Fuzzy fill in eraser mode: the filled region is cut from the masks.
+    FillErase,
+}
+
+impl BrushMode {
+    /// The mode with the eraser on or off, keeping the fill choice.
+    pub fn with_eraser(self, eraser: bool) -> BrushMode {
+        match (eraser, self.fills()) {
+            (true, true) => BrushMode::FillErase,
+            (true, false) => BrushMode::Erase,
+            (false, true) => BrushMode::Fill,
+            (false, false) => BrushMode::Paint,
+        }
+    }
+
+    /// The mode with fuzzy fill on or off, keeping the eraser choice.
+    pub fn with_fill(self, fill: bool) -> BrushMode {
+        match (self.erases(), fill) {
+            (true, true) => BrushMode::FillErase,
+            (true, false) => BrushMode::Erase,
+            (false, true) => BrushMode::Fill,
+            (false, false) => BrushMode::Paint,
+        }
+    }
+
+    pub fn erases(self) -> bool {
+        matches!(self, BrushMode::Erase | BrushMode::FillErase)
+    }
+
+    pub fn fills(self) -> bool {
+        matches!(self, BrushMode::Fill | BrushMode::FillErase)
+    }
 }
 
 /// The modifier keys held during a pointer event. `ctrl` is Ctrl, or Cmd on a Mac.
@@ -368,6 +401,16 @@ brush: BrushMode::Paint,
         self.brush = mode;
     }
 
+    /// Turns the brush's eraser on or off, keeping fuzzy fill (the eraser key combines them).
+    pub fn set_brush_eraser(&mut self, eraser: bool) {
+        self.brush = self.brush.with_eraser(eraser);
+    }
+
+    /// Turns the brush's fuzzy fill on or off, keeping the eraser (the options pie combines them).
+    pub fn set_brush_fill(&mut self, fill: bool) {
+        self.brush = self.brush.with_fill(fill);
+    }
+
     /// Whether some label allows the shape `tool` draws; Select always can be used.
     pub fn can_use(&self, tool: Tool) -> bool {
         tool.shape_type().is_none_or(|shape| self.labels.iter().any(|label| label.shape_types.contains(&shape)))
@@ -395,7 +438,7 @@ brush: BrushMode::Paint,
         }
         // The same tool chosen again still drops whatever was being drawn with it.
         self.cancel();
-        self.tool = tool;
+        self.set_tool(tool);
         if tool == Tool::Brush {
             self.brush = BrushMode::Paint;
         }

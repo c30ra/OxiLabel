@@ -379,13 +379,27 @@ impl Editor {
         self.mirror_brush_mode(mode);
     }
 
+    /// The brush's mode as its switches hold it (the drawing code reads those; they mirror the
+    /// session's mode).
+    pub fn brush_mode(&self) -> BrushMode {
+        BrushMode::Paint
+            .with_eraser(self.tools.eraser.get_untracked())
+            .with_fill(self.tools.fill.get_untracked())
+    }
+
+    /// Turns the eraser on or off, keeping fuzzy fill (the E key and the options pie).
+    pub fn set_brush_eraser(&self, eraser: bool) {
+        self.set_brush_mode(self.brush_mode().with_eraser(eraser));
+    }
+
+    /// Turns fuzzy fill on or off, keeping the eraser (the options pie).
+    pub fn set_brush_fill(&self, fill: bool) {
+        self.set_brush_mode(self.brush_mode().with_fill(fill));
+    }
+
     /// The brush switch signals follow the session's mode.
     fn mirror_brush_mode(&self, mode: BrushMode) {
-        let (eraser, fill) = match mode {
-            BrushMode::Paint => (false, false),
-            BrushMode::Erase => (true, false),
-            BrushMode::Fill => (false, true),
-        };
+        let (eraser, fill) = (mode.erases(), mode.fills());
         if self.tools.eraser.get_untracked() != eraser {
             self.tools.eraser.set(eraser);
         }
@@ -1189,11 +1203,11 @@ pub fn AnnotationLayer(
             }
             PieAction::SetEraser(on) => {
                 close_pie();
-                editor.set_brush_mode(if on { BrushMode::Erase } else { BrushMode::Paint });
+                editor.set_brush_eraser(on);
             }
             PieAction::SetFill(on) => {
                 close_pie();
-                editor.set_brush_mode(if on { BrushMode::Fill } else { BrushMode::Paint });
+                editor.set_brush_fill(on);
             }
             PieAction::ToggleEdgeSnap => {
                 close_pie();
@@ -1690,10 +1704,13 @@ pub fn AnnotationLayer(
                 session.set_selection((start..start + count).collect());
             });
         } else if is(Action::Eraser) {
-            // The brush in eraser mode (Blender has no eraser tool either).
+            // The brush in eraser mode (Blender has no eraser tool either). Fuzzy fill stays: a
+            // fill in eraser mode cuts the region from the masks. Choosing Brush itself resets to
+            // painting; this key then puts the eraser back on.
+            let mode = editor.brush_mode();
             if editor.switch_tool(Tool::Brush) {
                 cancel_gesture();
-                editor.set_brush_mode(BrushMode::Erase);
+                editor.set_brush_mode(mode.with_eraser(true));
             }
         } else if is(Action::FuzzyFill) {
             // The brush's fuzzy fill (U, GIMP's fuzzy select key).
@@ -1888,6 +1905,12 @@ pub fn AnnotationLayer(
     Effect::new(move |_| {
         let snap = editor.tools.snap.get();
         editor.update(|session| session.set_options(Options { snap, ..Options::default() }));
+    });
+    // The brush switches (the options bar sets them directly) follow into the session, so the
+    // switching rule resets what was actually selected.
+    Effect::new(move |_| {
+        let mode = BrushMode::Paint.with_eraser(editor.tools.eraser.get()).with_fill(editor.tools.fill.get());
+        editor.update(|session| session.set_brush_mode(mode));
     });
     // Drop a half-drawn shape when the tool or a drawing mode changes.
     // Another label can fix another size, or none: drop a shape being placed.

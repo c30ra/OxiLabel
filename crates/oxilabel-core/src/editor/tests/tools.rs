@@ -78,7 +78,7 @@ fn the_brush_key_starts_plain_painting() {
 
     assert!(session.switch_tool(Tool::Brush));
 
-    assert_eq!((session.tool(), session.brush_mode()), (Tool::Brush, BrushMode::Paint));
+    assert_eq!((session.tool(), session.brush_mode(), session.label()), (Tool::Brush, BrushMode::Paint, Some(3)));
 }
 
 #[test]
@@ -88,18 +88,17 @@ fn the_tool_pie_starts_plain_painting() {
 
     assert!(session.switch_tool(Tool::Brush));
 
-    assert_eq!((session.tool(), session.brush_mode()), (Tool::Brush, BrushMode::Paint));
+    assert_eq!((session.tool(), session.brush_mode(), session.label()), (Tool::Brush, BrushMode::Paint, Some(3)));
 }
 
 #[test]
 fn the_tool_rail_starts_plain_painting() {
     let mut session = ready(Tool::Ellipse);
-    session.set_brush_mode(BrushMode::Fill);
-    session.set_brush_mode(BrushMode::Erase);
+    session.set_brush_mode(BrushMode::FillErase);
 
     assert!(session.switch_tool(Tool::Brush));
 
-    assert_eq!((session.tool(), session.brush_mode()), (Tool::Brush, BrushMode::Paint));
+    assert_eq!((session.tool(), session.brush_mode(), session.label()), (Tool::Brush, BrushMode::Paint, Some(3)));
 }
 
 #[test]
@@ -112,7 +111,22 @@ fn a_tap_of_the_pie_key_starts_plain_painting() {
     // The tap repeats the kind of tool: a brush starts plain painting again.
     assert!(session.switch_tool(Tool::Brush));
 
-    assert_eq!((session.tool(), session.brush_mode()), (Tool::Brush, BrushMode::Paint));
+    assert_eq!((session.tool(), session.brush_mode(), session.label()), (Tool::Brush, BrushMode::Paint, Some(3)));
+}
+
+#[test]
+fn erasing_keeps_fuzzy_fill_and_the_options_keep_the_other_switch() {
+    let mut session = ready(Tool::Brush);
+    session.set_brush_mode(BrushMode::Fill);
+
+    session.set_brush_eraser(true);
+    assert_eq!(session.brush_mode(), BrushMode::FillErase, "the eraser key keeps fuzzy fill");
+
+    session.set_brush_fill(false);
+    assert_eq!(session.brush_mode(), BrushMode::Erase, "turning fill off keeps the eraser");
+
+    session.set_brush_fill(true);
+    assert_eq!(session.brush_mode(), BrushMode::FillErase);
 }
 
 #[test]
