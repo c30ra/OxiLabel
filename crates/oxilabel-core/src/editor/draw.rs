@@ -24,18 +24,18 @@ use super::{
 
 impl Session {
     /// The width and height of the image, in image pixels.
-    fn image_size(&self) -> (f64, f64) {
+    pub(super) fn image_size(&self) -> (f64, f64) {
         (f64::from(self.image.0), f64::from(self.image.1))
     }
 
     /// `point` kept inside the image.
-    fn inside(&self, point: Point) -> Point {
+    pub(super) fn inside(&self, point: Point) -> Point {
         let (width, height) = self.image_size();
         point.clamped(width, height)
     }
 
     /// The label new shapes get, if the project still has it.
-    fn label_definition(&self) -> Option<&Label> {
+    pub(super) fn label_definition(&self) -> Option<&Label> {
         let label = self.label?;
         self.labels.iter().find(|definition| definition.id == label)
     }
