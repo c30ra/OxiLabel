@@ -99,62 +99,7 @@ thread_local! {
     static CLIPBOARD: RefCell<Option<(i64, Vec<Annotation>)>> = const { RefCell::new(None) };
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Tool {
-    Select,
-    Rectangle,
-    Polygon,
-    Polyline,
-    Points,
-    Ellipse,
-    /// Paints masks; its eraser mode erases them.
-    Brush,
-    /// Never active: picking it, then a label, toggles that label as an image tag.
-    Tag,
-}
-
-impl Tool {
-    /// The shape this tool draws; `None` for Select. (Oriented rectangles come from Rectangle.)
-    pub fn shape_type(self) -> Option<ShapeType> {
-        match self {
-            Tool::Select => None,
-            Tool::Rectangle => Some(ShapeType::Rectangle),
-            Tool::Polygon => Some(ShapeType::Polygon),
-            Tool::Polyline => Some(ShapeType::Polyline),
-            Tool::Points => Some(ShapeType::Points),
-            Tool::Ellipse => Some(ShapeType::Ellipse),
-            Tool::Brush => Some(ShapeType::Mask),
-            Tool::Tag => Some(ShapeType::Tag),
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Tool::Select => "Select",
-            Tool::Rectangle => "Rectangle",
-            Tool::Polygon => "Polygon",
-            Tool::Polyline => "Polyline",
-            Tool::Points => "Points",
-            Tool::Ellipse => "Ellipse",
-            Tool::Brush => "Brush",
-            Tool::Tag => "Tag",
-        }
-    }
-
-    /// The action that switches to the tool.
-    pub fn action(self) -> Action {
-        match self {
-            Tool::Select => Action::Select,
-            Tool::Rectangle => Action::Rectangle,
-            Tool::Polygon => Action::Polygon,
-            Tool::Polyline => Action::Polyline,
-            Tool::Points => Action::Points,
-            Tool::Ellipse => Action::Ellipse,
-            Tool::Brush => Action::Brush,
-            Tool::Tag => Action::Tag,
-        }
-    }
-}
+pub use oxilabel_core::editor::Tool;
 
 /// The tools a key selects directly (Tag opens its label pie instead).
 const KEY_TOOLS: [Tool; 7] = [Tool::Select, Tool::Rectangle, Tool::Polygon, Tool::Polyline, Tool::Points, Tool::Ellipse, Tool::Brush];
@@ -1929,7 +1874,7 @@ pub fn AnnotationLayer(
     // The session's gestures follow the snap option.
     Effect::new(move |_| {
         let snap = editor.tools.snap.get();
-        editor.update(|session| session.set_options(Options { snap }));
+        editor.update(|session| session.set_options(Options { snap, ..Options::default() }));
     });
     // Drop a half-drawn shape when the tool or a drawing mode changes.
     // Another label can fix another size, or none: drop a shape being placed.
