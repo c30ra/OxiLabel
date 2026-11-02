@@ -103,7 +103,6 @@ fn Workspace(
     let session = Session::new(conformed(&labels, annotations.annotations), labels.clone(), (image.width, image.height));
     let editor = Editor::new(session, labels.iter().map(|label| label.id).min(), tools);
     let labels_for_reload = StoredValue::new(labels.clone());
-    editor.usable_shapes.set(labels.iter().flat_map(|label| label.shape_types.iter().copied()).collect());
     let picker_labels = labels.clone();
     let layer_labels = labels.clone();
     let url = StoredValue::new(format!(
@@ -449,7 +448,7 @@ fn LabelPicker(labels: Vec<Label>, editor: Editor) -> impl IntoView {
                                 aria-disabled=move || (!usable()).to_string()
                                 class:active=move || editor.label.get() == Some(id)
                                 class:disabled=move || !usable()
-                                on:click=move |_| if usable() { editor.label.set(Some(id)); open.set(false); }>
+                                on:click=move |_| if usable() { editor.set_label(Some(id)); open.set(false); }>
                                 <span class="swatch" style:background=label.color.clone()></span>
                                 <span class="grow">{label.name.clone()}</span>
                                 {label.hotkey.clone().map(|key| view! { <kbd>{key}</kbd> })}
@@ -471,7 +470,7 @@ fn ToolRail(editor: Editor) -> impl IntoView {
             <button class="tool" class:active=move || editor.tool.get() == tool aria-pressed=move || (editor.tool.get() == tool).to_string()
                 disabled=move || !editor.can_use(tool)
                 title=move || if editor.can_use(tool) { format!("{name} ({})", key()) } else { format!("{name}: no label allows it") }
-                aria-label=name on:click=move |_| editor.tool.set(tool)>
+                aria-label=name on:click=move |_| { editor.switch_tool(tool); }>
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d=icon /></svg>
                 <kbd>{key}</kbd>
             </button>
