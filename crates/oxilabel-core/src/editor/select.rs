@@ -20,7 +20,7 @@ use super::{
 
 impl Session {
     /// A press of the main button with the Select tool.
-    pub fn press(&mut self, pointer: Pointer) {
+    pub(super) fn select_press(&mut self, pointer: Pointer) {
         let Pointer { at: point, scale, modifiers } = pointer;
         let (extend, subtract) = (modifiers.shift, modifiers.ctrl);
         if !extend && let Some((index, grip)) = self.grip_under(point, scale) {
@@ -83,7 +83,7 @@ impl Session {
     }
 
     /// The pointer moved (with or without a button down).
-    pub fn move_to(&mut self, pointer: Pointer) {
+    pub(super) fn select_move_to(&mut self, pointer: Pointer) {
         let Pointer { at: point, modifiers, .. } = pointer;
         let (width, height) = (f64::from(self.image.0), f64::from(self.image.1));
         let inside = point.clamped(width, height);
@@ -110,11 +110,13 @@ impl Session {
             }
             // The radius follows the handle, up to the largest that keeps the ellipse in the image.
             Gesture::Radius { index, axis, current } => Gesture::Radius { index, axis, current: self.largest_fitting(current, current.with_radius(axis, point)) },
+            // Drawing gestures belong to a drawing tool, which cancels them when selected.
+            other => other,
         };
     }
 
     /// The main button was released: the gesture's result is applied.
-    pub fn release(&mut self, pointer: Pointer) {
+    pub(super) fn select_release(&mut self, pointer: Pointer) {
         let scale = pointer.scale;
         match std::mem::replace(&mut self.gesture, Gesture::Idle) {
             Gesture::Idle => {}
@@ -160,6 +162,8 @@ impl Session {
                 }
             }
             Gesture::Turning { index, current, .. } => self.reshape(index, Shape::Ellipse(current)),
+            // Drawing gestures belong to a drawing tool, which cancels them when selected.
+            other => self.gesture = other,
         }
     }
 

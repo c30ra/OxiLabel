@@ -1887,7 +1887,7 @@ pub fn AnnotationLayer(
     // The session's gestures follow the snap option.
     Effect::new(move |_| {
         let snap = editor.tools.snap.get();
-        editor.update(|session| session.set_options(Options { snap }));
+        editor.update(|session| session.set_options(Options { snap, ..Options::default() }));
     });
     // Drop a half-drawn shape when the tool or a drawing mode changes.
     // Another label can fix another size, or none: drop a shape being placed.

@@ -10,6 +10,7 @@ use crate::{
     geometry::{Point, Rect},
 };
 
+mod drawing;
 mod relabel;
 mod select;
 mod tools;
@@ -27,6 +28,21 @@ fn label_with(id: i64, constraints: serde_json::Value) -> Label {
         "shape_types": ["rectangle", "oriented_rectangle", "polygon", "polyline", "points", "ellipse", "mask", "tag"],
         "ignore": false,
         "constraints": constraints,
+    }))
+    .expect("a valid label")
+}
+
+/// A label allowing `shapes`, with `attributes` (attribute definitions as JSON).
+fn label_with_attributes(id: i64, shapes: &[&str], attributes: serde_json::Value) -> Label {
+    serde_json::from_value(json!({
+        "id": id,
+        "name": format!("label {id}"),
+        "color": "#ff0000",
+        "hotkey": null,
+        "shape_types": shapes,
+        "ignore": false,
+        "attributes": attributes,
+        "constraints": {},
     }))
     .expect("a valid label")
 }

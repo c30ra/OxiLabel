@@ -24,6 +24,7 @@ use crate::{
     oriented::OrientedRect,
 };
 
+mod draw;
 pub mod grip;
 mod select;
 #[cfg(test)]
@@ -42,6 +43,10 @@ pub const MIN_SHAPE_SIZE: f64 = 3.0;
 pub const SNAP_DEGREES: f64 = 15.0;
 /// Screen distance from a shape's outline to its rotation handle.
 pub const ROTATION_HANDLE_DISTANCE: f64 = 24.0;
+/// Distance between freehand polyline vertices, in image pixels, and its limits.
+pub const DEFAULT_SPACING: f64 = 20.0;
+pub const MIN_SPACING: f64 = 1.0;
+pub const MAX_SPACING: f64 = 500.0;
 
 /// The drawing tools, and the brush, tag and Select. `Select` handles shapes; `Brush` paints masks
 /// and `Tag` is never active (picking it toggles a label as an image tag).
@@ -127,11 +132,47 @@ pub struct Pointer {
 }
 
 /// The tool options gestures follow.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Options {
-    /// Always snap turns to `SNAP_DEGREES` steps (Shift inverts it).
+    /// Always snap turns and lines to `SNAP_DEGREES` steps (Shift inverts it).
     pub snap: bool,
+    /// Rectangles: always square, always from the centre (Shift and Alt invert them).
+    pub square: bool,
+    pub from_centre: bool,
+    /// Rectangles: three points for an oriented rectangle.
+    pub oriented: bool,
+    /// Polylines: drag to draw, placing a vertex every `spacing` image pixels.
+    pub freehand: bool,
+    pub spacing: f64,
+    /// Points: every click is a finished one-point annotation.
+    pub single_point: bool,
+    /// Ellipses: drawn from their centre out (true) or across their bounding box (false); Alt
+    /// inverts it.
+    pub ellipse_from_centre: bool,
+    /// Freehand polylines follow the image's edges (Shift inverts it).
+    pub edge_snap: bool,
 }
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            snap: false,
+            square: false,
+            from_centre: false,
+            oriented: false,
+            freehand: false,
+            spacing: DEFAULT_SPACING,
+            single_point: false,
+            ellipse_from_centre: true,
+            edge_snap: false,
+        }
+    }
+}
+
+/// The edge path a freehand polyline follows: from `from` (or just the strongest edge near `to`
+/// when `from` is none) to `to`, in image coordinates. `None` while the pixels it needs are still
+/// loading; the line then follows the pointer.
+pub type EdgePath<'a> = &'a dyn Fn(Option<Point>, Point) -> Option<Vec<Point>>;
 
 /// How a box selection combines with what is already selected (Blender: drag, Shift+drag,
 /// Ctrl+drag).
@@ -160,13 +201,53 @@ enum Gesture {
     Radius { index: usize, axis: usize, current: Ellipse },
     /// Turning ellipse `index` by its rotation handle.
     Turning { index: usize, before: Ellipse, current: Ellipse },
+    /// A rectangle from `start`; `dragged` is false while waiting for the second click.
+    Drawing { start: Point, current: Point, dragged: bool, square: bool, from_centre: bool },
+    /// An oriented rectangle: one or two points placed, the next follows the pointer.
+    Oriented { points: Vec<Point>, current: Point },
+    /// A polygon, polyline or points shape being placed vertex by vertex.
+    Path { points: Vec<Point>, current: Point },
+    /// A freehand polyline: vertices are added every `spacing` while the button is down.
+    Stroke { points: Vec<Point>, current: Point },
+    /// An ellipse from `start` (its centre, or a corner of its box); like a rectangle, it is
+    /// finished by releasing a drag or by a second click.
+    Ellipse { start: Point, current: Point, dragged: bool, circle: bool, from_centre: bool },
+    /// A fixed-size shape centred on `centre`, its angle following the pointer until a second
+    /// click sets it.
+    Placing { centre: Point, angle: f64 },
 }
 
 impl Gesture {
     /// Whether the gesture refers to annotations by index (the selection's, or its own).
     fn holds_indices(&self) -> bool {
-        !matches!(self, Gesture::Idle | Gesture::Selecting { .. })
+        matches!(
+            self,
+            Gesture::Moving { .. }
+                | Gesture::Resizing { .. }
+                | Gesture::Vertex { .. }
+                | Gesture::Rotating { .. }
+                | Gesture::Radius { .. }
+                | Gesture::Turning { .. }
+        )
     }
+}
+
+/// What a drawing gesture shows before it is finished: the preview the annotation layer draws.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Preview {
+    /// The rectangle as it would be made now, inside the image.
+    Rectangle(Rect),
+    /// An oriented rectangle: one or two points placed, the next following the pointer.
+    Oriented { points: Vec<Point>, current: Point },
+    /// The vertices placed so far and the one following the pointer; `shape` is what the tool
+    /// draws (which closes and which joins the dots).
+    Path { points: Vec<Point>, current: Point, shape: ShapeType },
+    /// A freehand polyline's vertices, and the point following the pointer.
+    Freehand { points: Vec<Point>, current: Point },
+    /// The ellipse as it would be made now, inside the image.
+    Ellipse(Ellipse),
+    /// A fixed-size shape being placed; `turning` once a click has fixed its centre.
+    Placing { shape: Shape, turning: bool, angle: f64 },
 }
 
 /// One image's annotations being edited. Every change to them goes through the undo history.
@@ -181,9 +262,10 @@ pub struct Session {
     tool: Tool,
     /// The label new shapes get.
     label: Option<i64>,
-    /// The brush's mode; choosing Brush resets it to painting, so it is never kept.
+/// The brush's mode; choosing Brush resets it to painting, so it is never kept.
     brush: BrushMode,
-    /// The project's labels: their shape constraints decide which shapes have a fixed size.
+    /// The project's labels: their shape constraints decide which shapes have a fixed size, and
+    /// their attributes give new annotations their values.
     labels: Vec<Label>,
     /// The image's width and height in pixels.
     image: (u32, u32),
@@ -205,7 +287,7 @@ impl Session {
             gesture: Gesture::Idle,
             tool: Tool::Select,
             label: None,
-            brush: BrushMode::Paint,
+brush: BrushMode::Paint,
             labels,
             image,
             threshold: 0.0,
@@ -266,9 +348,14 @@ impl Session {
         self.label
     }
 
-    /// Sets the label new shapes get.
+/// Sets the label new shapes get; a fixed-size shape being placed no longer matches its size.
     pub fn set_label(&mut self, label: Option<i64>) {
-        self.label = label;
+        if self.label != label {
+            if matches!(self.gesture, Gesture::Placing { .. }) {
+                self.cancel();
+            }
+            self.label = label;
+        }
     }
 
     /// The brush's mode.
@@ -320,6 +407,45 @@ impl Session {
         true
     }
 
+    /// A press of the main button.
+    pub fn press(&mut self, pointer: Pointer) {
+        self.press_with_edges(pointer, None);
+    }
+
+    /// A press where `edges` supplies the path a freehand polyline follows along the image's
+    /// edges; without it the line follows the pointer.
+    pub fn press_with_edges(&mut self, pointer: Pointer, edges: Option<EdgePath<'_>>) {
+        match self.tool {
+            Tool::Select => self.select_press(pointer),
+            // The brush, eraser and fuzzy fill are the annotation layer's until ticket 13.
+            Tool::Brush | Tool::Tag => {}
+            tool => self.draw_press(pointer, edges, tool),
+        }
+    }
+
+    /// The pointer moved (with or without a button down).
+    pub fn move_to(&mut self, pointer: Pointer) {
+        self.move_to_with_edges(pointer, None);
+    }
+
+    /// A move where `edges` supplies the path a freehand polyline follows along the image's edges.
+    pub fn move_to_with_edges(&mut self, pointer: Pointer, edges: Option<EdgePath<'_>>) {
+        match self.tool {
+            Tool::Select => self.select_move_to(pointer),
+            Tool::Brush | Tool::Tag => {}
+            _ => self.draw_move_to(pointer, edges),
+        }
+    }
+
+    /// The main button was released: the gesture's result is applied.
+    pub fn release(&mut self, pointer: Pointer) {
+        match self.tool {
+            Tool::Select => self.select_release(pointer),
+            Tool::Brush | Tool::Tag => {}
+            _ => self.draw_release(pointer),
+        }
+    }
+
     /// The confidence below which pending pre-annotations are neither drawn nor picked.
     pub fn threshold(&self) -> f64 {
         self.threshold
@@ -350,6 +476,8 @@ impl Session {
                 self.selection = self.annotations.iter().enumerate().filter(|(_, a)| a.shown(threshold)).map(|(i, _)| i).collect();
             }
             Action::Delete => self.delete_selected(),
+            Action::Finish => return self.finish_path(),
+            Action::RemoveLastPoint => return self.remove_last_point(),
             Action::Cancel if self.is_busy() => self.cancel(),
             Action::Cancel if !self.selection.is_empty() => self.selection.clear(),
             _ => return false,
