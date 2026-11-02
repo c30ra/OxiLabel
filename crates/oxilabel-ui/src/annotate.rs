@@ -313,6 +313,10 @@ impl Editor {
 
     pub fn new(mut session: Session, label: Option<i64>, tools: Tools) -> Self {
         session.set_label(label);
+        // The saved switches are only read here; from then on the session's mode is the truth
+        // and the switches mirror it for the toolbar and the saved tools.
+        session.set_brush_eraser(tools.eraser.get_untracked());
+        session.set_brush_fill(tools.fill.get_untracked());
         Editor {
             session: StoredValue::new(session),
             annotations_changed: Trigger::new(),
@@ -329,9 +333,9 @@ impl Editor {
         }
     }
 
-    /// Switches to `tool` through the session's one rule (the tool keys, the tool pie, the rail
-    /// and a tap of the pie key all come here), then mirrors the session: the tool, its label, and
-    /// the brush mode (painting after choosing Brush).
+    /// Switches to `tool` through the session's one rule (the tool pie, the rail and a tap of the
+    /// pie key come here; tool keys come through [`Editor::key`]), then mirrors the session: the
+    /// tool, its label, and the brush mode (painting after choosing Brush).
     pub fn switch_tool(&self, tool: Tool) -> bool {
         let switched = self.update(|session| session.switch_tool(tool));
         let (tool, label, brush) = self.peek(|session| (session.tool(), session.label(), session.brush_mode()));
@@ -383,12 +387,10 @@ impl Editor {
         self.mirror_brush_mode(mode);
     }
 
-    /// The brush's mode as its switches hold it (the drawing code reads those; they mirror the
-    /// session's mode).
+    /// The brush's mode, from the session's one rule; the two switches only mirror it for the
+    /// toolbar and the saved tools.
     pub fn brush_mode(&self) -> BrushMode {
-        BrushMode::Paint
-            .with_eraser(self.tools.eraser.get_untracked())
-            .with_fill(self.tools.fill.get_untracked())
+        self.peek(Session::brush_mode)
     }
 
     /// Turns the eraser on or off, keeping fuzzy fill (the E key and the options pie).
@@ -745,8 +747,8 @@ pub fn AnnotationLayer(
             return;
         }
         let fill = |seed, threshold| fill_region(seed, threshold, current);
-        let limit = |seed| edge_limit(seed, current);
-        let layer = Layer { fill: Some(&fill), limit: Some(&limit), ..Layer::default() };
+        let paintable = |seed| edge_limit(seed, current);
+        let layer = Layer { fill: Some(&fill), paintable: Some(&paintable), ..Layer::default() };
         editor.update(|session| session.pixels_ready(layer));
         sync_stroke();
         sync_fill();
@@ -924,13 +926,13 @@ pub fn AnnotationLayer(
                 ];
                 if fill {
                     items.extend([
-                        item(Compass::E, "Higher threshold", key_of(Action::Larger), true, false, PieAction::Threshold(true)),
-                        item(Compass::W, "Lower threshold", key_of(Action::Smaller), true, false, PieAction::Threshold(false)),
+                        item(Compass::E, "Higher threshold", key_of(Action::Larger), true, false, PieAction::BrushStep(true)),
+                        item(Compass::W, "Lower threshold", key_of(Action::Smaller), true, false, PieAction::BrushStep(false)),
                     ]);
                 } else {
                     items.extend([
-                        item(Compass::E, "Larger", key_of(Action::Larger), true, false, PieAction::BrushSize(true)),
-                        item(Compass::W, "Smaller", key_of(Action::Smaller), true, false, PieAction::BrushSize(false)),
+                        item(Compass::E, "Larger", key_of(Action::Larger), true, false, PieAction::BrushStep(true)),
+                        item(Compass::W, "Smaller", key_of(Action::Smaller), true, false, PieAction::BrushStep(false)),
                         item(Compass::NW, "Stop at edges", Some("Shift".to_owned()), true, editor.tools.stop_at_edges.get_untracked(), PieAction::ToggleStopAtEdges),
                     ]);
                 }
@@ -1073,11 +1075,7 @@ pub fn AnnotationLayer(
                 close_pie();
                 editor.tools.stop_at_edges.update(|on| *on = !*on);
             }
-            PieAction::Threshold(higher) => {
-                close_pie();
-                editor.key(if higher { Action::Larger } else { Action::Smaller });
-            }
-            PieAction::BrushSize(larger) => {
+            PieAction::BrushStep(larger) => {
                 close_pie();
                 editor.key(if larger { Action::Larger } else { Action::Smaller });
             }
@@ -1209,8 +1207,8 @@ pub fn AnnotationLayer(
         }
         let edges = |from, to| edge_path(from, to, current);
         let fill = |seed, threshold| fill_region(seed, threshold, current);
-        let limit = |seed| edge_limit(seed, current);
-        let layer = Layer { edges: Some(&edges), fill: Some(&fill), limit: Some(&limit) };
+        let paintable = |seed| edge_limit(seed, current);
+        let layer = Layer { edges: Some(&edges), fill: Some(&fill), paintable: Some(&paintable) };
         editor.update(|session| session.press_in(pointer_at(&ev, point, current, true), layer));
         sync_stroke();
         sync_fill();
@@ -1237,8 +1235,8 @@ pub fn AnnotationLayer(
         }
         let edges = |from, to| edge_path(from, to, current);
         let fill = |seed, threshold| fill_region(seed, threshold, current);
-        let limit = |seed| edge_limit(seed, current);
-        let layer = Layer { edges: Some(&edges), fill: Some(&fill), limit: Some(&limit) };
+        let paintable = |seed| edge_limit(seed, current);
+        let layer = Layer { edges: Some(&edges), fill: Some(&fill), paintable: Some(&paintable) };
         let primary = ev.buttons() & 1 == 1;
         editor.update(|session| session.move_to_in(pointer_at(&ev, point, current, primary), layer));
         sync_stroke();
@@ -1531,7 +1529,7 @@ pub fn AnnotationLayer(
                 draw::shape(&context, current, &shape, Look { color: &pen, selected: false, dashed: true });
                 draw::tag(&context, current.to_screen(shape.bounds().min), &side_panel::ellipse_size(&ellipse), &pen);
             }
-            Some(Preview::Placing { shape, angle, .. }) => {
+            Some(Preview::Placing { shape, angle }) => {
                 draw::shape(&context, current, &shape, Look { color: &pen, selected: false, dashed: true });
                 let text = format!("{:.0}°", angle.to_degrees());
                 draw::tag(&context, current.to_screen(shape.bounds().min), &text, &pen);
@@ -1581,12 +1579,6 @@ let options = Options {
     Effect::new(move |_| {
         let label = editor.label.get();
         editor.update(|session| session.set_label(label));
-    });
-    // The brush switches (the options bar sets them directly) follow into the session, so the
-    // switching rule resets what was actually selected.
-    Effect::new(move |_| {
-        let mode = BrushMode::Paint.with_eraser(editor.tools.eraser.get()).with_fill(editor.tools.fill.get());
-        editor.update(|session| session.set_brush_mode(mode));
     });
     // Drop a half-drawn shape when the tool or a drawing mode changes.
     Effect::new(move |_| {

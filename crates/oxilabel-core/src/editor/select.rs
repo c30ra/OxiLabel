@@ -221,7 +221,7 @@ impl Session {
     /// `scale`; none when it is locked or not shown. Hit-testing uses the same list.
     pub fn grips(&self, scale: f64) -> Vec<Grip> {
         let Some((index, annotation)) = self.editable() else { return Vec::new() };
-        let fixed = self.labels.iter().find(|l| l.id == annotation.label).is_some_and(|l| l.constraints.fixes(annotation.shape.shape_type()));
+        let fixed = self.label_by_id(annotation.label).is_some_and(|l| l.constraints.fixes(annotation.shape.shape_type()));
         grips(&self.shown_shape(index, annotation), fixed, scale)
     }
 

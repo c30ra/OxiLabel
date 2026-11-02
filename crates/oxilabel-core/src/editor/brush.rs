@@ -11,7 +11,6 @@ use std::mem;
 
 use crate::{
     ShapeType,
-    attribute::Attributes,
     geometry::Point,
     history::Edit,
     mask::Bitmap,
@@ -27,7 +26,7 @@ use super::{
 /// loaded so far.
 pub type FillSource<'a> = &'a dyn Fn(Point, f64) -> FillRegion;
 /// The pixels a "Stop at edges" brush starting at `seed` may paint, in image pixels.
-pub type LimitSource<'a> = &'a dyn Fn(Point) -> Bitmap;
+pub type PaintableSource<'a> = &'a dyn Fn(Point) -> Bitmap;
 
 /// What the annotation layer supplies to gestures that need the image's pixels: the path a
 /// freehand polyline follows, the region a fuzzy fill grows on, and the pixels a "Stop at edges"
@@ -36,7 +35,7 @@ pub type LimitSource<'a> = &'a dyn Fn(Point) -> Bitmap;
 pub struct Layer<'a> {
     pub edges: Option<EdgePath<'a>>,
     pub fill: Option<FillSource<'a>>,
-    pub limit: Option<LimitSource<'a>>,
+    pub paintable: Option<PaintableSource<'a>>,
 }
 
 /// A fuzzy fill's region as its gesture has grown it: `factor` × `factor` image pixels per pixel
@@ -140,10 +139,10 @@ impl Session {
             Gesture::Painting { seed, limited: true, .. } => Some(*seed),
             _ => None,
         };
-        if let (Some(seed), Some(limit)) = (seed, layer.limit) {
-            let limit = limit(seed);
+        if let (Some(seed), Some(paintable)) = (seed, layer.paintable) {
+            let paintable = paintable(seed);
             if let Gesture::Painting { stroke, .. } = &mut self.gesture {
-                stroke.set_limit(limit);
+                stroke.set_limit(paintable);
             }
         }
         if matches!(self.gesture, Gesture::Filling { .. }) {
@@ -188,8 +187,8 @@ impl Session {
         let mut stroke = MaskStroke::begin(erasing, label, self.options.brush_size, self.image, at);
         let limited = self.options.stop_at_edges != pointer.modifiers.shift;
         stroke.limit(limited);
-        if let (true, Some(limit)) = (limited, layer.limit) {
-            stroke.set_limit(limit(at));
+        if let (true, Some(paintable)) = (limited, layer.paintable) {
+            stroke.set_limit(paintable(at));
         }
         self.stroke_change = Some(stroke.segment(at, &self.annotations));
         self.gesture = Gesture::Painting { stroke, seed: at, limited };
@@ -197,42 +196,36 @@ impl Session {
 
     /// The pointer moved with the brush: its size, the fill's threshold, or the stroke.
     pub(super) fn brush_move_to(&mut self, pointer: Pointer, layer: Layer<'_>) {
-        match &self.gesture {
+        let to = self.inside(pointer.at);
+        let mut grow = false;
+        match &mut self.gesture {
             Gesture::BrushSizing { centre, before } => {
-                let size = before + 2.0 * (pointer.at.x - centre.x);
+                let size = *before + 2.0 * (pointer.at.x - centre.x);
                 self.options.brush_size = size.round().clamp(MIN_BRUSH_SIZE, MAX_BRUSH_SIZE);
             }
-            Gesture::Filling { released: false, .. } => {
-                let (anchor, base) = match &self.gesture {
-                    Gesture::Filling { anchor, base, .. } => (*anchor, *base),
-                    _ => unreachable!(),
-                };
+            Gesture::Filling { released: false, anchor, base, .. } => {
                 let moved = ((pointer.at.x - anchor.x) + (pointer.at.y - anchor.y)) * pointer.scale;
-                self.options.threshold = (base + moved * THRESHOLD_PER_PIXEL).round().clamp(0.0, MAX_THRESHOLD);
-                self.grow(layer);
+                self.options.threshold = (*base + moved * THRESHOLD_PER_PIXEL).round().clamp(0.0, MAX_THRESHOLD);
+                grow = true;
             }
             // Released and waiting for tiles: the pointer no longer changes it.
             Gesture::Filling { released: true, .. } => {}
-            Gesture::Painting { limited: was, .. } => {
-                let to = self.inside(pointer.at);
-                let limited = self.options.stop_at_edges != pointer.modifiers.shift;
-                let seed = match &self.gesture {
-                    Gesture::Painting { seed, .. } => *seed,
-                    _ => unreachable!(),
-                };
+            Gesture::Painting { stroke, limited, seed } => {
+                let now_limited = self.options.stop_at_edges != pointer.modifiers.shift;
                 // Turning the limit on mid-stroke grows it once; it is grown again when the view's
                 // level changes or tiles arrive (see `pixels_ready`).
-                let limit = (limited && !was).then(|| layer.limit.map(|limit| limit(seed))).flatten();
-                let Gesture::Painting { stroke, limited: was, .. } = &mut self.gesture else { unreachable!() };
-                *was = limited;
-                stroke.limit(limited);
-                if let Some(limit) = limit {
-                    stroke.set_limit(limit);
+                let paintable = (now_limited && !*limited).then(|| layer.paintable.map(|paintable| paintable(*seed))).flatten();
+                *limited = now_limited;
+                stroke.limit(now_limited);
+                if let Some(paintable) = paintable {
+                    stroke.set_limit(paintable);
                 }
-                let change = stroke.segment(to, &self.annotations);
-                self.stroke_change = Some(change);
+                self.stroke_change = Some(stroke.segment(to, &self.annotations));
             }
             _ => {}
+        }
+        if grow {
+            self.grow(layer);
         }
     }
 
@@ -313,10 +306,6 @@ impl Session {
             Edit::Batch(edits) => Edit::Batch(edits.into_iter().map(|edit| self.with_defaults(edit)).collect()),
             other => other,
         }
-    }
-
-    fn default_attributes(&self, label: i64) -> Attributes {
-        self.labels.iter().find(|definition| definition.id == label).map(|definition| definition.conform_attributes(&Attributes::new())).unwrap_or_default()
     }
 
     /// Whether the current label allows masks.

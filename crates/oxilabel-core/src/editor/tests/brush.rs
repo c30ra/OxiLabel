@@ -180,7 +180,7 @@ fn shifting_inverts_stop_at_edges_mid_stroke() {
         bitmap.paint_square(Point::new(50.0, 50.0), 50.0, IMAGE);
         bitmap
     };
-    let layer = Layer { limit: Some(&limit), ..Layer::default() };
+    let layer = Layer { paintable: Some(&limit), ..Layer::default() };
     let mut session = brushing(Vec::new());
     session.set_options(Options { stop_at_edges: true, ..Options::default() });
     session.press_in(at(50.0, 50.0), layer);

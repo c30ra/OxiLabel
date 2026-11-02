@@ -9,7 +9,6 @@
 use crate::{
     Label, ShapeType,
     annotation::{Annotation, Shape},
-    attribute::Attributes,
     constraint::ShapeConstraints,
     ellipse::Ellipse,
     geometry::{Point, Rect, snap_angle, steps_along, steps_towards},
@@ -36,8 +35,7 @@ impl Session {
 
     /// The label new shapes get, if the project still has it.
     pub(super) fn label_definition(&self) -> Option<&Label> {
-        let label = self.label?;
-        self.labels.iter().find(|definition| definition.id == label)
+        self.label.and_then(|label| self.label_by_id(label))
     }
 
     /// The shape type the current tool draws, when a label's constraint can fix its size: the tool
@@ -346,7 +344,7 @@ impl Session {
             self.notice = Some(format!("Not added: {reason}."));
             return;
         }
-        let attributes: Attributes = definition.conform_attributes(&Attributes::new());
+        let attributes = self.default_attributes(label);
         let annotation = Annotation { attributes, ..Annotation::manual(label, shape) };
         self.apply(Edit::Add { index: self.annotations.len(), annotation });
     }
@@ -375,7 +373,7 @@ impl Session {
             Gesture::Placing { centre, angle } => {
                 let (shape_type, constraints) = self.fixed_shape()?;
                 let shape = constraints.place(shape_type, *centre, *angle, self.image.0, self.image.1)?;
-                Some(Preview::Placing { shape, turning: true, angle: *angle })
+                Some(Preview::Placing { shape, angle: *angle })
             }
             _ => None,
         }

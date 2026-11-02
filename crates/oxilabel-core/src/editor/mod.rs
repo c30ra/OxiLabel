@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     Label, ShapeType,
     annotation::{Annotation, Shape},
+    attribute::Attributes,
     geometry::{Handle, Point, Rect},
     history::{Edit, History},
     keymap::Action,
@@ -31,7 +32,7 @@ mod draw;
 pub mod grip;
 mod select;
 
-pub use brush::{FillRegion, FillSource, Layer, LimitSource};
+pub use brush::{FillRegion, FillSource, Layer, PaintableSource};
 
 #[cfg(test)]
 mod tests;
@@ -339,8 +340,8 @@ pub enum Preview {
     Freehand { points: Vec<Point>, current: Point },
     /// The ellipse as it would be made now, inside the image.
     Ellipse(Ellipse),
-    /// A fixed-size shape being placed; `turning` once a click has fixed its centre.
-    Placing { shape: Shape, turning: bool, angle: f64 },
+    /// A fixed-size shape being placed, at the angle it would take.
+    Placing { shape: Shape, angle: f64 },
 }
 
 /// One image's annotations being edited. Every change to them goes through the undo history.
@@ -466,14 +467,24 @@ impl Session {
         self.brush = self.brush.with_fill(fill);
     }
 
+    /// The project's label `id`, if it still exists.
+    fn label_by_id(&self, id: i64) -> Option<&Label> {
+        self.labels.iter().find(|label| label.id == id)
+    }
+
+    /// The first label in the project that allows `shape`.
+    fn label_allowing(&self, shape: ShapeType) -> Option<&Label> {
+        self.labels.iter().find(|label| label.shape_types.contains(&shape))
+    }
+
     /// Whether some label allows the shape `tool` draws; Select always can be used.
     pub fn can_use(&self, tool: Tool) -> bool {
-        tool.shape_type().is_none_or(|shape| self.labels.iter().any(|label| label.shape_types.contains(&shape)))
+        tool.shape_type().is_none_or(|shape| self.label_allowing(shape).is_some())
     }
 
     /// Whether label `label` allows `shape`.
     pub fn label_allows(&self, label: i64, shape: ShapeType) -> bool {
-        self.labels.iter().any(|candidate| candidate.id == label && candidate.shape_types.contains(&shape))
+        self.label_by_id(label).is_some_and(|candidate| candidate.shape_types.contains(&shape))
     }
 
     /// Why `tool` cannot be used, for a notice.
@@ -500,10 +511,11 @@ impl Session {
         if let Some(shape) = tool.shape_type()
             && !self.label.is_some_and(|label| self.label_allows(label, shape))
         {
-            self.label = self.labels.iter().find(|label| label.shape_types.contains(&shape)).map(|label| label.id);
+            self.label = self.label_allowing(shape).map(|label| label.id);
         }
         true
     }
+
     /// A press of the main button.
     pub fn press(&mut self, pointer: Pointer) {
         self.press_in(pointer, Layer::default());
@@ -723,6 +735,11 @@ impl Session {
         }
     }
 
+    /// The attribute values a new annotation with `label` gets.
+    pub(super) fn default_attributes(&self, label: i64) -> Attributes {
+        self.label_by_id(label).map(|definition| definition.conform_attributes(&Attributes::new())).unwrap_or_default()
+    }
+
     /// Relabels the annotations at `indices` as `label`, in one undo step: the label pie and the
     /// side panel both come here. An annotation that is not shown (hidden, or a pre-annotation
     /// below the threshold) or whose shape the label does not allow is left alone; attributes are
@@ -730,7 +747,7 @@ impl Session {
     /// so a tag whose new label another tag already has is left alone (with a notice), and when
     /// several selected tags take one label, the first one takes it.
     pub fn relabel(&mut self, indices: &[usize], label: i64) -> bool {
-        let Some(target) = self.labels.iter().find(|target| target.id == label).cloned() else { return false };
+        let Some(target) = self.label_by_id(label).cloned() else { return false };
         let selected: BTreeSet<usize> = indices.iter().copied().collect();
         // Tags that keep their labels still claim them, so a selected tag cannot join one: every
         // tag not being relabelled, and any tag that already has the new label (it keeps it, since
