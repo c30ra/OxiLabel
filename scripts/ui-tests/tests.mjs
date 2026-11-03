@@ -1390,12 +1390,23 @@ tests.push({
     const dialog = await t.b.json(`({
       checked: document.querySelector('.delete-project-dialog input.delete-stored-copies').checked,
       copies: document.querySelector('.delete-project-dialog .choice').textContent.trim(),
+      shared: document.querySelector('.delete-project-dialog .shared-stay')?.textContent,
       originals: document.querySelector('.delete-project-dialog .originals-stay')?.textContent,
     })`);
-    equal(dialog, { checked: false, copies: 'Also delete 1 stored copy the server keeps for it', originals: '1 original stays at their locations on disk.' }, 'the dialog');
+    equal(dialog, {
+      checked: false,
+      copies: 'Also delete 1 stored copy the server keeps for it',
+      shared: '0 stored copies used by another project too: kept.',
+      originals: '1 original stays at their locations on disk.',
+    }, 'the dialog');
     await t.b.eval(`document.querySelector('.delete-project-dialog input.delete-stored-copies').click(), 1`);
     await t.b.eval(`document.querySelector('.delete-project-dialog button.confirm-delete').click(), 1`);
-    await t.b.waitFor(() => t.b.eval(`!document.querySelector(${JSON.stringify(card)}) && !document.querySelector('.delete-project-dialog')`), 'the project and dialog gone');
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.delete-project-dialog .deletion-report')`), 'the deletion report');
+    const report = await t.b.json(`[...document.querySelectorAll('.delete-project-dialog .deletion-files li')].map((li) => li.textContent)`);
+    equal(report, [`Deleted ${stored}`], 'the report');
+    equal(await t.b.eval(`!!document.querySelector(${JSON.stringify(card)})`), false, 'the card gone');
+    await t.b.eval(`document.querySelector('.delete-project-dialog button.confirm-delete').click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`!document.querySelector('.delete-project-dialog')`), 'the dialog closed');
     equal([existsSync(stored), existsSync(join(t.work, 'images', 'deletion/original.png'))], [false, true], 'the copy and the original after');
   },
 });

@@ -537,7 +537,7 @@ pub struct ProjectDeletionReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeptFile {
     pub path: String,
-    pub project: String,
+    pub project_name: String,
 }
 
 /// A file that could not be deleted, and why.

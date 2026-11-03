@@ -33,7 +33,13 @@ pub(crate) struct DeletionOptions {
 /// One of the project's image files, sorted by who may delete it.
 enum ImageFile {
     Original,
-    StoredCopy { file: PathBuf, shared_with: Option<String> },
+    StoredCopy(StoredCopy),
+}
+
+/// A stored copy, and the first other project (by name) that uses it too, if any.
+struct StoredCopy {
+    file: PathBuf,
+    shared_with: Option<String>,
 }
 
 pub(crate) async fn preview(_: Admin, State(state): State<AppState>, UrlPath(project): UrlPath<i64>) -> Result<Json<ProjectDeletionPreview>, ApiError> {
@@ -43,8 +49,8 @@ pub(crate) async fn preview(_: Admin, State(state): State<AppState>, UrlPath(pro
     for (file, _) in image_files(&mut conn, &state, project).await? {
         match file {
             ImageFile::Original => preview.originals += 1,
-            ImageFile::StoredCopy { shared_with: None, .. } => preview.stored_copies += 1,
-            ImageFile::StoredCopy { shared_with: Some(_), .. } => preview.shared_copies += 1,
+            ImageFile::StoredCopy(StoredCopy { shared_with: None, .. }) => preview.stored_copies += 1,
+            ImageFile::StoredCopy(StoredCopy { shared_with: Some(_), .. }) => preview.shared_copies += 1,
         }
     }
     Ok(Json(preview))
@@ -77,18 +83,23 @@ pub(crate) async fn delete(
             orphaned.push(hash);
         }
     }
-    let copies: Vec<(PathBuf, Option<String>)> = files
-        .into_iter()
-        .filter_map(|(file, _)| match file {
-            ImageFile::StoredCopy { file, shared_with } if options.delete_stored_copies => Some((file, shared_with)),
-            _ => None,
-        })
-        .collect();
+    let mut copies = Vec::new();
+    if options.delete_stored_copies {
+        // Asked again now the project is gone: an import since the transaction may have taken one.
+        let root = absolute(&state.images_root);
+        let mut conn = state.pool.acquire().await?;
+        for (file, _) in files {
+            if let ImageFile::StoredCopy(StoredCopy { file, .. }) = file {
+                let shared_with = shared_with(&mut conn, project, &root, &file).await?;
+                copies.push(StoredCopy { file, shared_with });
+            }
+        }
+    }
     let uploads = absolute(&state.upload_dir);
     let cache = state.cache_dir.clone();
     let report = tokio::task::spawn_blocking(move || {
         forget_cached(&cache, &orphaned);
-        delete_copies(&uploads, copies)
+        delete_copies(&uploads, project, copies)
     })
     .await
     .map_err(|err| ApiError::Internal(err.to_string()))?;
@@ -106,18 +117,8 @@ async fn image_files(conn: &mut SqliteConnection, state: &AppState, project: i64
         let stored: String = row.get("path");
         let file = absolute(&source_file(&root, &stored));
         let image = if file.starts_with(&uploads) {
-            // Another project may name the same file by either form of its path.
-            let shared_with = sqlx::query(
-                "SELECT projects.name FROM images JOIN projects ON projects.id = images.project_id \
-                 WHERE images.project_id <> ? AND images.path IN (?, ?) ORDER BY projects.name LIMIT 1",
-            )
-            .bind(project)
-            .bind(file.to_string_lossy())
-            .bind(relative_path(&root, &file))
-            .fetch_optional(&mut *conn)
-            .await?
-            .map(|row| row.get("name"));
-            ImageFile::StoredCopy { file, shared_with }
+            let shared_with = shared_with(&mut *conn, project, &root, &file).await?;
+            ImageFile::StoredCopy(StoredCopy { file, shared_with })
         } else {
             ImageFile::Original
         };
@@ -126,26 +127,49 @@ async fn image_files(conn: &mut SqliteConnection, state: &AppState, project: i64
     Ok(files)
 }
 
+/// The first other project, by name, whose images include `file`.
+async fn shared_with(conn: &mut SqliteConnection, project: i64, root: &Path, file: &Path) -> Result<Option<String>, ApiError> {
+    // Another project may name the same file by either form of its path.
+    Ok(sqlx::query(
+        "SELECT projects.name FROM images JOIN projects ON projects.id = images.project_id \
+         WHERE images.project_id <> ? AND images.path IN (?, ?) ORDER BY projects.name LIMIT 1",
+    )
+    .bind(project)
+    .bind(file.to_string_lossy())
+    .bind(relative_path(root, file))
+    .fetch_optional(conn)
+    .await?
+    .map(|row| row.get("name")))
+}
+
 /// `path` with symbolic links resolved when it exists, otherwise just made absolute.
 fn absolute(path: &Path) -> PathBuf {
     path.canonicalize().or_else(|_| std::path::absolute(path)).unwrap_or_else(|_| path.to_owned())
 }
 
-/// Deletes the copies no other project uses, then the folders under `uploads` they leave empty.
-fn delete_copies(uploads: &Path, copies: Vec<(PathBuf, Option<String>)>) -> ProjectDeletionReport {
+/// Deletes the copies no other project uses, then the folders they leave empty inside the
+/// project's upload folder or an archive's (`uploads/{project}`, `uploads/archive-*`).
+fn delete_copies(uploads: &Path, project: i64, copies: Vec<StoredCopy>) -> ProjectDeletionReport {
     let mut report = ProjectDeletionReport::default();
     let mut folders = BTreeSet::new();
-    for (file, shared_with) in copies {
+    let project_folder = project.to_string();
+    for StoredCopy { file, shared_with } in copies {
         let path = file.to_string_lossy().into_owned();
-        if let Some(project) = shared_with {
-            report.kept.push(KeptFile { path, project });
+        if let Some(project_name) = shared_with {
+            report.kept.push(KeptFile { path, project_name });
             continue;
         }
         match fs::remove_file(&file) {
             Ok(()) => report.deleted.push(path),
             Err(err) => report.failed.push(FailedFile { path, reason: reason(&err) }),
         }
-        folders.extend(file.ancestors().skip(1).take_while(|folder| *folder != uploads && folder.starts_with(uploads)).map(Path::to_owned));
+        let managed = file.strip_prefix(uploads).ok().and_then(|inside| inside.components().next()).is_some_and(|top| {
+            let top = top.as_os_str().to_string_lossy();
+            top == project_folder || top.starts_with("archive-")
+        });
+        if managed {
+            folders.extend(file.ancestors().skip(1).take_while(|folder| *folder != uploads).map(Path::to_owned));
+        }
     }
     // Deepest first, so a folder emptied by removing its subfolders goes too; non-empty ones fail.
     for folder in folders.iter().rev() {

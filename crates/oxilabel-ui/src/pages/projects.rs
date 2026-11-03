@@ -77,7 +77,7 @@ pub fn ProjectsPage() -> impl IntoView {
 #[component]
 fn ProjectCard(project: ProjectSummary, admin: bool, on_delete: impl Fn(ProjectSummary) + Copy + Send + Sync + 'static) -> impl IntoView {
     let percent = if project.images > 0 { project.annotated * 100 / project.images } else { 0 };
-    let plural = |n: i64, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
+    let n = |n: i64| n.max(0) as u64;
     let target = project.clone();
     view! {
         <a class="project-card" href=if admin { format!("/projects/{}", project.id) } else { format!("/projects/{}/jobs", project.id) }>
@@ -87,10 +87,10 @@ fn ProjectCard(project: ProjectSummary, admin: bool, on_delete: impl Fn(ProjectS
             </span>
             <span class="bar"><span style:width=format!("{percent}%")></span></span>
             <span class="stats">
-                <span>{plural(project.images, "image")}</span>
+                <span>{count(n(project.images), "image", "images")}</span>
                 <span>{format!("{} annotated", project.annotated)}</span>
-                <span>{plural(project.label_colors.len() as i64, "label")}</span>
-                {(project.jobs > 0).then(|| view! { <span class="jobs">{plural(project.jobs, "job")}</span> })}
+                <span>{count(project.label_colors.len() as u64, "label", "labels")}</span>
+                {(project.jobs > 0).then(|| view! { <span class="jobs">{count(n(project.jobs), "job", "jobs")}</span> })}
             </span>
             <span class="swatches">
                 {project.label_colors.iter().map(|color| view! { <span class="swatch" style:background=color.clone()></span> }).collect_view()}
@@ -107,8 +107,13 @@ fn ProjectCard(project: ProjectSummary, admin: bool, on_delete: impl Fn(ProjectS
     }
 }
 
+/// `n` with the word for one or for many: "1 image", "2 images".
+fn count(n: u64, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
 /// Confirms deleting a project, which can take its stored copies along; originals always stay.
-/// Kept or undeletable copies are listed afterwards.
+/// What happened to the stored copies is listed afterwards.
 #[component]
 fn DeleteProjectDialog(
     project: ProjectSummary,
@@ -124,7 +129,6 @@ fn DeleteProjectDialog(
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let report = RwSignal::new(None::<ProjectDeletionReport>);
-    let plural = |n: u64, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
 
     let confirm = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
@@ -139,7 +143,7 @@ fn DeleteProjectDialog(
             match result {
                 Ok(done) => {
                     on_deleted();
-                    if done.kept.is_empty() && done.failed.is_empty() { on_close() } else { report.set(Some(done)) }
+                    report.set(Some(done));
                 }
                 Err(message) => error.set(Some(message)),
             }
@@ -158,9 +162,10 @@ fn DeleteProjectDialog(
                 <div class="dialog-body">
                     {move || match (report.get(), preview.get()) {
                         (Some(done), _) => view! {
-                            <p class="deletion-report">{format!("The project is deleted, and {}.", plural(done.deleted.len() as u64, "stored copy", "stored copies"))}</p>
+                            <p class="deletion-report">{format!("The project is deleted, and {}.", count(done.deleted.len() as u64, "stored copy", "stored copies"))}</p>
                             <ul class="deletion-files">
-                                {done.kept.into_iter().map(|kept| view! { <li>{format!("Kept {}: used by “{}”", kept.path, kept.project)}</li> }).collect_view()}
+                                {done.deleted.into_iter().map(|path| view! { <li class="deleted">{format!("Deleted {path}")}</li> }).collect_view()}
+                                {done.kept.into_iter().map(|kept| view! { <li class="kept">{format!("Kept {}: used by “{}”", kept.path, kept.project_name)}</li> }).collect_view()}
                                 {done.failed.into_iter().map(|failed| view! { <li class="error">{format!("Not deleted {}: {}", failed.path, failed.reason)}</li> }).collect_view()}
                             </ul>
                         }.into_any(),
@@ -171,14 +176,10 @@ fn DeleteProjectDialog(
                             <label class="choice" class:disabled={files.stored_copies == 0}>
                                 <input type="checkbox" class="delete-stored-copies" disabled={files.stored_copies == 0}
                                     prop:checked=move || with_copies.get() on:change:target=move |ev| with_copies.set(ev.target().checked()) />
-                                <span>{format!("Also delete {} the server keeps for it", plural(files.stored_copies, "stored copy", "stored copies"))}</span>
+                                <span>{format!("Also delete {} the server keeps for it", count(files.stored_copies, "stored copy", "stored copies"))}</span>
                             </label>
-                            {(files.shared_copies > 0).then(|| view! {
-                                <p class="muted">{format!("{}: another project uses them.", plural(files.shared_copies, "stored copy stays", "stored copies stay"))}</p>
-                            })}
-                            {(files.originals > 0).then(|| view! {
-                                <p class="warning originals-stay">{format!("{} at their locations on disk.", plural(files.originals, "original stays", "originals stay"))}</p>
-                            })}
+                            <p class="muted shared-stay">{format!("{} used by another project too: kept.", count(files.shared_copies, "stored copy", "stored copies"))}</p>
+                            <p class="warning originals-stay">{format!("{} at their locations on disk.", count(files.originals, "original stays", "originals stay"))}</p>
                         }.into_any(),
                     }}
                     <Show when=move || error.get().is_some()>

@@ -194,7 +194,7 @@ async fn deleting_a_project_with_its_stored_copies_spares_originals_and_shared_c
 
     let (status, report) = call(&app, Method::DELETE, &format!("/api/projects/{}?delete_stored_copies=true", gone.project), None).await;
     assert_eq!(status, StatusCode::OK, "{report}");
-    assert_eq!(report, json!({"deleted": [gone.own_copy], "kept": [{"path": gone.shared_copy, "project": "Other"}], "failed": []}));
+    assert_eq!(report, json!({"deleted": [gone.own_copy], "kept": [{"path": gone.shared_copy, "project_name": "Other"}], "failed": []}));
     assert!(!gone.own_copy.exists(), "the copy only this project used is gone");
     assert!(!gone.own_copy.parent().unwrap().exists(), "and so is its emptied folder");
     assert!(gone.shared_copy.exists() && gone.original.exists());
