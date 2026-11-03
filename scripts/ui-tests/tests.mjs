@@ -1313,6 +1313,16 @@ tests.push({
       await signOut(t.b, t.base);
       await signIn(t.b, t.base, ADMIN);
     }
+
+    // The admin deletes anna but has no Delete button on their own row.
+    await t.b.goto(`${t.base}/users`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector(${JSON.stringify(row('anna'))})`), 'anna in the users table');
+    equal(await t.b.eval(`!!document.querySelector(${JSON.stringify(row('admin') + ' button.delete')})`), false, 'a Delete button on the admin’s own row');
+    await t.b.eval(`window.confirm = () => true, 1`);
+    await t.b.eval(`document.querySelector(${JSON.stringify(row('anna') + ' button.delete')}).click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`!document.querySelector(${JSON.stringify(row('anna'))}) && document.querySelector('[role=status]')?.textContent.includes('anna was deleted')`), 'anna gone');
+    const jobs = await t.api.call('GET', `/api/projects/${t.project.id}/jobs`);
+    equal(jobs.find((job) => job.id === annaJob.id).assignee, null, 'the assignee of anna’s job');
   },
 });
 
@@ -1355,16 +1365,6 @@ tests.push({
     await t.b.waitFor(async () => (await t.api.call('GET', `/api/projects/${p}/jobs`))[1].assignee === null, 'job 2 unassigned');
 
     await t.b.eval(`document.querySelector('a.tab[href="/projects/${p}/statistics"]').click(), 1`);
-
-    // The admin deletes anna but has no Delete button on their own row.
-    await t.b.goto(`${t.base}/users`);
-    await t.b.waitFor(() => t.b.eval(`!!document.querySelector(${JSON.stringify(row('anna'))})`), 'anna in the users table');
-    equal(await t.b.eval(`!!document.querySelector(${JSON.stringify(row('admin') + ' button.delete')})`), false, 'a Delete button on the admin’s own row');
-    await t.b.eval(`window.confirm = () => true, 1`);
-    await t.b.eval(`document.querySelector(${JSON.stringify(row('anna') + ' button.delete')}).click(), 1`);
-    await t.b.waitFor(() => t.b.eval(`!document.querySelector(${JSON.stringify(row('anna'))}) && document.querySelector('[role=status]')?.textContent.includes('anna was deleted')`), 'anna gone');
-    const jobs = await t.api.call('GET', `/api/projects/${t.project.id}/jobs`);
-    equal(jobs.find((job) => job.id === annaJob.id).assignee, null, 'the assignee of anna’s job');
     await t.b.waitFor(() => t.b.eval(`document.querySelectorAll('.per-job tbody tr').length === 2 && document.querySelectorAll('.per-user tbody tr').length === 2`), 'the statistics');
 
     await t.b.eval(`document.querySelector('a.tab[href="/projects/${p}"]').click(), 1`);
