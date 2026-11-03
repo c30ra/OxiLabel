@@ -1,0 +1,33 @@
+# Runs the checks under Testing in AGENTS.md on what was committed, which no local run sees when a
+# commit holds only part of the working tree. The browser flows need Firefox, so CI only parses them.
+name: Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Rust tests
+        run: cargo test --workspace --exclude oxilabel-ui
+      - name: UI builds for the browser
+        run: cargo check -p oxilabel-ui --target wasm32-unknown-unknown
+      - name: Browser flows parse
+        run: for file in scripts/ui-tests/*.mjs; do node --check "$file"; done
+      - name: Worker tests
+        run: PYTHONPATH=worker python3 -m unittest discover -s worker/tests -t worker

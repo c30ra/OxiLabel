@@ -10,7 +10,7 @@ Default five-label vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, 
 
 ### Domain docs
 
-Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+Single-context: one `GLOSSARY.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
 
 ## Testing
 
@@ -21,5 +21,6 @@ Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agent
 
 ## Commits and releases
 
-- Commit with Cocogitto: `cog commit <type> "<message>" [scope]` (Conventional Commits; `cog.toml` holds the config). The `commit-msg` hook (`cog install-hook --all`) rejects non-conventional messages.
+- Start a feature on a clean tree: commit or stash unrelated work first, or work in a `git worktree`.
+- Commit with Cocogitto: `cog commit <type> "<message>" [scope]` (Conventional Commits; `cog.toml` holds the config). Its hooks (`cog install-hook --all`) reject non-conventional messages and staged browser-test modules that don't parse.
 - Bump the version with `cog bump --auto` (or `--patch`/`--minor`/`--major`): it sets the workspace version via `cargo set-version`, updates `CHANGELOG.md`, commits and tags `vX.Y.Z`. Never edit the version or create release tags by hand.

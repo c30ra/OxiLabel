@@ -15,6 +15,23 @@ post_bump_hooks = []
 pre_package_bump_hooks = []
 post_package_bump_hooks = []
 
+# Parses the staged copy of each changed browser-test module: a commit of part of the working tree
+# can break a file that parses fine on disk.
+[git_hooks.pre-commit]
+script = """#!/bin/sh
+set -e
+for path in $(git diff --cached --name-only --diff-filter=ACM -- 'scripts/ui-tests/*.mjs'); do
+  staged=$(mktemp --suffix=.mjs)
+  git show ":$path" > "$staged"
+  if ! node --check "$staged"; then
+    rm -f "$staged"
+    echo "pre-commit: the staged $path does not parse" >&2
+    exit 1
+  fi
+  rm -f "$staged"
+done
+"""
+
 [git_hooks.commit-msg]
 script = """#!/bin/sh
 set -e
