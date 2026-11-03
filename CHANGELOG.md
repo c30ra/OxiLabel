@@ -2,6 +2,19 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.4.0 - 2026-11-03
+#### Features
+- (**import**) import single images through the desktop or browser file dialog, replacing the image-root folder browser - (38a2b01) - c30ra
+- (**projects**) deleting a project can delete its stored copies too; originals always stay, shared copies are kept and reported - (626e4a5) - c30ra
+- (**users**) delete users from the Users page - (7b50cab) - c30ra
+#### Bug Fixes
+- (**projects**) show the full deletion report and every count, recheck shared copies after the project is gone, prune only project and archive upload folders - (9f3272a) - c30ra
+- (**ui-tests**) keep the user-deletion browser steps in the user admin flow - (f4ab9d7) - c30ra
+#### Miscellaneous Chores
+- (**agents**) check committed trees in CI and a pre-commit hook, add review standards, rename the glossary to GLOSSARY.md - (9c665a9) - c30ra
+
+- - -
+
 ## v0.3.0 - 2026-11-02
 #### Features
 - (**editor**) switch tools and relabel through one session rule - (905d42a) - c30ra
