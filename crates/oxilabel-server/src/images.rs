@@ -327,7 +327,7 @@ fn is_supported(file: &Path) -> bool {
 
 /// How an image's path is stored: relative to the image root (with `/`) when it is inside it,
 /// otherwise absolute.
-fn relative_path(root: &Path, file: &Path) -> String {
+pub(crate) fn relative_path(root: &Path, file: &Path) -> String {
     match file.strip_prefix(root) {
         Ok(relative) => relative.components().map(|part| part.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/"),
         Err(_) => file.to_string_lossy().into_owned(),

@@ -3,7 +3,7 @@
 
 use leptos::{prelude::*, task::spawn_local};
 use leptos_router::{components::A, hooks::use_navigate};
-use oxilabel_core::{Label, LabelDefinition, NewProject, Project, ProjectSummary, ShapeType};
+use oxilabel_core::{Label, LabelDefinition, NewProject, Project, ProjectDeletionPreview, ProjectDeletionReport, ProjectSummary, ShapeType};
 
 use super::{
     archive::ImportArchiveDialog,
@@ -20,18 +20,10 @@ pub fn ProjectsPage() -> impl IntoView {
     let creating = RwSignal::new(false);
     let importing_archive = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
+    let deleting = RwSignal::new(None::<ProjectSummary>);
     let admin = is_admin();
 
-    let on_delete = move |project: ProjectSummary| {
-        let question = format!("Delete project \"{}\" and its annotations? The image files stay.", project.name);
-        if !window().confirm_with_message(&question).unwrap_or(false) {
-            return;
-        }
-        spawn_local(async move {
-            error.set(api::delete(&format!("/api/projects/{}", project.id)).await.err());
-            projects.refetch();
-        });
-    };
+    let on_delete = move |project: ProjectSummary| deleting.set(Some(project));
 
     view! {
         <header class="topbar">
@@ -70,6 +62,9 @@ pub fn ProjectsPage() -> impl IntoView {
         <Show when=move || importing_archive.get()>
             <ImportArchiveDialog on_imported=move || projects.refetch() on_close=move || importing_archive.set(false) />
         </Show>
+        {move || deleting.get().map(|project| view! {
+            <DeleteProjectDialog project=project on_deleted=move || projects.refetch() on_close=move || deleting.set(None) />
+        })}
         <Show when=move || creating.get()>
             {move || {
                 let sources = projects.get().and_then(Result::ok).unwrap_or_default();
@@ -109,6 +104,95 @@ fn ProjectCard(project: ProjectSummary, admin: bool, on_delete: impl Fn(ProjectS
                     }>"×"</button>
             })}
         </a>
+    }
+}
+
+/// Confirms deleting a project, which can take its stored copies along; originals always stay.
+/// Kept or undeletable copies are listed afterwards.
+#[component]
+fn DeleteProjectDialog(
+    project: ProjectSummary,
+    on_deleted: impl Fn() + Copy + Send + Sync + 'static,
+    on_close: impl Fn() + Copy + Send + Sync + 'static,
+) -> impl IntoView {
+    let id = project.id;
+    let preview = LocalResource::new(move || {
+        let url = format!("/api/projects/{id}/deletion");
+        async move { api::get::<ProjectDeletionPreview>(&url).await }
+    });
+    let with_copies = RwSignal::new(false);
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    let report = RwSignal::new(None::<ProjectDeletionReport>);
+    let plural = |n: u64, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+
+    let confirm = move |ev: leptos::ev::SubmitEvent| {
+        ev.prevent_default();
+        if report.get_untracked().is_some() {
+            return on_close();
+        }
+        busy.set(true);
+        let url = format!("/api/projects/{id}?delete_stored_copies={}", with_copies.get_untracked());
+        spawn_local(async move {
+            let result = api::delete_json::<ProjectDeletionReport>(&url).await;
+            busy.set(false);
+            match result {
+                Ok(done) => {
+                    on_deleted();
+                    if done.kept.is_empty() && done.failed.is_empty() { on_close() } else { report.set(Some(done)) }
+                }
+                Err(message) => error.set(Some(message)),
+            }
+        });
+    };
+
+    view! {
+        <div class="backdrop" on:click=move |ev| {
+            if ev.target() == ev.current_target() { on_close() }
+        }>
+            <form class="dialog delete-project-dialog" role="dialog" aria-label="Delete project" on:submit=confirm>
+                <div class="dialog-head">
+                    <h2>{format!("Delete “{}”", project.name)}</h2>
+                    <button type="button" class="icon" aria-label="Close" on:click=move |_| on_close()>"×"</button>
+                </div>
+                <div class="dialog-body">
+                    {move || match (report.get(), preview.get()) {
+                        (Some(done), _) => view! {
+                            <p class="deletion-report">{format!("The project is deleted, and {}.", plural(done.deleted.len() as u64, "stored copy", "stored copies"))}</p>
+                            <ul class="deletion-files">
+                                {done.kept.into_iter().map(|kept| view! { <li>{format!("Kept {}: used by “{}”", kept.path, kept.project)}</li> }).collect_view()}
+                                {done.failed.into_iter().map(|failed| view! { <li class="error">{format!("Not deleted {}: {}", failed.path, failed.reason)}</li> }).collect_view()}
+                            </ul>
+                        }.into_any(),
+                        (None, None) => view! { <p class="muted">"Loading…"</p> }.into_any(),
+                        (None, Some(Err(message))) => view! { <p class="error" role="alert">{message}</p> }.into_any(),
+                        (None, Some(Ok(files))) => view! {
+                            <p>"Its images, annotations, labels and jobs are deleted."</p>
+                            <label class="choice" class:disabled={files.stored_copies == 0}>
+                                <input type="checkbox" class="delete-stored-copies" disabled={files.stored_copies == 0}
+                                    prop:checked=move || with_copies.get() on:change:target=move |ev| with_copies.set(ev.target().checked()) />
+                                <span>{format!("Also delete {} the server keeps for it", plural(files.stored_copies, "stored copy", "stored copies"))}</span>
+                            </label>
+                            {(files.shared_copies > 0).then(|| view! {
+                                <p class="muted">{format!("{}: another project uses them.", plural(files.shared_copies, "stored copy stays", "stored copies stay"))}</p>
+                            })}
+                            {(files.originals > 0).then(|| view! {
+                                <p class="warning originals-stay">{format!("{} at their locations on disk.", plural(files.originals, "original stays", "originals stay"))}</p>
+                            })}
+                        }.into_any(),
+                    }}
+                    <Show when=move || error.get().is_some()>
+                        <p class="error" role="alert">{move || error.get()}</p>
+                    </Show>
+                </div>
+                <div class="dialog-foot">
+                    {move || report.get().is_none().then(|| view! { <button type="button" on:click=move |_| on_close()>"Cancel"</button> })}
+                    <button type="submit" class="primary confirm-delete" disabled=move || busy.get() || preview.get().is_none()>
+                        {move || if report.get().is_some() { "Close" } else { "Delete project" }}
+                    </button>
+                </div>
+            </form>
+        </div>
     }
 }
 

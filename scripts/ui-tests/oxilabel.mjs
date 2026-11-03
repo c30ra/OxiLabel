@@ -1,8 +1,8 @@
 // OxiLabel-specific helpers for the UI tests: API setup calls, a generated test image, and reading
 // the workspace state from the page.
 
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { basename, dirname } from 'node:path';
 import { crc32, deflateSync } from 'node:zlib';
 
 /** Writes a grayscale PNG with a diagonal gradient and a grid, big enough for two pyramid levels. */
@@ -64,6 +64,14 @@ export async function api(base, { username, password } = ADMIN) {
       const response = await fetch(base + path, { headers: { cookie } });
       if (!response.ok) throw new Error(`GET ${path} → ${response.status} ${await response.text()}`);
       return Buffer.from(await response.arrayBuffer());
+    },
+    /** Uploads `files` (paths on disk) to the project, as a browser on another machine would. */
+    async upload(project, files) {
+      const form = new FormData();
+      for (const file of files) form.append('file', new Blob([readFileSync(file)]), basename(file));
+      const response = await fetch(`${base}/api/projects/${project}/uploads`, { method: 'POST', headers: { cookie }, body: form });
+      if (!response.ok) throw new Error(`upload → ${response.status} ${await response.text()}`);
+      return response.json();
     },
     /** A project with `labels` ({name, color, hotkey, shapes}) and the test image imported. */
     async project(name, labels) {

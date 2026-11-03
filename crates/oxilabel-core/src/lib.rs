@@ -513,6 +513,40 @@ pub struct RemovalReport {
     pub annotations: u64,
 }
 
+/// What deleting a project would do to its image files. Originals always stay where they are;
+/// stored copies are deleted only if asked, and only those no other project uses.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectDeletionPreview {
+    /// Stored copies only this project uses.
+    pub stored_copies: u64,
+    /// Stored copies another project uses too, which stay.
+    pub shared_copies: u64,
+    pub originals: u64,
+}
+
+/// What deleting a project did to its stored copies: those deleted, those kept because another
+/// project uses them, and those that could not be deleted. The project is gone either way.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectDeletionReport {
+    pub deleted: Vec<String>,
+    pub kept: Vec<KeptFile>,
+    pub failed: Vec<FailedFile>,
+}
+
+/// A stored copy kept because another project uses it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeptFile {
+    pub path: String,
+    pub project: String,
+}
+
+/// A file that could not be deleted, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailedFile {
+    pub path: String,
+    pub reason: String,
+}
+
 /// What an import did: new images added, known ones (same path or same content) skipped,
 /// files that are not images counted, and images that could not be read listed with a reason.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

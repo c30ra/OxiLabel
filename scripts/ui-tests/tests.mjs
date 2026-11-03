@@ -1,7 +1,7 @@
 // The browser-level flows of the annotation workspace. Each test gets a fresh project with the
 // nine labels of NINE_LABELS (only "line", 3, rejects rectangles) and one 1600 × 1000 image.
 
-import { writeFileSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -1365,6 +1365,38 @@ tests.push({
     await t.b.waitFor(() => t.b.eval(`!document.querySelector(${JSON.stringify(row('anna'))}) && document.querySelector('[role=status]')?.textContent.includes('anna was deleted')`), 'anna gone');
     const jobs = await t.api.call('GET', `/api/projects/${t.project.id}/jobs`);
     equal(jobs.find((job) => job.id === annaJob.id).assignee, null, 'the assignee of anna’s job');
+  },
+});
+
+tests.push({
+  name: 'deleting a project can take its stored copies along and says its originals stay',
+  async run(t) {
+    const { id } = await t.api.call('POST', '/api/projects', { name: 'Short-lived' });
+    // Different sizes, as an import skips images with the same content.
+    writeTestImage(join(t.work, 'images', 'deletion/original.png'), 90, 60);
+    await t.api.call('POST', `/api/projects/${id}/imports`, { paths: ['deletion'] });
+    const copy = join(t.work, 'browser-files', 'copy.png');
+    writeTestImage(copy, 70, 50);
+    await t.api.upload(id, [copy]);
+    const { images } = await t.api.call('GET', `/api/projects/${id}/images`);
+    const stored = images.map((image) => image.path).find((path) => path.startsWith(join(t.work, 'uploads')));
+    equal(existsSync(stored), true, 'the stored copy before');
+
+    await t.b.goto(`${t.base}/`);
+    const card = `.project-card[href="/projects/${id}"]`;
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector(${JSON.stringify(card)})`), 'the project card');
+    await t.b.eval(`document.querySelector(${JSON.stringify(`${card} .delete`)}).click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`!!document.querySelector('.delete-project-dialog input.delete-stored-copies')`), 'the delete dialog');
+    const dialog = await t.b.json(`({
+      checked: document.querySelector('.delete-project-dialog input.delete-stored-copies').checked,
+      copies: document.querySelector('.delete-project-dialog .choice').textContent.trim(),
+      originals: document.querySelector('.delete-project-dialog .originals-stay')?.textContent,
+    })`);
+    equal(dialog, { checked: false, copies: 'Also delete 1 stored copy the server keeps for it', originals: '1 original stays at their locations on disk.' }, 'the dialog');
+    await t.b.eval(`document.querySelector('.delete-project-dialog input.delete-stored-copies').click(), 1`);
+    await t.b.eval(`document.querySelector('.delete-project-dialog button.confirm-delete').click(), 1`);
+    await t.b.waitFor(() => t.b.eval(`!document.querySelector(${JSON.stringify(card)}) && !document.querySelector('.delete-project-dialog')`), 'the project and dialog gone');
+    equal([existsSync(stored), existsSync(join(t.work, 'images', 'deletion/original.png'))], [false, true], 'the copy and the original after');
   },
 });
 

@@ -103,6 +103,11 @@ pub async fn delete(url: &str) -> Result<(), String> {
         .map(|_| ())
 }
 
+/// DELETE for actions that answer with a report.
+pub async fn delete_json<T: DeserializeOwned>(url: &str) -> Result<T, String> {
+    read_json(check(Request::delete(&absolute(url)).send().await).await?).await
+}
+
 /// Prefixes a server path with the page's origin. Browsers resolve relative request URLs
 /// themselves, but some headless engines (Obscura, used for UI tests) do not.
 fn absolute(path: &str) -> String {

@@ -1,8 +1,10 @@
 mod common;
 
+use std::path::{Path, PathBuf};
+
 use axum::http::{Method, StatusCode};
-use common::{call, test_app};
-use serde_json::json;
+use common::{TestApp, call, get_bytes, test_app, upload};
+use serde_json::{Value, json};
 
 #[tokio::test]
 async fn created_project_appears_in_the_list() {
@@ -24,7 +26,7 @@ async fn deleted_project_disappears_from_the_list() {
     let (_, gone) = call(&app, Method::POST, "/api/projects", Some(json!({"name": "Gone"}))).await;
 
     let (status, _) = call(&app, Method::DELETE, &format!("/api/projects/{}", gone["id"]), None).await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::OK);
 
     let (_, list) = call(&app, Method::GET, "/api/projects", None).await;
     assert_eq!(list[0]["id"], keep["id"]);
@@ -120,4 +122,92 @@ async fn a_new_project_can_copy_another_projects_labels_with_their_ids() {
 
     let (status, _) = call(&app, Method::POST, "/api/projects", Some(json!({"name": "X", "copy_labels_from": 999}))).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+fn png(shade: u8) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    image::RgbImage::from_pixel(6, 4, image::Rgb([shade, 0, 0]))
+        .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+        .unwrap();
+    bytes
+}
+
+async fn new_project(app: &TestApp, name: &str) -> i64 {
+    call(app, Method::POST, "/api/projects", Some(json!({"name": name}))).await.1["id"].as_i64().unwrap()
+}
+
+async fn paths(app: &TestApp, project: i64) -> Vec<PathBuf> {
+    let (_, page) = call(app, Method::GET, &format!("/api/projects/{project}/images"), None).await;
+    page["images"].as_array().unwrap().iter().map(|image| PathBuf::from(image["path"].as_str().unwrap())).collect()
+}
+
+/// A project ("Gone") with two stored copies and one original; a second project, "Other", also
+/// uses one of the copies.
+struct Gone {
+    project: i64,
+    shared_copy: PathBuf,
+    own_copy: PathBuf,
+    original: PathBuf,
+}
+
+async fn project_with_copies_and_an_original(app: &TestApp) -> Gone {
+    let project = new_project(app, "Gone").await;
+    let (status, report) = upload(app, &format!("/api/projects/{project}/uploads"), &[("set/a.png", png(1)), ("set/sub/b.png", png(2))]).await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    std::fs::write(app.picked.path().join("c.png"), png(3)).unwrap();
+    let original = app.picked.path().canonicalize().unwrap().join("c.png");
+    call(&app.local, Method::POST, &format!("/api/projects/{project}/imports"), Some(json!({"paths": [original]}))).await;
+    let copies = paths(app, project).await;
+    let shared_copy = copies.iter().find(|p| p.ends_with("a.png")).unwrap().clone();
+    let own_copy = copies.iter().find(|p| p.ends_with("b.png")).unwrap().clone();
+    let other = new_project(app, "Other").await;
+    call(&app.local, Method::POST, &format!("/api/projects/{other}/imports"), Some(json!({"paths": [shared_copy]}))).await;
+    Gone { project, shared_copy, own_copy, original }
+}
+
+#[tokio::test]
+async fn the_deletion_preview_counts_stored_copies_shared_copies_and_originals() {
+    let app = test_app().await;
+    let gone = project_with_copies_and_an_original(&app).await;
+    let (status, preview) = call(&app, Method::GET, &format!("/api/projects/{}/deletion", gone.project), None).await;
+    assert_eq!((status, preview), (StatusCode::OK, json!({"stored_copies": 1, "shared_copies": 1, "originals": 1})));
+}
+
+#[tokio::test]
+async fn deleting_a_project_keeps_its_image_files_unless_asked() {
+    let app = test_app().await;
+    let gone = project_with_copies_and_an_original(&app).await;
+    let (status, report) = call(&app, Method::DELETE, &format!("/api/projects/{}", gone.project), None).await;
+    assert_eq!((status, report), (StatusCode::OK, json!({"deleted": [], "kept": [], "failed": []})));
+    assert!(gone.shared_copy.exists() && gone.own_copy.exists() && gone.original.exists());
+}
+
+#[tokio::test]
+async fn deleting_a_project_with_its_stored_copies_spares_originals_and_shared_copies() {
+    let app = test_app().await;
+    let gone = project_with_copies_and_an_original(&app).await;
+    let (_, page) = call(&app, Method::GET, &format!("/api/projects/{}/images", gone.project), None).await;
+    let own_id = page["images"].as_array().unwrap().iter().find(|i| i["path"].as_str().unwrap().ends_with("b.png")).unwrap()["id"].clone();
+    assert_eq!(get_bytes(&app, &format!("/api/images/{own_id}/thumbnail")).await.0, StatusCode::OK);
+    let thumbnails = app.cache.path().join("thumbnails");
+    assert_eq!(std::fs::read_dir(&thumbnails).unwrap().count(), 1);
+
+    let (status, report) = call(&app, Method::DELETE, &format!("/api/projects/{}?delete_stored_copies=true", gone.project), None).await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    assert_eq!(report, json!({"deleted": [gone.own_copy], "kept": [{"path": gone.shared_copy, "project": "Other"}], "failed": []}));
+    assert!(!gone.own_copy.exists(), "the copy only this project used is gone");
+    assert!(!gone.own_copy.parent().unwrap().exists(), "and so is its emptied folder");
+    assert!(gone.shared_copy.exists() && gone.original.exists());
+    assert_eq!(std::fs::read_dir(&thumbnails).unwrap().count(), 0, "no remaining image has the deleted copy's content");
+    assert!(Path::new(app.uploads.path()).exists(), "the upload folder itself stays");
+}
+
+#[tokio::test]
+async fn a_stored_copy_already_missing_is_reported_as_failed() {
+    let app = test_app().await;
+    let gone = project_with_copies_and_an_original(&app).await;
+    std::fs::remove_file(&gone.own_copy).unwrap();
+    let (_, report): (_, Value) = call(&app, Method::DELETE, &format!("/api/projects/{}?delete_stored_copies=true", gone.project), None).await;
+    assert_eq!(report["deleted"], json!([]));
+    assert_eq!(report["failed"][0]["path"], json!(gone.own_copy));
 }

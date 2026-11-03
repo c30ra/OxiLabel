@@ -16,6 +16,14 @@ _Avoid_: Task, assignment
 A single picture inside a project that can carry annotations.
 _Avoid_: Sample, frame, photo
 
+**Original**:
+An image file at its own location on the host, which OxiLabel references where it is and never copied.
+_Avoid_: Source, imported image
+
+**Stored copy**:
+An image file the server keeps in its own data folder, made when images are uploaded from another machine or come inside a project archive.
+_Avoid_: Upload, imported image, managed file
+
 **Label**:
 A category defined at project level (e.g. "crack") that annotations and tags refer to. It has a permanent numeric id, a color, a hotkey, the shape types it allows, and its attributes.
 _Avoid_: Class, category

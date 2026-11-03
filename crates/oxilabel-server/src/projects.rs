@@ -7,12 +7,13 @@ use axum::{
 use oxilabel_core::{NewProject, Project, ProjectSummary};
 use sqlx::{Row, SqliteConnection, SqlitePool};
 
-use crate::{AppState, access_scope::AccessScope, auth::Admin, error::ApiError, labels};
+use crate::{AppState, access_scope::AccessScope, auth::Admin, error::ApiError, labels, project_deletion};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/projects", get(list_projects).post(create_project))
-        .route("/api/projects/{id}", get(get_project).delete(delete_project))
+        .route("/api/projects/{id}", get(get_project).delete(project_deletion::delete))
+        .route("/api/projects/{id}/deletion", get(project_deletion::preview))
 }
 
 async fn create_project(
@@ -92,14 +93,6 @@ async fn get_project(scope: AccessScope, State(pool): State<SqlitePool>, Path(id
         .await?
         .ok_or(ApiError::NotFound)?;
     Ok(Json(Project { id: row.get("id"), name: row.get("name") }))
-}
-
-async fn delete_project(_: Admin, State(pool): State<SqlitePool>, Path(id): Path<i64>) -> Result<StatusCode, ApiError> {
-    let result = sqlx::query("DELETE FROM projects WHERE id = ?").bind(id).execute(&pool).await?;
-    if result.rows_affected() == 0 {
-        return Err(ApiError::NotFound);
-    }
-    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Fails with `NotFound` unless the project exists.
