@@ -1,5 +1,5 @@
-//! The admin screen's accounts: every user with their role, a password reset per user, and a
-//! form adding one.
+//! The admin screen's accounts: every user with their role, a password reset and a delete button
+//! per user, and a form adding one.
 
 use leptos::{prelude::*, task::spawn_local};
 use leptos_router::components::A;
@@ -66,6 +66,25 @@ fn UserAdmin() -> impl IntoView {
             users.refetch();
         });
     };
+    let delete = move |user: User| {
+        let question = format!("Delete {}? They are signed out, and their jobs become unassigned.", user.username);
+        if !window().confirm_with_message(&question).unwrap_or(false) {
+            return;
+        }
+        spawn_local(async move {
+            match api::delete(&format!("/api/users/{}", user.id)).await {
+                Ok(()) => {
+                    error.set(None);
+                    notice.set(Some(format!("{} was deleted.", user.username)));
+                }
+                Err(message) => {
+                    error.set(Some(message));
+                    notice.set(None);
+                }
+            }
+            users.refetch();
+        });
+    };
 
     view! {
         <Show when=move || error.get().is_some()>
@@ -81,7 +100,7 @@ fn UserAdmin() -> impl IntoView {
                 <table class="labels users">
                     <thead><tr><th>"Username"</th><th>"Role"</th><th></th></tr></thead>
                     <tbody>
-                        {list.into_iter().map(|user| view! { <UserRow user=user on_change=change /> }).collect_view()}
+                        {list.into_iter().map(|user| view! { <UserRow user=user me=me on_change=change on_delete=delete /> }).collect_view()}
                     </tbody>
                 </table>
             }.into_any(),
@@ -91,8 +110,14 @@ fn UserAdmin() -> impl IntoView {
 }
 
 #[component]
-fn UserRow(user: User, on_change: impl Fn(i64, UserChange) + Copy + Send + Sync + 'static) -> impl IntoView {
+fn UserRow(
+    user: User,
+    me: i64,
+    on_change: impl Fn(i64, UserChange) + Copy + Send + Sync + 'static,
+    on_delete: impl Fn(User) + Copy + Send + Sync + 'static,
+) -> impl IntoView {
     let id = user.id;
+    let to_delete = StoredValue::new(user.clone());
     let resetting = RwSignal::new(false);
     let password = RwSignal::new(String::new());
     let reset = move |ev: leptos::ev::SubmitEvent| {
@@ -120,6 +145,10 @@ fn UserRow(user: User, on_change: impl Fn(i64, UserChange) + Copy + Send + Sync 
                         <button type="button" on:click=move |_| resetting.set(false)>"Cancel"</button>
                     </form>
                 </Show>
+                // Admins cannot delete themselves.
+                {(id != me).then(|| view! {
+                    <button class="delete" on:click=move |_| on_delete(to_delete.get_value())>"Delete"</button>
+                })}
             </td>
         </tr>
     }

@@ -59,3 +59,15 @@ _Avoid_: Backup, dump
 **Pre-annotation**:
 An annotation produced by a model rather than a person, carrying its source and confidence, to be reviewed before it counts.
 _Avoid_: Pseudo-label, auto-label, prediction
+
+**User**:
+A person who signs in to OxiLabel, with exactly one role: Admin or Annotator. "Account" means the same thing.
+_Avoid_: Member
+
+**Admin**:
+A user who manages projects, jobs, models, settings and other users. There is always at least one.
+_Avoid_: Owner, superuser
+
+**Annotator**:
+A user who works only on the jobs assigned to them.
+_Avoid_: Labeler, worker

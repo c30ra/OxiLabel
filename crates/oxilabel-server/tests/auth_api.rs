@@ -154,6 +154,43 @@ async fn changing_an_unknown_user_is_not_found() {
 }
 
 #[tokio::test]
+async fn a_deleted_user_is_signed_out_and_their_jobs_become_unassigned() {
+    let app = test_app().await;
+    let (_, project) = call(&app, Method::POST, "/api/projects", Some(json!({"name": "P"}))).await;
+    let p = project["id"].as_i64().unwrap();
+    std::fs::write(app.images.path().join("a.png"), common_png()).unwrap();
+    call(&app, Method::POST, &format!("/api/projects/{p}/imports"), Some(json!({"paths": ["a.png"]}))).await;
+    let (_, page) = call(&app, Method::GET, &format!("/api/projects/{p}/images"), None).await;
+    let image = page["images"][0]["id"].as_i64().unwrap();
+    let (_, anna) = call(&app, Method::POST, "/api/users", Some(json!({"username": "anna", "password": "anna's password", "role": "annotator"}))).await;
+    let session = login(&app, "anna", "anna's password").await;
+    call(&app, Method::POST, &format!("/api/projects/{p}/jobs"), Some(json!({"image_ids": [image], "assignee": anna["id"]}))).await;
+
+    let uri = format!("/api/users/{}", anna["id"]);
+    assert_eq!(call(&app, Method::DELETE, &uri, None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(call(&session, Method::GET, "/api/projects", None).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(sign_in(&app.anonymous, "/api/login", "anna", "anna's password").await.0, StatusCode::UNAUTHORIZED);
+    let (_, users) = call(&app, Method::GET, "/api/users", None).await;
+    assert_eq!(users.as_array().unwrap().len(), 1);
+    let (_, jobs) = call(&app, Method::GET, &format!("/api/projects/{p}/jobs"), None).await;
+    assert_eq!(jobs[0]["assignee"], json!(null));
+    assert_eq!(call(&app, Method::DELETE, &uri, None).await.0, StatusCode::NOT_FOUND);
+    // The name is free again.
+    let (status, _) = call(&app, Method::POST, "/api/users", Some(json!({"username": "anna", "password": "anna's password", "role": "annotator"}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn admins_cannot_delete_themselves() {
+    let app = test_app().await;
+    call(&app, Method::POST, "/api/users", Some(json!({"username": "anna", "password": "anna's password", "role": "admin"}))).await;
+    let (_, me) = call(&app, Method::GET, "/api/session", None).await;
+    let (status, _) = call(&app, Method::DELETE, &format!("/api/users/{}", me["user"]["id"]), None).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(call(&app, Method::GET, "/api/projects", None).await.0, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn annotators_annotate_but_cannot_reach_admin_actions() {
     let app = test_app().await;
     let (_, project) = call(&app, Method::POST, "/api/projects", Some(json!({"name": "P"}))).await;
@@ -201,6 +238,7 @@ async fn annotators_annotate_but_cannot_reach_admin_actions() {
         (Method::GET, "/api/users".to_owned(), None),
         (Method::POST, "/api/users".to_owned(), Some(json!({"username": "eve", "password": "eve's password", "role": "admin"}))),
         (Method::PUT, "/api/users/1".to_owned(), Some(json!({"password": "taken over!"}))),
+        (Method::DELETE, "/api/users/1".to_owned(), None),
     ] {
         let (status, body) = call(&anna, method.clone(), &uri, body).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri}: {body}");

@@ -1,5 +1,5 @@
-//! The admin screen's accounts: listing them, creating annotators and admins, changing roles and
-//! resetting passwords.
+//! The admin screen's accounts: listing them, creating annotators and admins, changing roles,
+//! resetting passwords and deleting them.
 
 use axum::{
     Json, Router,
@@ -19,7 +19,7 @@ use crate::{
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/users", get(list_users).post(create_user))
-        .route("/api/users/{id}", put(change_user))
+        .route("/api/users/{id}", put(change_user).delete(delete_user))
 }
 
 async fn list_users(_: Admin, State(pool): State<SqlitePool>) -> Result<Json<Vec<User>>, ApiError> {
@@ -86,4 +86,26 @@ async fn change_user(
     let row = sqlx::query("SELECT id, username, role FROM users WHERE id = ?").bind(id).fetch_optional(&mut *tx).await?.ok_or(ApiError::NotFound)?;
     tx.commit().await?;
     Ok(Json(user_from_row(&row)))
+}
+
+/// Deletes another user: their sessions and settings go with them, and their jobs become
+/// unassigned. Admins cannot delete themselves, and the last admin always stays.
+async fn delete_user(Admin(current): Admin, State(pool): State<SqlitePool>, Path(id): Path<i64>) -> Result<StatusCode, ApiError> {
+    if id == current.user.id {
+        return Err(ApiError::Conflict("you cannot delete yourself".to_owned()));
+    }
+    // The count is part of the delete, so two admins cannot delete each other at once; the write
+    // comes first, so the transaction holds the lock while a refusal is told apart from a 404.
+    let mut tx = pool.begin().await?;
+    let deleted = sqlx::query("DELETE FROM users WHERE id = ? AND (role <> 'admin' OR (SELECT COUNT(*) FROM users WHERE role = 'admin') > 1)")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    if deleted == 0 {
+        let exists = sqlx::query("SELECT 1 FROM users WHERE id = ?").bind(id).fetch_optional(&mut *tx).await?.is_some();
+        return Err(if exists { ApiError::Conflict("the last admin must stay".to_owned()) } else { ApiError::NotFound });
+    }
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
 }
