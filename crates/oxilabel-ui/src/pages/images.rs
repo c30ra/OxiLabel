@@ -300,7 +300,7 @@ pub fn ImageSet(project: i64, version: RwSignal<u32>, selected: RwSignal<BTreeSe
                 None => view! { <p class="muted">"Loading…"</p> }.into_any(),
                 Some(Err(message)) => view! { <p class="error" role="alert">{message}</p> }.into_any(),
                 Some(Ok(page)) if page.total == 0 && filter.read_untracked().is_empty() => {
-                    view! { <p class="muted">"No images yet. Use “Import images…” to add some from the server's image folder."</p> }
+                    view! { <p class="muted">"No images yet. Use “Import images…” to add a folder or single images."</p> }
                         .into_any()
                 }
                 Some(Ok(page)) if page.total == 0 => view! { <p class="muted">"No images match the filter."</p> }.into_any(),

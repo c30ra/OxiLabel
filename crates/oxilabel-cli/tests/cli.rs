@@ -28,7 +28,7 @@ fn server() -> Server {
         cache_dir: dirs[0].path().to_owned(),
         export_dir: dirs[1].path().to_owned(),
         upload_dir: dirs[2].path().to_owned(),
-        folder_dialog: None,
+        host_dialog: None,
     };
     let (ready, address) = mpsc::channel();
     std::thread::spawn(move || {

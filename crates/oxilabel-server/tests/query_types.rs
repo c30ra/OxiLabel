@@ -19,10 +19,7 @@ fn round_trip<T: DeserializeOwned>(query: &oxilabel_core::api::QueryPairs) -> T 
 
 #[test]
 fn shared_queries_round_trip_through_the_server_parser() {
-    let browse = BrowseQuery {
-        path: "a folder/one+two".into(),
-        project: Some(7),
-    };
+    let browse = BrowseQuery { path: "a folder/one+two".into() };
     assert_eq!(round_trip::<BrowseQuery>(&browse.to_query()), browse);
 
     let page = ImagePageQuery {

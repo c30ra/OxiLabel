@@ -1,7 +1,7 @@
-//! The server's own machine (ADR 0003): whether a request comes from it, and the desktop's folder
-//! dialog, which only such requests may open.
+//! The server's own machine (ADR 0003): whether a request comes from it, and the desktop's file
+//! dialog for a folder or images, which only such requests may open.
 
-use std::{convert::Infallible, net::SocketAddr};
+use std::{convert::Infallible, net::SocketAddr, path::PathBuf};
 
 use axum::{
     Json, Router,
@@ -9,12 +9,15 @@ use axum::{
     http::request::Parts,
     routing::{get, post},
 };
-use oxilabel_core::api::{FolderDialogReply, HostReply};
+use oxilabel_core::api::{FolderDialogReply, HostReply, ImagesDialogReply};
 
-use crate::{AppState, auth::Admin, error::ApiError};
+use crate::{AppState, HostPick, auth::Admin, error::ApiError};
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/api/host", get(host)).route("/api/host/folder-dialog", post(folder_dialog))
+    Router::new()
+        .route("/api/host", get(host))
+        .route("/api/host/folder-dialog", post(folder_dialog))
+        .route("/api/host/images-dialog", post(images_dialog))
 }
 
 /// Who sent a request: from the server's own machine (over loopback) or from elsewhere. A request
@@ -44,11 +47,24 @@ async fn host(caller: Caller) -> Json<HostReply> {
     Json(HostReply { local: caller.local })
 }
 
+/// A picked path as the server stores it: canonical when it exists.
+fn shown(path: PathBuf) -> String {
+    path.canonicalize().unwrap_or(path).to_string_lossy().into_owned()
+}
+
 /// Opens the desktop's folder dialog on the server's machine and waits for the choice.
 async fn folder_dialog(_: Admin, State(state): State<AppState>, caller: Caller) -> Result<Json<FolderDialogReply>, ApiError> {
     caller.require_local("the folder dialog")?;
-    let dialog = state.folder_dialog.clone().ok_or_else(|| ApiError::Conflict("this server cannot show a folder dialog".into()))?;
-    let picked = dialog().await.map_err(|reason| ApiError::Conflict(format!("the folder dialog could not open: {reason}")))?;
-    let path = picked.map(|path| path.canonicalize().unwrap_or(path).to_string_lossy().into_owned());
-    Ok(Json(FolderDialogReply { path }))
+    let dialog = state.host_dialog.clone().ok_or_else(|| ApiError::Conflict("this server cannot show a folder dialog".into()))?;
+    let picked = dialog(HostPick::Folder).await.map_err(|reason| ApiError::Conflict(format!("the folder dialog could not open: {reason}")))?;
+    Ok(Json(FolderDialogReply { path: picked.into_iter().next().map(shown) }))
+}
+
+/// Opens the desktop's file dialog for one or more images on the server's machine and waits for
+/// the choice.
+async fn images_dialog(_: Admin, State(state): State<AppState>, caller: Caller) -> Result<Json<ImagesDialogReply>, ApiError> {
+    caller.require_local("the file dialog")?;
+    let dialog = state.host_dialog.clone().ok_or_else(|| ApiError::Conflict("this server cannot show a file dialog".into()))?;
+    let picked = dialog(HostPick::Images).await.map_err(|reason| ApiError::Conflict(format!("the file dialog could not open: {reason}")))?;
+    Ok(Json(ImagesDialogReply { paths: picked.into_iter().map(shown).collect() }))
 }

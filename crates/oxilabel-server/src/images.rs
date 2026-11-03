@@ -12,7 +12,7 @@ use axum::{
     routing::{get, post, put},
 };
 use oxilabel_core::{
-    BrowseEntry, BrowseListing, EntryKind, FolderCount, Image, ImageFilter, ImageNeighbours, ImagePage, ImageStatus, ImportFailure, ImportReport, ImportRequest,
+    FolderCount, Image, ImageFilter, ImageNeighbours, ImagePage, ImageStatus, ImportFailure, ImportReport, ImportRequest,
     RemovalReport, RemovalRequest,
     api::{BrowseQuery, ImagePageQuery, NeighboursQuery},
 };
@@ -33,7 +33,6 @@ const MAX_PAGE_SIZE: i64 = 500;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/api/browse", get(browse))
         .route("/api/browse/count", get(count_folder))
         .route(
             "/api/projects/{project}/uploads",
@@ -66,42 +65,6 @@ async fn known_images(conn: &mut SqliteConnection, project: i64) -> Result<Known
         known.hashes.insert(row.get("hash"));
     }
     Ok(known)
-}
-
-async fn browse(_: Admin, State(state): State<AppState>, Query(query): Query<BrowseQuery>) -> Result<Json<BrowseListing>, ApiError> {
-    let root = image_root(&state)?;
-    let folder = resolve(&root, &query.path)?;
-    if !folder.is_dir() {
-        return Err(ApiError::BadRequest(format!("\"{}\" is not a folder", query.path.trim())));
-    }
-    let imported = match query.project {
-        Some(project) => {
-            let mut conn = state.pool.acquire().await?;
-            projects::ensure_exists(&mut conn, project).await?;
-            Some(known_images(&mut conn, project).await?.paths)
-        }
-        None => None,
-    };
-
-    let mut entries = Vec::new();
-    for entry in fs::read_dir(&folder).map_err(|err| ApiError::Internal(format!("cannot list {}: {err}", folder.display())))?.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let Ok(kind) = entry.file_type() else { continue };
-        if name.starts_with('.') {
-            continue;
-        }
-        let path = relative_path(&root, &entry.path());
-        if kind.is_dir() {
-            entries.push(BrowseEntry { name, path, kind: EntryKind::Folder, imported: None });
-        } else if kind.is_file() && is_supported(&entry.path()) {
-            let imported = imported.as_ref().map(|known| known.contains(&path));
-            entries.push(BrowseEntry { name, path, kind: EntryKind::Image, imported });
-        }
-    }
-    entries.sort_by(|a, b| {
-        (a.kind != EntryKind::Folder, a.name.to_lowercase()).cmp(&(b.kind != EntryKind::Folder, b.name.to_lowercase()))
-    });
-    Ok(Json(BrowseListing { path: relative_path(&root, &folder), entries }))
 }
 
 /// How many images a folder holds, subfolders included (what importing it would read).

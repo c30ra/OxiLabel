@@ -66,6 +66,29 @@ async fn a_host_folder_outside_the_image_root_is_counted_and_imported_by_its_abs
 }
 
 #[tokio::test]
+async fn host_images_picked_in_the_dialog_are_imported_where_they_are() {
+    let app = test_app().await;
+    let id = project(&app).await;
+    write(app.picked.path(), "a.png", 1);
+    write(app.picked.path(), "deep/b.png", 2);
+    write(app.picked.path(), "c.png", 3);
+    let folder = app.picked.path().canonicalize().unwrap().to_str().unwrap().to_owned();
+    let chosen = json!([format!("{folder}/a.png"), format!("{folder}/deep/b.png")]);
+
+    let (status, picked) = call(&app.local, Method::POST, "/api/host/images-dialog", None).await;
+    assert_eq!((status, picked), (StatusCode::OK, json!({"paths": chosen})));
+    let (status, report) = call(&app.local, Method::POST, &format!("/api/projects/{id}/imports"), Some(json!({"paths": chosen}))).await;
+    assert_eq!((status, report["added"].clone()), (StatusCode::OK, json!(2)));
+
+    let (_, page) = call(&app, Method::GET, &format!("/api/projects/{id}/images"), None).await;
+    let paths: Vec<&str> = page["images"].as_array().unwrap().iter().map(|image| image["path"].as_str().unwrap()).collect();
+    assert_eq!(json!(paths), chosen, "only the picked images, not c.png");
+
+    let (status, _) = call(&app, Method::POST, "/api/host/images-dialog", None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
 async fn absolute_paths_are_refused_from_other_machines() {
     let app = test_app().await;
     let id = project(&app).await;

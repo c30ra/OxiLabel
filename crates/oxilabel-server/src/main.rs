@@ -19,7 +19,7 @@ async fn main() {
         cache_dir: PathBuf::from(env_or("OXILABEL_CACHE_DIR", "data/cache")),
         export_dir: PathBuf::from(env_or("OXILABEL_EXPORT_DIR", "data/exports")),
         upload_dir: PathBuf::from(env_or("OXILABEL_UPLOAD_DIR", "data/uploads")),
-        folder_dialog: desktop_folder_dialog(),
+        host_dialog: desktop_dialog(),
     };
     let addr = env_or("OXILABEL_ADDR", "0.0.0.0:3000");
     let web_root = env_or("OXILABEL_WEB_ROOT", "crates/oxilabel-ui/dist");
@@ -50,23 +50,24 @@ async fn shutdown_signal() {
     }
 }
 
-/// The desktop's own folder dialog (the XDG desktop portal's file chooser), if this server runs in a
-/// desktop session; headless (e.g. in Podman) there is none. `OXILABEL_FOLDER_DIALOG=off` turns it
-/// off; `OXILABEL_FOLDER_DIALOG=answers:<file>` is for automated tests: each time, the dialog "picks"
-/// the folder named in that file, is cancelled if the file is empty, or fails if it says
-/// `unavailable`.
-fn desktop_folder_dialog() -> Option<oxilabel_server::FolderDialog> {
+/// The desktop's own file dialog (the XDG desktop portal's file chooser) for a folder or images, if
+/// this server runs in a desktop session; headless (e.g. in Podman) there is none.
+/// `OXILABEL_FOLDER_DIALOG=off` turns it off; `OXILABEL_FOLDER_DIALOG=answers:<file>` is for
+/// automated tests: each time, the dialog "picks" the paths in that file, one per line (a folder
+/// pick takes the first), is cancelled if the file is empty, or fails if it says `unavailable`.
+fn desktop_dialog() -> Option<oxilabel_server::HostDialog> {
+    use oxilabel_server::HostPick;
     match std::env::var("OXILABEL_FOLDER_DIALOG").unwrap_or_default().as_str() {
         "off" => return None,
         setting if setting.starts_with("answers:") => {
             let file = PathBuf::from(&setting["answers:".len()..]);
-            return Some(Arc::new(move || {
+            return Some(Arc::new(move |_: HostPick| {
                 let answer = std::fs::read_to_string(&file).unwrap_or_default();
                 Box::pin(async move {
                     match answer.trim() {
-                        "" => Ok(None),
-                        "unavailable" => Err("no folder dialog in this test".to_owned()),
-                        path => Ok(Some(PathBuf::from(path))),
+                        "" => Ok(vec![]),
+                        "unavailable" => Err("no desktop dialog in this test".to_owned()),
+                        paths => Ok(paths.lines().map(str::trim).filter(|line| !line.is_empty()).map(PathBuf::from).collect()),
                     }
                 })
             }));
@@ -74,19 +75,26 @@ fn desktop_folder_dialog() -> Option<oxilabel_server::FolderDialog> {
         _ => {}
     }
     let desktop = ["WAYLAND_DISPLAY", "DISPLAY"].iter().any(|name| std::env::var_os(name).is_some());
-    let dialog: oxilabel_server::FolderDialog = Arc::new(|| {
-        Box::pin(async {
-            use ashpd::desktop::{ResponseError, file_chooser::SelectedFiles};
-            let request = SelectedFiles::open_file()
-                .title("Choose a folder of images")
-                .modal(true)
-                .directory(true)
-                .send()
-                .await
-                .map_err(|err| err.to_string())?;
+    let dialog: oxilabel_server::HostDialog = Arc::new(|pick: HostPick| {
+        Box::pin(async move {
+            use ashpd::desktop::{
+                ResponseError,
+                file_chooser::{FileFilter, SelectedFiles},
+            };
+            let request = SelectedFiles::open_file().modal(true);
+            let request = match pick {
+                HostPick::Folder => request.title("Choose a folder of images").directory(true),
+                HostPick::Images => {
+                    let images = ["image/bmp", "image/jpeg", "image/png", "image/tiff", "image/webp"]
+                        .into_iter()
+                        .fold(FileFilter::new("Images"), FileFilter::mimetype);
+                    request.title("Choose images").multiple(true).filter(images)
+                }
+            };
+            let request = request.send().await.map_err(|err| err.to_string())?;
             match request.response() {
-                Ok(files) => Ok(files.uris().first().and_then(|uri| uri.to_file_path().ok())),
-                Err(ashpd::Error::Response(ResponseError::Cancelled)) => Ok(None),
+                Ok(files) => Ok(files.uris().iter().filter_map(|uri| uri.to_file_path().ok()).collect()),
+                Err(ashpd::Error::Response(ResponseError::Cancelled)) => Ok(vec![]),
                 Err(err) => Err(err.to_string()),
             }
         })

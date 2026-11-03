@@ -21,8 +21,8 @@ pub const ADMIN: (&str, &str) = ("admin", "admin password");
 
 /// A server on an in-memory database with its own temporary image root and cache folder.
 /// Requests through it come from another machine, through `local` from the server's own; both
-/// are signed in as the admin `ADMIN`. `anonymous` is not signed in. Its host folder dialog
-/// "picks" `picked`.
+/// are signed in as the admin `ADMIN`. `anonymous` is not signed in. Its host file dialog "picks"
+/// the folder `picked`, or the images `a.png` and `deep/b.png` in it.
 pub struct TestApp {
     router: Router,
     pub local: Router,
@@ -53,9 +53,12 @@ pub async fn test_app_with_worker(worker_url: Option<String>) -> TestApp {
     let uploads = TempDir::new().unwrap();
     let picked = TempDir::new().unwrap();
     let choice = picked.path().to_owned();
-    let folder_dialog: oxilabel_server::FolderDialog = Arc::new(move || {
-        let choice = choice.clone();
-        Box::pin(async move { Ok(Some(choice)) })
+    let host_dialog: oxilabel_server::HostDialog = Arc::new(move |pick| {
+        let picked = match pick {
+            oxilabel_server::HostPick::Folder => vec![choice.clone()],
+            oxilabel_server::HostPick::Images => vec![choice.join("a.png"), choice.join("deep/b.png")],
+        };
+        Box::pin(async move { Ok(picked) })
     });
     let router = oxilabel_server::app(oxilabel_server::Config {
         database_url: "sqlite::memory:".into(),
@@ -63,7 +66,7 @@ pub async fn test_app_with_worker(worker_url: Option<String>) -> TestApp {
         cache_dir: cache.path().to_owned(),
         export_dir: exports.path().to_owned(),
         upload_dir: uploads.path().to_owned(),
-        folder_dialog: Some(folder_dialog),
+        host_dialog: Some(host_dialog),
     })
     .await
     .unwrap();

@@ -2,6 +2,7 @@ mod archive;
 mod cvat_import;
 mod export;
 mod images;
+mod image_pick;
 mod import;
 mod jobs;
 mod labels;

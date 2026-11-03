@@ -513,32 +513,6 @@ pub struct RemovalReport {
     pub annotations: u64,
 }
 
-/// The folders and images directly inside one folder of the image root.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BrowseListing {
-    /// The listed folder relative to the image root; empty for the root itself.
-    pub path: String,
-    pub entries: Vec<BrowseEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BrowseEntry {
-    pub name: String,
-    pub path: String,
-    pub kind: EntryKind,
-    /// Whether the image is already in the project being imported into; only set for images
-    /// when browsing on behalf of a project.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub imported: Option<bool>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EntryKind {
-    Folder,
-    Image,
-}
-
 /// What an import did: new images added, known ones (same path or same content) skipped,
 /// files that are not images counted, and images that could not be read listed with a reason.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

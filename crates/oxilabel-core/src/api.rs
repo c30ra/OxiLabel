@@ -27,6 +27,13 @@ pub struct FolderDialogReply {
     pub path: Option<String>,
 }
 
+/// The result of the host's file dialog for images: the chosen files' absolute paths, empty if
+/// cancelled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImagesDialogReply {
+    pub paths: Vec<String>,
+}
+
 /// URL query pairs as produced by the shared query types below.
 pub type QueryPairs = Vec<(&'static str, String)>;
 
@@ -55,21 +62,17 @@ fn encode_component(text: &str, output: &mut String) {
     }
 }
 
-/// A folder of the server's image root to browse, optionally marking a project's known images.
+/// A folder whose images `/api/browse/count` counts: relative to the image root, or absolute from
+/// the server's machine (ADR 0003).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowseQuery {
     #[serde(default)]
     pub path: String,
-    pub project: Option<i64>,
 }
 
 impl BrowseQuery {
     pub fn to_query(&self) -> QueryPairs {
-        let mut query = vec![("path", self.path.clone())];
-        if let Some(project) = self.project {
-            query.push(("project", project.to_string()));
-        }
-        query
+        vec![("path", self.path.clone())]
     }
 }
 
@@ -172,7 +175,7 @@ mod tests {
 
     #[test]
     fn query_components_are_percent_encoded() {
-        let query = BrowseQuery { path: "a folder/one+two?".into(), project: None };
+        let query = BrowseQuery { path: "a folder/one+two?".into() };
         assert_eq!(with_query("/api/browse", &query.to_query()), "/api/browse?path=a%20folder%2Fone%2Btwo%3F");
     }
 }

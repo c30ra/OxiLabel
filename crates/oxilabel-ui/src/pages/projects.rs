@@ -1,11 +1,14 @@
 //! The start page: every project as a card (progress, images, labels), and the "New project"
-//! dialog, which can copy another project's labels and import a folder of images at once.
+//! dialog, which can copy another project's labels and import a folder or images at once.
 
 use leptos::{prelude::*, task::spawn_local};
 use leptos_router::{components::A, hooks::use_navigate};
-use oxilabel_core::{FolderCount, ImportReport, ImportRequest, Label, LabelDefinition, NewProject, Project, ProjectSummary, ShapeType, api::BrowseQuery};
+use oxilabel_core::{Label, LabelDefinition, NewProject, Project, ProjectSummary, ShapeType};
 
-use super::archive::ImportArchiveDialog;
+use super::{
+    archive::ImportArchiveDialog,
+    image_pick::{ImagePick, ImagePicker, import_pick, pick_count},
+};
 use crate::{
     account::{AccountMenu, is_admin},
     api,
@@ -109,20 +112,8 @@ fn ProjectCard(project: ProjectSummary, admin: bool, on_delete: impl Fn(ProjectS
     }
 }
 
-/// The folder of images a new project starts with (ADR 0003): one on the server's machine,
-/// imported where it is, or one picked in this browser, whose images are uploaded.
-#[derive(Clone)]
-enum Pick {
-    Host(String),
-    Browser { name: String, files: Vec<web_sys::File> },
-}
-
-/// Images uploaded per request, so a big folder goes in pieces with progress.
-const UPLOAD_BATCH: usize = 16;
-const IMAGE_EXTENSIONS: [&str; 7] = ["bmp", "jpeg", "jpg", "png", "tif", "tiff", "webp"];
-
-/// Name, where the labels come from, and optionally a folder to import; creating opens the
-/// new project.
+/// Name, where the labels come from, and optionally images to import; creating opens the new
+/// project.
 #[component]
 fn NewProjectDialog(sources: Vec<ProjectSummary>, on_close: impl Fn() + Copy + Send + Sync + 'static) -> impl IntoView {
     let name = RwSignal::new(String::new());
@@ -140,61 +131,11 @@ fn NewProjectDialog(sources: Vec<ProjectSummary>, on_close: impl Fn() + Copy + S
         }
         label_draft.set(String::new());
     };
-    let pick = RwSignal::new_local(None::<Pick>);
+    let pick = RwSignal::new_local(None::<ImagePick>);
+    let count = pick_count(pick);
     let busy = RwSignal::new(None::<String>);
     let error = RwSignal::new(None::<String>);
-    let browser_input = NodeRef::<leptos::html::Input>::new();
-    let count = LocalResource::new(move || {
-        let path = pick.with(|pick| match pick {
-            Some(Pick::Host(path)) => Some(path.clone()),
-            _ => None,
-        });
-        async move {
-            match path {
-                Some(path) => api::get_with_query::<FolderCount>("/api/browse/count", &BrowseQuery { path, project: None }.to_query()).await.map(Some),
-                None => Ok(None),
-            }
-        }
-    });
     let navigate = StoredValue::new(use_navigate());
-
-    // A folder dialog rather than a file one (there is no view! syntax for this attribute).
-    Effect::new(move |_| {
-        if let Some(input) = browser_input.get() {
-            input.set_attribute("webkitdirectory", "").ok();
-        }
-    });
-    let pick_in_browser = move || {
-        if let Some(input) = browser_input.get_untracked() {
-            input.click();
-        }
-    };
-    let browse = move |_| {
-        spawn_local(async move {
-            // On the server's machine the server shows the desktop's dialog.
-            if !api::on_server_machine().await {
-                return pick_in_browser();
-            }
-            match api::host_folder_dialog().await {
-                Ok(Some(path)) => pick.set(Some(Pick::Host(path))),
-                Ok(None) => {}
-                // No dialog on this server (e.g. headless): the browser's own, with an upload.
-                Err(_) => pick_in_browser(),
-            }
-        });
-    };
-    let on_browser_pick = move |ev: leptos::ev::Event| {
-        let input: web_sys::HtmlInputElement = event_target(&ev);
-        let Some(list) = input.files() else { return };
-        let files: Vec<web_sys::File> = (0..list.length()).filter_map(|i| list.get(i)).filter(|file| is_image(&file.name())).collect();
-        // The picked folder's name, from the files' paths inside it (none if only files came).
-        let name = files
-            .first()
-            .map(relative_path)
-            .and_then(|path| path.split_once('/').map(|(folder, _)| folder.to_owned()))
-            .unwrap_or_else(|| "Selected files".to_owned());
-        pick.set(Some(Pick::Browser { name, files }));
-    };
 
     let create = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
@@ -224,56 +165,27 @@ fn NewProjectDialog(sources: Vec<ProjectSummary>, on_close: impl Fn() + Copy + S
                     return error.set(Some(format!("“{}” was created, but not its label “{}”: {message}", project.name, definition.name)));
                 }
             }
-            match picked {
-                Some(Pick::Host(path)) => {
-                    busy.set(Some("Importing…".into()));
-                    let request = ImportRequest { paths: vec![path] };
-                    // The project exists either way; an import problem can be retried on its page.
-                    api::post::<_, ImportReport>(&format!("/api/projects/{}/imports", project.id), &request).await.ok();
+            if let Some(chosen) = picked {
+                if let Err(message) = import_pick(project.id, chosen, move |step| busy.set(Some(step))).await {
+                    // The project exists; say what happened rather than leave silently.
+                    busy.set(None);
+                    return error.set(Some(format!("“{}” was created, but the import stopped: {message}", project.name)));
                 }
-                Some(Pick::Browser { files, .. }) => {
-                    let url = format!("/api/projects/{}/uploads", project.id);
-                    for (done, batch) in files.chunks(UPLOAD_BATCH).enumerate() {
-                        busy.set(Some(format!("Uploading {} / {}…", done * UPLOAD_BATCH, files.len())));
-                        let Ok(form) = web_sys::FormData::new() else { break };
-                        for file in batch {
-                            form.append_with_blob_and_filename("file", file, &relative_path(file)).ok();
-                        }
-                        if let Err(message) = api::post_form::<ImportReport>(&url, form).await {
-                            // The project exists; say what happened rather than leave silently.
-                            busy.set(None);
-                            return error.set(Some(format!("“{}” was created, but the upload stopped: {message}", project.name)));
-                        }
-                    }
-                }
-                None => {}
             }
             navigate.with_value(|navigate| navigate(&format!("/projects/{}", project.id), Default::default()));
         });
-    };
-    let count_text = move || match (pick.get(), count.get()) {
-        (Some(Pick::Browser { files, .. }), _) => {
-            format!("{} image{} to upload from this browser", files.len(), if files.len() == 1 { "" } else { "s" })
-        }
-        (Some(Pick::Host(_)), Some(Ok(Some(found)))) => format!("{} image{} found", found.images, if found.images == 1 { "" } else { "s" }),
-        (Some(Pick::Host(_)), Some(Err(message))) => message,
-        _ => String::new(),
     };
     let submit_text = move || {
         if let Some(step) = busy.get() {
             return step;
         }
-        match (pick.get(), count.get()) {
-            (Some(Pick::Browser { files, .. }), _) => format!("Create and upload {}", files.len()),
-            (Some(Pick::Host(_)), Some(Ok(Some(found)))) => format!("Create and import {}", found.images),
+        let uploads = pick.with(|pick| pick.as_ref().map(ImagePick::uploads));
+        match (uploads, count.get()) {
+            (Some(true), Some(Ok(Some(n)))) => format!("Create and upload {n}"),
+            (Some(false), Some(Ok(Some(n)))) => format!("Create and import {n}"),
             (Some(_), _) => "Create and import".to_owned(),
             (None, _) => "Create".to_owned(),
         }
-    };
-    let shown_folder = move || match pick.get() {
-        Some(Pick::Host(path)) => format!("{}/", path.trim_end_matches('/')),
-        Some(Pick::Browser { name, .. }) => format!("{name}/"),
-        None => String::new(),
     };
 
     view! {
@@ -343,17 +255,7 @@ fn NewProjectDialog(sources: Vec<ProjectSummary>, on_close: impl Fn() + Copy + S
 
                     <div class="field">
                         <span>"Images " <span class="muted">"(optional)"</span></span>
-                        <span class="folder-row">
-                            <input class="mono" readonly placeholder="No folder: import later" prop:value=shown_folder />
-                            <Show when=move || pick.with(Option::is_some)>
-                                <button type="button" on:click=move |_| pick.set(None)>"Clear"</button>
-                            </Show>
-                            <button type="button" on:click=browse>"Browse…"</button>
-                        </span>
-                        <span class="folder-count">{count_text}</span>
-                        // The browser's own folder dialog, for when the server cannot show one.
-                        <input type="file" class="pick-folder" node_ref=browser_input multiple hidden
-                            on:change=on_browser_pick />
+                        <ImagePicker pick=pick count=count placeholder="Nothing chosen: import later" />
                     </div>
 
                     <Show when=move || error.get().is_some()>
@@ -367,17 +269,6 @@ fn NewProjectDialog(sources: Vec<ProjectSummary>, on_close: impl Fn() + Copy + S
             </form>
         </div>
     }
-}
-
-fn is_image(name: &str) -> bool {
-    name.rsplit_once('.').is_some_and(|(_, ext)| IMAGE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
-}
-
-/// A file's path inside the folder picked in the browser ("folder/sub/name.png").
-fn relative_path(file: &web_sys::File) -> String {
-    let path = web_sys::js_sys::Reflect::get(file, &"webkitRelativePath".into()).ok().and_then(|path| path.as_string());
-    // Empty for files given without their folder.
-    path.filter(|path| !path.is_empty()).unwrap_or_else(|| file.name())
 }
 
 /// Colors new labels get in turn.

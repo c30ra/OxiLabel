@@ -48,19 +48,27 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
 
-/// Opens the desktop's folder dialog on the server's machine: the chosen folder, or none if it
-/// was cancelled.
-pub type FolderDialog = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<Option<PathBuf>, String>> + Send>> + Send + Sync>;
+/// What the desktop's file dialog picks: one folder, or one or more images.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostPick {
+    Folder,
+    Images,
+}
+
+/// Opens the desktop's file dialog on the server's machine: the chosen paths (empty if it was
+/// cancelled), or why it could not open.
+pub type HostDialog = Arc<dyn Fn(HostPick) -> Pin<Box<dyn Future<Output = Result<Vec<PathBuf>, String>> + Send>> + Send + Sync>;
 
 pub struct Config {
     pub database_url: String,
-    /// The folder the server's own folder browser shows; requests from the server's machine may
-    /// also import any folder by its absolute path (ADR 0003).
+    /// Relative image paths (as CVAT and archive imports look for them) are found under this
+    /// folder; requests from the server's machine may also import any folder or image by its
+    /// absolute path (ADR 0003).
     pub images_root: PathBuf,
     /// Images uploaded from other machines are kept here.
     pub upload_dir: PathBuf,
-    /// How to show the desktop's folder dialog, if the server runs on a desktop.
-    pub folder_dialog: Option<FolderDialog>,
+    /// How to show the desktop's file dialog, if the server runs on a desktop.
+    pub host_dialog: Option<HostDialog>,
     /// Generated thumbnails and tiles live here; safe to delete.
     pub cache_dir: PathBuf,
     /// Exports are written into folders here.
@@ -72,7 +80,7 @@ struct AppState {
     pool: SqlitePool,
     images_root: PathBuf,
     upload_dir: PathBuf,
-    folder_dialog: Option<FolderDialog>,
+    host_dialog: Option<HostDialog>,
     cache_dir: PathBuf,
     export_dir: PathBuf,
     pyramid_locks: tiles::GenerationLocks,
@@ -107,7 +115,7 @@ pub async fn app(config: Config) -> Result<Router, sqlx::Error> {
         pool,
         images_root: config.images_root,
         upload_dir: config.upload_dir,
-        folder_dialog: config.folder_dialog,
+        host_dialog: config.host_dialog,
         cache_dir: config.cache_dir,
         export_dir: config.export_dir,
         pyramid_locks: tiles::GenerationLocks::default(),

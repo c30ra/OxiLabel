@@ -172,7 +172,7 @@ fn GetStarted(project: i64, on_import: impl Fn() + Copy + Send + Sync + 'static)
                     <span class="mark">"2"</span>
                     <span class="text">
                         <strong>"Images"</strong>
-                        <span class="muted">"Import from folders of the server's image folder; nothing is copied."</span>
+                        <span class="muted">"A folder or single images: on the server's machine they stay where they are, otherwise they are uploaded."</span>
                     </span>
                     {is_admin().then(|| view! { <button class="primary" on:click=move |_| on_import()>"Import images…"</button> })}
                 </li>

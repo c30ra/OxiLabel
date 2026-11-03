@@ -26,10 +26,6 @@ async fn import(app: &TestApp, project: i64, folder: &str) -> (StatusCode, Value
     import_selection(app, project, &[folder]).await
 }
 
-async fn browse(app: &TestApp, path: &str) -> (StatusCode, Value) {
-    call(app, Method::GET, &format!("/api/browse?path={path}"), None).await
-}
-
 async fn list(app: &TestApp, project: i64, query: &str) -> Value {
     let (status, page) = call(app, Method::GET, &format!("/api/projects/{project}/images{query}"), None).await;
     assert_eq!(status, StatusCode::OK);
@@ -108,8 +104,6 @@ async fn paths_outside_the_image_root_are_refused() {
         let (status, body) = import(&app, project, path).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
         assert_eq!(body["error"], "path must be inside the image root", "{path}");
-        let (status, _) = browse(&app, path).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "browse {path}");
     }
     // An absolute path is a host folder: only for the server's own machine (see host_api.rs).
     let (status, _) = import(&app, project, "/etc").await;
@@ -160,40 +154,6 @@ async fn an_image_selected_together_with_its_folder_is_counted_once() {
 
     let (_, report) = import_selection(&app, project, &["batch", "batch/a.png"]).await;
     assert_eq!(report, json!({"added": 1, "skipped": 0, "unsupported": 0, "failed": []}));
-}
-
-#[tokio::test]
-async fn browsing_lists_folders_first_then_images_and_hides_other_files() {
-    let app = test_app().await;
-    write_png(app.images.path(), "set/b.png", 2, 2, 1);
-    write_png(app.images.path(), "set/A.png", 2, 2, 2);
-    write_png(app.images.path(), "set/zeta/c.png", 2, 2, 3);
-    std::fs::create_dir_all(app.images.path().join("set/alpha")).unwrap();
-    std::fs::write(app.images.path().join("set/readme.txt"), b"hi").unwrap();
-    std::fs::write(app.images.path().join("set/.hidden.png"), b"hi").unwrap();
-
-    let (status, listing) = browse(&app, "set").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        listing,
-        json!({
-            "path": "set",
-            "entries": [
-                {"name": "alpha", "path": "set/alpha", "kind": "folder"},
-                {"name": "zeta", "path": "set/zeta", "kind": "folder"},
-                {"name": "A.png", "path": "set/A.png", "kind": "image"},
-                {"name": "b.png", "path": "set/b.png", "kind": "image"}
-            ]
-        })
-    );
-}
-
-#[tokio::test]
-async fn browsing_without_a_path_lists_the_image_root() {
-    let app = test_app().await;
-    write_png(app.images.path(), "set/b.png", 2, 2, 1);
-    let (_, listing) = call(&app, Method::GET, "/api/browse", None).await;
-    assert_eq!(listing, json!({"path": "", "entries": [{"name": "set", "path": "set", "kind": "folder"}]}));
 }
 
 #[tokio::test]
@@ -276,24 +236,6 @@ async fn thumbnail_of_an_unknown_image_is_not_found() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
-#[tokio::test]
-async fn browsing_for_a_project_marks_images_already_imported() {
-    let app = test_app().await;
-    let project = new_project(&app).await;
-    write_png(app.images.path(), "set/old.png", 2, 2, 1);
-    import(&app, project, "set/old.png").await;
-    write_png(app.images.path(), "set/new.png", 2, 2, 2);
-
-    let (_, listing) = call(&app, Method::GET, &format!("/api/browse?path=set&project={project}"), None).await;
-    assert_eq!(
-        listing["entries"],
-        json!([
-            {"name": "new.png", "path": "set/new.png", "kind": "image", "imported": false},
-            {"name": "old.png", "path": "set/old.png", "kind": "image", "imported": true}
-        ])
-    );
-}
-
 async fn remove(app: &TestApp, project: i64, ids: &[i64]) -> (StatusCode, Value) {
     call(app, Method::POST, &format!("/api/projects/{project}/image-removals"), Some(json!({"ids": ids}))).await
 }
@@ -330,8 +272,6 @@ async fn removed_images_can_be_imported_again() {
     import(&app, project, "set").await;
     remove(&app, project, &ids(&list(&app, project, "").await)).await;
 
-    let (_, listing) = call(&app, Method::GET, &format!("/api/browse?path=set&project={project}"), None).await;
-    assert_eq!(listing["entries"][0]["imported"], false);
     let (_, report) = import(&app, project, "set").await;
     assert_eq!(report["added"], 1);
 }

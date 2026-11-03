@@ -4,7 +4,7 @@ use std::cell::RefCell;
 
 use gloo_net::http::{Request, RequestBuilder, Response};
 use leptos::prelude::{Callable, Callback};
-use oxilabel_core::api::{ErrorReply, FolderDialogReply, HostReply, QueryPairs};
+use oxilabel_core::api::{ErrorReply, FolderDialogReply, HostReply, ImagesDialogReply, QueryPairs};
 use serde::{Serialize, de::DeserializeOwned};
 
 thread_local! {
@@ -157,4 +157,10 @@ pub async fn on_server_machine() -> bool {
 /// none if cancelled, or an error if the server cannot show one.
 pub async fn host_folder_dialog() -> Result<Option<String>, String> {
     post::<_, FolderDialogReply>("/api/host/folder-dialog", &()).await.map(|picked| picked.path)
+}
+
+/// Shows the desktop's file dialog for images on the server's machine: the chosen files' absolute
+/// paths (empty if cancelled), or an error if the server cannot show one.
+pub async fn host_images_dialog() -> Result<Vec<String>, String> {
+    post::<_, ImagesDialogReply>("/api/host/images-dialog", &()).await.map(|picked| picked.paths)
 }

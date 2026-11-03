@@ -4,8 +4,8 @@
 [env]
 OXILABEL_ADDR = "127.0.0.1:3111"
 OXILABEL_WEB_ROOT = "{{config_root}}/crates/oxilabel-ui/dist"
-# The folder the import dialog browses (here the author's defect_detection project next to OxiLabel).
-# From this machine, Browse… in the New project dialog opens the desktop's own folder dialog.
+# Where CVAT and archive imports look for images (here the author's defect_detection project next to OxiLabel).
+# From this machine, Folder… and Images… in the import dialogs open the desktop's own file dialog.
 OXILABEL_IMAGES_ROOT = "{{config_root}}/../../python/defect_detection"
 OXILABEL_DATABASE = "sqlite://{{config_root}}/data/oxilabel.db?mode=rwc"
 OXILABEL_CACHE_DIR = "{{config_root}}/data/cache"

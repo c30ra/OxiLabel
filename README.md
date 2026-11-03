@@ -31,14 +31,12 @@ which becomes the admin.
 `/data` holds the database (`oxilabel.db`), tile and thumbnail caches, uploaded images and exports.
 Keep it on a volume.
 
-Images can be uploaded from the browser on any machine. The server keeps a copy of each in `/data`,
-and identical files are stored once. For large datasets already on the server machine, you can
-mount them at `/images` instead (read-only is enough), for example by adding
-`-v /path/to/your/datasets:/images:ro` to the command above:
+Images can be uploaded from the browser on any machine: the import dialogs take one folder or one or
+more images. The server keeps a copy of each in `/data`, and identical files are stored once.
 
-- The import dialog then browses that folder, and images are referenced where they are, never
-  copied.
-- CVAT and project-archive imports also look there for the images an export only refers to.
+CVAT and project-archive imports look for the images an export only refers to in `/images`. To use
+datasets already on the server machine there, mount them (read-only is enough), for example by
+adding `-v /path/to/your/datasets:/images:ro` to the command above.
 
 To update, pull the new image and recreate the container with the same volumes:
 
@@ -73,12 +71,12 @@ The server reads these environment variables. The container sets the paths to `/
 | --- | --- | --- |
 | `OXILABEL_ADDR` | `0.0.0.0:3000` | Address and port to listen on |
 | `OXILABEL_DATABASE` | `sqlite://data/oxilabel.db?mode=rwc` | SQLite database URL |
-| `OXILABEL_IMAGES_ROOT` | `images` | Folder that image imports browse |
+| `OXILABEL_IMAGES_ROOT` | `images` | Folder where CVAT and archive imports look for images |
 | `OXILABEL_CACHE_DIR` | `data/cache` | Tile and thumbnail cache |
 | `OXILABEL_UPLOAD_DIR` | `data/uploads` | Images uploaded from the browser |
 | `OXILABEL_EXPORT_DIR` | `data/exports` | Finished exports |
 | `OXILABEL_WEB_ROOT` | `crates/oxilabel-ui/dist` | Built web UI |
-| `OXILABEL_FOLDER_DIALOG` | on | `off` disables the desktop folder picker (it's never available in a container) |
+| `OXILABEL_FOLDER_DIALOG` | on | `off` disables the desktop file dialog for folders and images (it's never available in a container) |
 
 The session cookie has no `Secure` flag, so the server can be used over plain HTTP on a local
 network. To reach it over the internet, put it behind a reverse proxy that terminates HTTPS.

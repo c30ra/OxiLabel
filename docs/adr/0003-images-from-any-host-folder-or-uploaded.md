@@ -13,5 +13,6 @@ The browser alone cannot do this: its folder dialog shows the files of the machi
 
 ## Consequences
 
-- Image paths are either relative to the image root (imports through the server's folder browser) or absolute (host dialog, uploads).
+- Image paths are either relative to the image root (CVAT and archive imports) or absolute (host dialog, uploads).
+- The same goes for single images: on the server's machine the desktop's file dialog picks one or more, referenced where they are; otherwise the browser's file dialog picks them and they are uploaded. The server-side folder browser of the image root is gone.
 - A dataset picked on another machine is copied once to the server; deduplication by content hash keeps re-uploads from doubling it.
